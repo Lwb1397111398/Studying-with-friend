@@ -1,5 +1,6 @@
 package com.studyfriend.app.data.study
 
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.db.ChapterAssetEntity
 import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
@@ -81,24 +82,24 @@ object TaggedBundleParser {
 
 // ---------- 输入组装（计划 M5 §2.1：只喂讲解要点而非全文 + 总量预算硬顶） ----------
 
-/** user 消息总字数预算（评审 P1-1）：超预算按档降级重建 */
-private const val INPUT_BUDGET = 24_000
+/** user 消息总字数预算（评审 P1-1，后随十万级上下文放宽）：超预算按档降级重建 */
+private val INPUT_BUDGET = AiBudgets.INPUT_CHARS_MAX
 
-/** >120 段为支持边界（终档地板）：前 120 段保留 text/note，其余只留 id+act */
-private const val TIER4_LIMIT = 120
+/** >400 段为支持边界（终档地板）：前 400 段保留 text/note，其余只留 id+act */
+private const val TIER4_LIMIT = 400
 
 /** 档 0-3 规格：Triple(讲解段 text 长度, SKIP 段 text 长度或 null=不带, note friendly 长度或 0=只留 title) */
 private val TIERS = listOf(
-    Triple(500, 60, 200),
-    Triple(300, null, 100),
-    Triple(150, null, 50),
-    Triple(80, null, 0),
+    Triple(2000, 300, 400),
+    Triple(1000, null, 200),
+    Triple(400, null, 80),
+    Triple(120, null, 0),
 )
 
 /**
  * 组装总结包 user JSON。noteByAnchorIdx 以讲解卡锚段 idx 为键（调用方经
  * enumerateUnits + ParaIdsCodec 归位），保证 note 只挂在锚段条目上。
- * 确定性降级：档 0 起逐档重建，≤24K 即用；档 4 为终档（评审 P2-3）。
+ * 确定性降级：档 0 起逐档重建，≤预算即用；档 4 为终档（评审 P2-3）。
  */
 fun buildSummaryUserJson(
     title: String,

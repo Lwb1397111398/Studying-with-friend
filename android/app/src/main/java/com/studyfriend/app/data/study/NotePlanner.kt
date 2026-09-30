@@ -31,15 +31,15 @@ class NoteOutcome(
 )
 
 /**
- * 段落讲解批量流水线（计划 M4b §2.4）：枚举 → 孤儿清理 → 缓存判定 →
- * 逐单元 chatJson（单元级重试、401/403/404 直断）→ 先删后插（同 paraIds 唯一）→ 即时落库断点。
- * 串行执行，全部 IO 在 Dispatchers.IO。
+ * 段落讲解批量流水线（计划 M4b §2.4；v2 输出改标签文本）：枚举 → 孤儿清理 → 缓存判定 →
+ * 逐单元 chat 文本流（单元级重试、401/403/404 直断）→ 标签解析 → 先删后插（同 paraIds 唯一）→
+ * 即时落库断点。串行执行，全部 IO 在 Dispatchers.IO。
  */
 class NotePlanner(
     private val db: StudyDatabase,
     private val context: Context,
     private val settings: SettingsRepository,
-    private val chatJsonFn: ChatJsonFn,
+    private val chatTextFn: ChatTextFn,
 ) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -131,7 +131,7 @@ class NotePlanner(
         key: String,
     ): ParaNoteEntity {
         var lastError: Exception? = null
-        repeat(ATTEMPTS) {
+        repeat(ATTEMPTS) { attempt ->
             try {
                 return runUnitOnce(unit, chapter, paragraphs, systemPrompt, cfg, key)
             } catch (e: CancellationException) {
@@ -144,6 +144,7 @@ class NotePlanner(
             } catch (e: Exception) {
                 lastError = e
             }
+            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError)
         }
         throw lastError ?: PlannerException("本单元讲解失败")
     }
@@ -174,17 +175,20 @@ class NotePlanner(
             }
             append("]}")
         }
-        val plan = chatJsonFn(
-            ChatRequest(
-                baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
-                temperature = 0.5, maxTokens = 2000,
-                messages = listOf(
-                    AiMessage("system", systemPrompt),
-                    AiMessage("user", userJson),
+        val plan = NoteTaggedParser.parse(
+            chatTextFn(
+                ChatRequest(
+                    baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
+                    temperature = 0.5,
+                    // 推理型模型的思考 token 计入 max_tokens：讲解卡主体长，预算须给足
+                    maxTokens = 10_000,
+                    messages = listOf(
+                        AiMessage("system", systemPrompt),
+                        AiMessage("user", userJson),
+                    ),
                 ),
-            ),
-            NotePlan.serializer(),
-        ) { }
+            ) { },
+        ) ?: throw PlannerException("讲解输出缺少 <讲解> 标签")
         val n = NoteParser.normalize(plan, anchor.text)
         return ParaNoteEntity(
             chapterId = chapter.id,
@@ -203,7 +207,7 @@ class NotePlanner(
 
     companion object {
         const val PROMPT_NOTE = "explain_note"
-        const val NOTE_VERSION = "explain-note-v1"
+        const val NOTE_VERSION = "explain-note-v2"
         const val ATTEMPTS = 3
         val UNRETRYABLE = setOf(401, 403, 404)
     }

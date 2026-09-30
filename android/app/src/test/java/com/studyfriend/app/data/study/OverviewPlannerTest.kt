@@ -125,7 +125,7 @@ class OverviewPlannerTest {
         Json.parseToJsonElement(userMsg)
         assertTrue("只收已总结章", userMsg.contains("第1 章总结"))
         assertEquals("temp 0.5", 0.5, fake.requests[0].temperature, 0.0)
-        assertEquals("maxTokens 4000", 4000, fake.requests[0].maxTokens)
+        assertEquals("maxTokens 16000", 16_000, fake.requests[0].maxTokens)
         val payload = OverviewCodec.decode(db.bookDao().getOverviewJson(bookId))!!
         assertTrue(payload.overviewMd.contains("层层推进"))
         assertTrue(payload.treeText.contains("行为能力"))
@@ -187,21 +187,21 @@ class OverviewPlannerTest {
         assertNull(db.bookDao().getOverviewJson(bookId))
     }
 
-    // ---------- 5. 预算截断：>20 章取前 20 + truncated 标记 ----------
+    // ---------- 5. 预算截断：>120 章取前 120 + truncated 标记 ----------
 
     @Test
-    fun moreThanTwentyChapters_takesFirst20WithTruncatedFlag(): Unit = runBlocking {
+    fun moreThanChapterLimit_takesFirst120WithTruncatedFlag(): Unit = runBlocking {
         val bookId = seedBook()
-        repeat(25) { i -> seedSummarizedChapter(bookId, i + 1) }
+        repeat(125) { i -> seedSummarizedChapter(bookId, i + 1) }
         val fake = FakeChatText()
 
         planner(fake).run(bookId)
 
         val userMsg = fake.requests[0].messages.last { it.role == "user" }.content
-        assertEquals("只取前 20 章", 20, Regex("\\{\"idx\":").findAll(userMsg).count())
+        assertEquals("只取前 120 章", 120, Regex("\\{\"idx\":").findAll(userMsg).count())
         assertTrue("附 truncated 标记", userMsg.contains("\"truncated\":true"))
-        assertTrue(userMsg.contains("\"idx\":20"))
-        assertTrue("第 21 章不进输入", !userMsg.contains("\"idx\":21"))
+        assertTrue(userMsg.contains("\"idx\":120"))
+        assertTrue("第 121 章不进输入", !userMsg.contains("\"idx\":121"))
     }
 
     // ---------- 6. 取消中断：零落库 ----------

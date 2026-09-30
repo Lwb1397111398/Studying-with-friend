@@ -1,5 +1,6 @@
 package com.studyfriend.app.data.study
 
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.db.ChapterAssetEntity
 import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
@@ -152,8 +153,8 @@ class SummaryModelsTest {
     @Test
     fun input_skipBudgetAtTier0AndNoteOnlyOnAnchor() {
         val paras = listOf(
-            para(0, "EXPLAIN", 1000),
-            para(1, "SKIP", 100),
+            para(0, "EXPLAIN", 3000),
+            para(1, "SKIP", 400),
             para(2, "GROUP", 800, groupId = 2L),
             para(3, "GROUP", 800, groupId = 2L), // 组员非锚：不带 note
             para(4, "NONE", 500), // NONE 不进输入
@@ -166,9 +167,9 @@ class SummaryModelsTest {
         val json = buildSummaryUserJson("第一章", "梗概", listOf("行为能力"), paras, mapOf(2 to anchorNote))
 
         val skipText = Regex("\"id\":1,\"act\":\"skip\",\"text\":\"(段+)\"").find(json)!!.groupValues[1]
-        assertEquals("SKIP 段只带 60 字", 60, skipText.length)
+        assertEquals("SKIP 段只带 300 字", 300, skipText.length)
         val explainText = Regex("\"id\":0,\"act\":\"explain\",\"text\":\"(段+)\"").find(json)!!.groupValues[1]
-        assertEquals("档 0 讲解段 500 字", 500, explainText.length)
+        assertEquals("档 0 讲解段 2000 字", 2000, explainText.length)
         assertTrue("锚段带 note", json.contains("能力三档讲"))
         assertFalse("组员不带 note", json.substringAfter("能力三档讲").contains("\"note\""))
         assertFalse("NONE 段不进输入", json.contains("\"id\":4"))
@@ -176,10 +177,11 @@ class SummaryModelsTest {
 
     @Test
     fun input_overlongChapterDowngradesWithinBudget() {
-        // 100 段全 EXPLAIN、每段 400 字：档 0 直接爆预算，必须逐档降级到 ≤24K
-        val paras = (0 until 100).map { para(it, "EXPLAIN", 400) }
+        // 400 段全 EXPLAIN、每段 1000 字：档 0/1/2 依次爆预算，必须逐档降级到 ≤10 万
+        val paras = (0 until 400).map { para(it, "EXPLAIN", 1000) }
         val json = buildSummaryUserJson("长章", null, emptyList(), paras, emptyMap())
-        assertTrue("总字数 ${json.length} 应 ≤24000", json.length <= 24_000)
+        assertTrue("总字数 ${json.length} 应 ≤${AiBudgets.INPUT_CHARS_MAX}", json.length <= AiBudgets.INPUT_CHARS_MAX)
+        assertTrue("确实发生了降级（终档每段 120 字）", json.length < 100_000)
     }
 
     @Test
@@ -187,6 +189,6 @@ class SummaryModelsTest {
         val paras = (0 until 5).map { para(it, "EXPLAIN", 100) }
         val json = buildSummaryUserJson("短章", "梗概", emptyList(), paras, emptyMap())
         assertTrue("小章不降级：每段全文 100 字保留", json.contains("段".repeat(100)))
-        assertTrue(json.length < 24_000)
+        assertTrue(json.length < 3_000)
     }
 }

@@ -56,6 +56,19 @@ fun SettingsScreen(vm: SettingsViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
             )
+
+            // 快捷预设：一键填入服务商地址与推荐模型（保存前不落库）
+            Text("快速填入", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsRepository.PRESETS.forEach { (label, base, model) ->
+                    FilterChip(
+                        selected = vm.baseUrl == base && vm.model == model,
+                        onClick = { vm.applyPreset(base, model) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+
             OutlinedTextField(
                 value = vm.keyInput,
                 onValueChange = { vm.keyInput = it },

@@ -4,6 +4,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -141,6 +142,8 @@ object AiClient {
         } catch (e: Exception) {
             if (e is CancellationException) throw e
         }
+        // 立刻重打常撞限流窗口；稍等片刻再要 JSON（推理模型输出长，也给网关喘息）
+        delay(1_500)
         val retryReq = req.copy(
             messages = req.messages +
                 AiMessage("assistant", first.take(2000)) +

@@ -83,6 +83,13 @@ class SettingsRepository(
         const val DEFAULT_BASE = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"
 
+        /** 快捷预设（label, baseUrl, model）：设置页一键填入，保存前不落库 */
+        val PRESETS = listOf(
+            Triple("商汤 · GLM-5.2（推荐）", "https://token.sensenova.cn/v1", "glm-5.2"),
+            Triple("商汤 · DeepSeek-V4", "https://token.sensenova.cn/v1", "deepseek-v4-flash"),
+            Triple("商汤 · Flash-Lite（快）", "https://token.sensenova.cn/v1", "sensenova-6.8-flash-lite"),
+        )
+
         /** 仅供测试/协议演示生成密钥；线上走 AndroidKeyStore */
         fun newProtocolKey(): SecretKey = SecretCrypto.newKey()
     }

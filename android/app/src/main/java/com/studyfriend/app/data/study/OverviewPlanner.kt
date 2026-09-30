@@ -102,7 +102,9 @@ class OverviewPlanner(
         userJson: String,
     ) = ChatRequest(
         baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
-        temperature = 0.5, maxTokens = 4000,
+        temperature = 0.5,
+        // 推理型模型的思考 token 计入 max_tokens：三件套输出长，预算须给足
+        maxTokens = 16_000,
         messages = listOf(AiMessage("system", systemPrompt), AiMessage("user", userJson)),
     )
 

@@ -1,5 +1,6 @@
 package com.studyfriend.app.data.study
 
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.db.ChapterAssetEntity
 import com.studyfriend.app.data.db.ChapterEntity
 import com.studyfriend.app.mindmap.TreeText
@@ -60,14 +61,14 @@ object OverviewParser {
 
 // ---------- 输入组装（计划 M6 §2.5：每章摘要 + 总量预算硬顶） ----------
 
-/** user 消息总字数预算：超预算按档降级重建（与 M5 输入组装同思路） */
-private const val OVERVIEW_BUDGET = 20_000
+/** user 消息总字数预算：超预算按档降级重建（与 M5 输入组装同思路，随十万级上下文放宽） */
+private val OVERVIEW_BUDGET = AiBudgets.INPUT_CHARS_MAX
 
-/** >20 章取前 20（AI 上下文稳定边界），附 truncated 标记 */
-private const val OVERVIEW_CHAPTER_LIMIT = 20
+/** >120 章取前 120（十万级上下文下的稳定边界），附 truncated 标记 */
+private const val OVERVIEW_CHAPTER_LIMIT = 120
 
 /** 档位规格：Triple(每章 summary 截断, 每章 chain 截断) */
-private val OVERVIEW_TIERS = listOf(600 to 300, 300 to 150, 150 to 75)
+private val OVERVIEW_TIERS = listOf(2000 to 1000, 800 to 400, 300 to 150)
 
 /**
  * 组装全书总览 user JSON。assetByChapterId 由调用方逐章 ChapterAssetDao.byChapter 组装

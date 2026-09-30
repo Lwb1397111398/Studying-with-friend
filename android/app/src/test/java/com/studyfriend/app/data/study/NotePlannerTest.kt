@@ -12,7 +12,6 @@ import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.db.StudyDatabase
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -22,7 +21,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/** M4b §5-4：讲解批量流水线（10 例）。真 Room 内存库 + 假 ChatJsonFn（按反序列化目标分流） */
+/** M4b §5-4：讲解批量流水线（10 例）。真 Room 内存库 + 假 ChatTextFn（v2 标签文本） */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class NotePlannerTest {
@@ -32,43 +31,55 @@ class NotePlannerTest {
         StudyDatabase::class.java,
     ).allowMainThreadQueries().build()
 
-    private class FakeChat : ChatJsonFn {
-        var onNote: (callIndex: Int, req: ChatRequest) -> NotePlan = { _, _ ->
+    /** 讲解假 chat：按调用序返回标签文本（v2 格式）或抛错 */
+    private class FakeChat : ChatTextFn {
+        var onNote: (callIndex: Int, req: ChatRequest) -> String = { _, _ ->
             throw AiException("意外的讲解调用")
         }
         var noteCalls = 0
         val requests = mutableListOf<ChatRequest>()
 
-        @Suppress("UNCHECKED_CAST")
-        override suspend fun <T> invoke(
-            req: ChatRequest,
-            deserializer: DeserializationStrategy<T>,
-            onDelta: (String) -> Unit,
-        ): T {
+        override suspend fun invoke(req: ChatRequest, onDelta: (String) -> Unit): String {
             requests += req
-            return when (deserializer) {
-                NotePlan.serializer() -> onNote(++noteCalls, req) as T
-                else -> throw IllegalStateException("未预期的反序列化目标：$deserializer")
-            }
+            return onNote(++noteCalls, req)
         }
     }
 
-    private fun notePlan() = NotePlan(
-        title = "讲", friendly = "大白话讲解", analogy = "比方",
-        keyPoints = listOf("要点"), memoryHook = "钩子",
-        checkQuestions = listOf(CheckQuestion("问", "答")),
-    )
+    /** 组装 v2 标签文本；传 null 省略可选标签 */
+    private fun noteTagged(
+        title: String = "讲",
+        friendly: String = "大白话讲解",
+        analogy: String? = "比方",
+        points: List<String> = listOf("要点"),
+        hook: String? = "钩子",
+        questions: List<Pair<String, String>> = listOf("问" to "答"),
+    ): String = buildString {
+        append("<标题>").append(title).append("</标题>\n")
+        append("<讲解>").append(friendly).append("</讲解>\n")
+        analogy?.let { append("<类比>").append(it).append("</类比>\n") }
+        if (points.isNotEmpty()) {
+            append("<要点>\n")
+            points.forEach { append("- ").append(it).append('\n') }
+            append("</要点>\n")
+        }
+        hook?.let { append("<钩子>").append(it).append("</钩子>\n") }
+        if (questions.isNotEmpty()) {
+            append("<自测>\n")
+            questions.forEach { (q, a) -> append("问: ").append(q).append("\n答: ").append(a).append('\n') }
+            append("</自测>\n")
+        }
+    }
 
     private suspend fun settings(db: StudyDatabase): SettingsRepository =
         SettingsRepository(db, FakeSecretStore()).apply {
             save("https://api.test/v1", "test-model", 0.3, "sk-test")
         }
 
-    private fun planner(db: StudyDatabase, fn: ChatJsonFn) = NotePlanner(
+    private fun planner(db: StudyDatabase, fn: ChatTextFn) = NotePlanner(
         db = db,
         context = ApplicationProvider.getApplicationContext(),
         settings = runBlocking { settings(db) },
-        chatJsonFn = fn,
+        chatTextFn = fn,
     )
 
     /** 建章（先补父书过 FK）+ 按描述插段落；返回 chapterId */
@@ -115,7 +126,7 @@ class NotePlannerTest {
         val database = db()
         settings(database).saveDetailLevel("简略")
         val fake = FakeChat()
-        fake.onNote = { _, _ -> notePlan() }
+        fake.onNote = { _, _ -> noteTagged() }
         val ch = seed(database, listOf(Triple(0, "EXPLAIN", null)))
         planner(database, fake).run(ch)
         assertTrue("简略指令应进 system 消息", fake.requests[0].messages[0].content.contains("简略"))
@@ -126,7 +137,7 @@ class NotePlannerTest {
     fun batch_generatesAndPersists() = runBlocking {
         val db = db()
         val fake = FakeChat()
-        fake.onNote = { _, _ -> notePlan() }
+        fake.onNote = { _, _ -> noteTagged() }
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null), Triple(1, "GROUP", 1L), Triple(2, "GROUP", 1L)))
 
         val outcome = planner(db, fake).run(ch)
@@ -158,7 +169,7 @@ class NotePlannerTest {
     @Test
     fun batch_cacheHitSkipsAll() = runBlocking {
         val db = db()
-        val fake1 = FakeChat().apply { onNote = { _, _ -> notePlan() } }
+        val fake1 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null), Triple(1, "EXPLAIN", null)))
         planner(db, fake1).run(ch)
 
@@ -179,7 +190,7 @@ class NotePlannerTest {
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null)))
         val pid = db.paragraphDao().byChapter(ch)[0].id
         db.paraNoteDao().insert(noteRow(ch, "[$pid]"))
-        val fake = FakeChat().apply { onNote = { _, _ -> notePlan() } }
+        val fake = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
 
         val outcome = planner(db, fake).run(ch)
 
@@ -200,7 +211,7 @@ class NotePlannerTest {
         val pid = db.paragraphDao().byChapter(ch)[0].id
         db.paraNoteDao().insert(noteRow(ch, "[$pid]"))
         db.paraNoteDao().insert(noteRow(ch, "[$pid]", version = "explain-note-v0b"))
-        val fake = FakeChat().apply { onNote = { _, _ -> notePlan() } }
+        val fake = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
 
         planner(db, fake).run(ch)
 
@@ -214,7 +225,7 @@ class NotePlannerTest {
     fun batch_interruptedKeepsDoneAndResumes() = runBlocking {
         val db = db()
         val fake = FakeChat()
-        fake.onNote = { call, _ -> if (call == 1) notePlan() else throw AiException("超时") }
+        fake.onNote = { call, _ -> if (call == 1) noteTagged() else throw AiException("超时") }
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null), Triple(1, "EXPLAIN", null)))
 
         val outcome = planner(db, fake).run(ch)
@@ -224,7 +235,7 @@ class NotePlannerTest {
         assertEquals("单元 1 成功 1 次 + 单元 2 重试 3 次", 4, fake.noteCalls)
         assertEquals(1, db.paraNoteDao().byChapterOnce(ch).size)
 
-        val fake2 = FakeChat().apply { onNote = { _, _ -> notePlan() } }
+        val fake2 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
         val outcome2 = planner(db, fake2).run(ch)
 
         assertNull(outcome2.interruptedAtUnit)
@@ -271,11 +282,11 @@ class NotePlannerTest {
     @Test
     fun batch_forceRegeneratesAll() = runBlocking {
         val db = db()
-        val fake1 = FakeChat().apply { onNote = { _, _ -> notePlan() } }
+        val fake1 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null), Triple(1, "EXPLAIN", null)))
         planner(db, fake1).run(ch)
 
-        val fake2 = FakeChat().apply { onNote = { _, _ -> notePlan() } }
+        val fake2 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
         val outcome = planner(db, fake2).run(ch, force = true)
 
         assertEquals(2, fake2.noteCalls)
@@ -307,7 +318,7 @@ class NotePlannerTest {
     @Test
     fun batch_orphanCleanupKeepsValid() = runBlocking {
         val db = db()
-        val fake1 = FakeChat().apply { onNote = { _, _ -> notePlan() } }
+        val fake1 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null)))
         planner(db, fake1).run(ch)
         db.paraNoteDao().insert(noteRow(ch, "[888]"))

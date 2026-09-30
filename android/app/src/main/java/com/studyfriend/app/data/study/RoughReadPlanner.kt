@@ -211,7 +211,7 @@ class RoughReadPlanner(
         key: String,
     ): BlockOutcome {
         var lastError: Exception? = null
-        repeat(ATTEMPTS) {
+        repeat(ATTEMPTS) { attempt ->
             try {
                 return runBlockOnce(block, blockIndex, systemPrompt, blockTotal, chapterChars, cfg, key)
             } catch (e: CancellationException) {
@@ -224,6 +224,7 @@ class RoughReadPlanner(
             } catch (e: Exception) {
                 lastError = e
             }
+            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError) // 末次失败不再等
         }
         throw lastError ?: PlannerException("本块执行失败")
     }
@@ -247,7 +248,8 @@ class RoughReadPlanner(
             apiKey = key,
             model = cfg.model,
             temperature = 0.2,
-            maxTokens = (block.paragraphs.size * 130 + 600).coerceIn(4096, 8192),
+            // 推理型模型的思考 token 计入 max_tokens：预算不足会被思考吃光、正文截断
+            maxTokens = (block.paragraphs.size * 130 + 600).coerceIn(8192, 32_768),
             messages = listOf(
                 AiMessage("system", filled),
                 AiMessage("user", paragraphsJson(block)),
@@ -312,7 +314,9 @@ class RoughReadPlanner(
                 val merged = chatJsonFn(
                     ChatRequest(
                         baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
-                        temperature = 0.2, maxTokens = 800,
+                        temperature = 0.2,
+                        // 原值 800 会被推理模型的思考 token 吃光导致正文截断
+                        maxTokens = 8192,
                         messages = listOf(
                             AiMessage("user", PromptLoader.load(context, PROMPT_MERGE) + contributions.joinToString("\n")),
                         ),
@@ -331,6 +335,7 @@ class RoughReadPlanner(
             } catch (e: Exception) {
                 lastError = e
             }
+            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError)
         }
 
         // 归并失败：非 force 且旧 gist 非空 → 保留旧值；否则（force 重标注 / 首次）写降级新值

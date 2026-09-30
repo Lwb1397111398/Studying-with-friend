@@ -38,14 +38,14 @@ fun enumerateUnits(paragraphs: List<ParagraphEntity>): List<ExplainUnit> {
     return units.sortedBy { it.anchor.idx }
 }
 
-/** prompt 输入文本（计划 §2.1）：每段截 2500 字、合计截 6000 字；余量耗尽即止，不出空串条目 */
+/** prompt 输入文本：每段截 10000 字、合计截 40000 字（十万级上下文下仍留足输出与思考余量）；余量耗尽即止，不出空串条目 */
 fun ExplainUnit.textsForPrompt(): List<String> {
     val out = ArrayList<String>(members.size)
     var total = 0
     for (p in members) {
-        if (total >= 6000) break // 余量耗尽：后继成员整体不进 prompt
-        var t = p.text.take(2500)
-        if (total + t.length > 6000) t = t.take(6000 - total)
+        if (total >= 40_000) break // 余量耗尽：后继成员整体不进 prompt
+        var t = p.text.take(10_000)
+        if (total + t.length > 40_000) t = t.take(40_000 - total)
         out.add(t)
         total += t.length
     }
@@ -79,6 +79,73 @@ object NoteParser {
             memoryHook = plan.memoryHook.trim().take(40),
             checkQuestions = plan.checkQuestions.filter { it.q.isNotBlank() && it.a.isNotBlank() }.take(3),
         )
+    }
+}
+
+/**
+ * 讲解卡标签文本解析（v2，替代 JSON 输出）：
+ * 长段讲解混在 JSON 字符串里既难写又易被截断毁整包，改为与总结包同款的中文标签段格式。
+ * <讲解> 必需；其余标签可缺省（<类比>/<钩子> 整标签省略即空值）。
+ * 截断容忍：<讲解> 未闭合（finish=length）时取开标签到末尾的全部内容。
+ */
+object NoteTaggedParser {
+
+    fun parse(raw: String): NotePlan? {
+        fun tag(name: String): String? =
+            Regex("<$name>\\s*(.*?)\\s*</$name>", RegexOption.DOT_MATCHES_ALL)
+                .find(raw)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
+
+        // 截断容忍：闭合标签缺失时兜底取开标签之后的内容（仅对必需的 <讲解>）
+        val friendly = tag("讲解")
+            ?: Regex("<讲解>\\s*(.+)$", RegexOption.DOT_MATCHES_ALL)
+                .find(raw)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return null
+
+        return NotePlan(
+            title = tag("标题").orEmpty(),
+            friendly = friendly,
+            analogy = tag("类比").orEmpty(),
+            keyPoints = tag("要点").orEmpty().lines().mapNotNull(::stripBullet),
+            memoryHook = tag("钩子").orEmpty(),
+            checkQuestions = parseQuestions(tag("自测").orEmpty()),
+        )
+    }
+
+    /** 要点行容错：剥 "-", "•", "*", "1."、"1、" 等列表前缀；空行返回 null */
+    private fun stripBullet(line: String): String? {
+        var t = line.trim()
+        if (t.isEmpty()) return null
+        t = t.trimStart('-', '•', '*', '·', ' ')
+        t = t.replaceFirst(Regex("^\\d+\\s*[.、．]\\s*"), "")
+        return t.trim().takeIf { it.isNotEmpty() }
+    }
+
+    /** 自测段容错：问/答（或 Q/A）成对逐条提取；缺问的条目丢弃 */
+    private fun parseQuestions(raw: String): List<CheckQuestion> {
+        if (raw.isBlank()) return emptyList()
+        val questions = ArrayList<StringBuilder>()
+        val answers = ArrayList<StringBuilder>()
+        for (line in raw.lines()) {
+            val t = line.trim()
+            if (t.isEmpty()) continue
+            val qMatch = Regex("^(?:问|Q)[:：.、]?\\s*(.*)$").find(t)
+            val aMatch = Regex("^(?:答|A)[:：.、]?\\s*(.*)$").find(t)
+            when {
+                qMatch != null -> {
+                    questions.add(StringBuilder(qMatch.groupValues[1]))
+                    answers.add(StringBuilder())
+                }
+                aMatch != null && questions.isNotEmpty() -> answers.last().append(aMatch.groupValues[1])
+                questions.isNotEmpty() -> {
+                    // 续行：答案已开笔则归答案，否则并入题干
+                    if (answers.last().isNotEmpty()) answers.last().append(t)
+                    else questions.last().append(t)
+                }
+            }
+        }
+        return questions.indices
+            .map { CheckQuestion(questions[it].toString().trim(), answers[it].toString().trim()) }
+            .filter { it.q.isNotBlank() && it.a.isNotBlank() }
     }
 }
 

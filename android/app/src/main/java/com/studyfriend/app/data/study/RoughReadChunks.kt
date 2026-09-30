@@ -11,13 +11,14 @@ data class RoughReadBlock(
 }
 
 /**
- * 确定性分块（计划 M4a §2.2）：段落不跨块；字符上限 8000 + 段数上限 40，先触发者截断；
+ * 确定性分块（计划 M4a §2.2）：段落不跨块；字符上限 30000 + 段数上限 150，先触发者截断；
  * 单段超限独占成块（不丢弃，AI 输入仍按每段 200 字截断）。同输入必得同划分——断点续跑的前提。
+ * 块放大到十万级上下文可容纳的量级：块更大 → 每章请求更少 → 更不易撞限流窗口。
  */
 object RoughReadChunks {
 
-    const val MAX_BLOCK_CHARS = 8000
-    const val MAX_BLOCK_PARAS = 40
+    const val MAX_BLOCK_CHARS = 30_000
+    const val MAX_BLOCK_PARAS = 150
 
     fun split(paragraphs: List<ParagraphEntity>): List<RoughReadBlock> {
         if (paragraphs.isEmpty()) return emptyList()

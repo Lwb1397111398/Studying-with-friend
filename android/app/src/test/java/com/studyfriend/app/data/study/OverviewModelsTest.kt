@@ -1,5 +1,6 @@
 package com.studyfriend.app.data.study
 
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.db.ChapterAssetEntity
 import com.studyfriend.app.data.db.ChapterEntity
 import org.junit.Assert.assertEquals
@@ -76,12 +77,14 @@ class OverviewModelsTest {
 
     @Test
     fun userJson_capsChaptersAndBudgetTiers() {
-        val chapters = (0L until 30L).map { chapter(it + 1, it.toInt()) }
+        val chapters = (0L until 130L).map { chapter(it + 1, it.toInt()) }
         val assets = chapters.associate { it.id to asset(it.id) }
         val json = buildOverviewUserJson("书", chapters, assets)
-        assertTrue("超 20 章取前 20", !json.contains("第29章") && json.contains("第19章"))
-        assertTrue("预算硬顶 20K", json.length <= 20_000)
-        // 超预算触发降档：每章摘要被截断到低于档 0 的 600 字
+        assertTrue("超 120 章取前 120", !json.contains("第120章") && json.contains("第119章"))
+        assertTrue("预算硬顶 10 万", json.length <= AiBudgets.INPUT_CHARS_MAX)
+        // 超预算触发降档：每章摘要/串联被截断到低于档 0 的 2000/1000 字
         assertTrue(!json.contains("总".repeat(400)))
+        assertTrue(!json.contains("串".repeat(500)))
+        kotlinx.serialization.json.Json.parseToJsonElement(json) // 合法 JSON
     }
 }

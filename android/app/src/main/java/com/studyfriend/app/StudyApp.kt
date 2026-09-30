@@ -6,6 +6,7 @@ import com.studyfriend.app.data.ai.AiGate
 import com.studyfriend.app.data.ai.KeyStoreSecretStore
 import com.studyfriend.app.data.db.StudyDatabase
 import com.studyfriend.app.data.study.AiClientChatJsonFn
+import com.studyfriend.app.data.study.AiClientChatTextFn
 import com.studyfriend.app.data.study.NoteRunner
 import com.studyfriend.app.data.study.OverviewRunner
 import com.studyfriend.app.data.study.RoughReadRunner
@@ -44,7 +45,7 @@ class StudyApp : Application() {
             db = database,
             context = applicationContext,
             settings = settingsRepo,
-            chatJsonFn = AiClientChatJsonFn,
+            chatTextFn = AiClientChatTextFn,
             scope = appScope,
             gate = aiGate,
         )

@@ -18,7 +18,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlinx.serialization.DeserializationStrategy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -89,17 +88,12 @@ class SummaryRunnerGateTest {
     }
 
     /** 讲解假 chat：hold 挂住第 1 次调用 */
-    @Suppress("UNCHECKED_CAST")
-    private fun noteChatFn(hold: CompletableDeferred<Unit>?) = object : ChatJsonFn {
+    private fun noteChatFn(hold: CompletableDeferred<Unit>?) = object : ChatTextFn {
         private val calls = AtomicInteger(0)
-        override suspend fun <T> invoke(
-            req: ChatRequest,
-            deserializer: DeserializationStrategy<T>,
-            onDelta: (String) -> Unit,
-        ): T {
+        override suspend fun invoke(req: ChatRequest, onDelta: (String) -> Unit): String {
             val n = calls.incrementAndGet()
             if (hold != null && n == 1) hold.await()
-            return NotePlan(title = "讲", friendly = "大白话讲解") as T
+            return "<标题>讲</标题>\n<讲解>大白话讲解</讲解>"
         }
     }
 
@@ -121,7 +115,7 @@ class SummaryRunnerGateTest {
         db, ApplicationProvider.getApplicationContext(), SettingsRepository(db, FakeSecretStore()), chatFn, scope, gate,
     )
 
-    private fun noteRunner(chatFn: ChatJsonFn) = NoteRunner(
+    private fun noteRunner(chatFn: ChatTextFn) = NoteRunner(
         db, ApplicationProvider.getApplicationContext(), SettingsRepository(db, FakeSecretStore()), chatFn, scope, gate,
     )
 

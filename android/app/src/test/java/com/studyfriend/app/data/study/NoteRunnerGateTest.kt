@@ -66,26 +66,21 @@ class NoteRunnerGateTest {
         db.close()
     }
 
-    private fun notePlan() = NotePlan(title = "讲", friendly = "大白话讲解")
+    private fun noteTagged() = "<标题>讲</标题>\n<讲解>大白话讲解</讲解>"
 
     /** 讲解假 chat：entered 非空时在挂起前先报信（保证"第 1 次"已被旧 job 消费，
      *  消除 cancel 抢在第 1 次调用前落地、把挂住资格错移给新 job 的竞态）；
      *  hold 挂住第 1 次调用，被取消时从 await 抛 CancellationException */
-    @Suppress("UNCHECKED_CAST")
-    private fun noteChatFn(hold: CompletableDeferred<Unit>?, entered: CompletableDeferred<Unit>? = null) = object : ChatJsonFn {
+    private fun noteChatFn(hold: CompletableDeferred<Unit>?, entered: CompletableDeferred<Unit>? = null) = object : ChatTextFn {
         private val calls = AtomicInteger(0)
-        override suspend fun <T> invoke(
-            req: ChatRequest,
-            deserializer: DeserializationStrategy<T>,
-            onDelta: (String) -> Unit,
-        ): T {
+        override suspend fun invoke(req: ChatRequest, onDelta: (String) -> Unit): String {
             val n = calls.incrementAndGet()
             entered?.complete(Unit)
             if (hold != null && n == 1) {
                 hold.await() // 挂住模拟进行中
                 throw IllegalStateException("应被取消，不应走到这里")
             }
-            return notePlan() as T
+            return noteTagged()
         }
     }
 
@@ -119,7 +114,7 @@ class NoteRunnerGateTest {
         return runner.state.value
     }
 
-    private fun noteRunner(chatFn: ChatJsonFn) = NoteRunner(db, ApplicationProvider.getApplicationContext(), SettingsRepository(db, FakeSecretStore()), chatFn, scope, gate)
+    private fun noteRunner(chatFn: ChatTextFn) = NoteRunner(db, ApplicationProvider.getApplicationContext(), SettingsRepository(db, FakeSecretStore()), chatFn, scope, gate)
 
     private fun roughRunner(chatFn: ChatJsonFn) = RoughReadRunner(db, ApplicationProvider.getApplicationContext(), SettingsRepository(db, FakeSecretStore()), chatFn, scope, gate)
 

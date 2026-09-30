@@ -169,7 +169,7 @@ class RoughReadPlannerTest {
         val fake = FakeChat()
         fake.onBlock = { call, _ -> fullPlan(listOf(call - 1), gist = "块$call") }
         fake.onMerge = { _, _ -> MergedOverview(gist = "MERGED") }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000) // 2 块
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000) // 2 块
         val outcome = plannerWithKey(db, fake).run(chapterId)
 
         assertNull(outcome.interruptedAtBlock)
@@ -187,7 +187,7 @@ class RoughReadPlannerTest {
         val fake = FakeChat()
         fake.onBlock = { call, _ -> fullPlan(listOf(call - 1), gist = "块$call") }
         fake.onMerge = { _, _ -> throw AiException("额度用尽") }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000) // 2 块才会走归并
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000) // 2 块才会走归并
         db.chapterDao().updateAiGist(chapterId, "旧G", "[]")
 
         val outcome = plannerWithKey(db, fake).run(chapterId)
@@ -206,7 +206,7 @@ class RoughReadPlannerTest {
         val fake = FakeChat()
         fake.onBlock = { _, _ -> fullPlan(listOf(0, 1), gist = "块级要点") }
         fake.onMerge = { _, _ -> throw AiException("网络断开") }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000) // 2 块才会走归并
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000) // 2 块才会走归并
 
         val outcome = plannerWithKey(db, fake).run(chapterId)
 
@@ -224,7 +224,7 @@ class RoughReadPlannerTest {
         val fake = FakeChat()
         fake.onBlock = { _, _ -> fullPlan(listOf(0, 1), gist = "新G") }
         fake.onMerge = { _, _ -> throw AiException("额度用尽") }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000) // 2 块才会走归并
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000) // 2 块才会走归并
         db.chapterDao().updateAiGist(chapterId, "旧G", "[]")
 
         val outcome = plannerWithKey(db, fake).run(chapterId, force = true)
@@ -244,7 +244,7 @@ class RoughReadPlannerTest {
         fake.onBlock = { call, _ ->
             if (call == 1) fullPlan(listOf(0)) else throw AiException("请求失败（HTTP 500）")
         }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000)
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000)
 
         val outcome = plannerWithKey(db, fake).run(chapterId)
 
@@ -293,7 +293,7 @@ class RoughReadPlannerTest {
         fake.onBlock = { call, _ ->
             if (call == 1) fullPlan(listOf(0)) else throw AiException("超时")
         }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000)
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000)
         plannerWithKey(db, fake).run(chapterId)
         // 块 1 成功 1 次 + 块 2 失败重试 3 次（ATTEMPTS=3）
         assertEquals(4, fake.blockCalls)
@@ -349,7 +349,7 @@ class RoughReadPlannerTest {
         fake.onBlock = { call, _ ->
             if (call == 1) fullPlan(listOf(0)) else throw CancellationException("用户取消")
         }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000)
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000)
 
         val result = runCatching { plannerWithKey(db, fake).run(chapterId) }
         assertTrue("取消应向上传播", result.isFailure)
@@ -388,7 +388,7 @@ class RoughReadPlannerTest {
         fake.onBlock = { call, _ ->
             if (call == 1) fullPlan(listOf(0)) else throw AiException("API Key 无效或无权限", httpCode = 401)
         }
-        val chapterId = seedChapter(db, paras = 2, textLen = 5000)
+        val chapterId = seedChapter(db, paras = 2, textLen = 16000)
 
         val outcome = plannerWithKey(db, fake).run(chapterId)
 

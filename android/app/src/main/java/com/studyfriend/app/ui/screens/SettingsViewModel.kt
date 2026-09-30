@@ -102,11 +102,16 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                         apiKey = key,
                         model = model,
                         temperature = AiClient.parseTemperature(tempText),
-                        maxTokens = 16,
+                        // 推理型模型会先输出思考 token：预算太小只能收到空正文
+                        maxTokens = 512,
                         messages = listOf(AiMessage("user", "ping")),
                     ),
                 ) { delta -> liveDelta += delta }
-                message = "连接成功 · ${reply.length} 字 · ${System.currentTimeMillis() - start} ms"
+                message = if (reply.isBlank()) {
+                    "连接成功，但模型未返回正文（思考可能尚未结束），可正常使用 · ${System.currentTimeMillis() - start} ms"
+                } else {
+                    "连接成功 · ${reply.length} 字 · ${System.currentTimeMillis() - start} ms"
+                }
             } catch (e: AiException) {
                 error = e.message
             } catch (e: CancellationException) {
@@ -117,6 +122,14 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 testing = false
             }
         }
+    }
+
+    /** 快捷预设：只填输入框不落库，用户确认后再点"保存" */
+    fun applyPreset(baseUrlPreset: String, modelPreset: String) {
+        if (busy || testing) return
+        baseUrl = baseUrlPreset
+        model = modelPreset
+        message = "已填入「$modelPreset」预设，填好 Key 后点保存"
     }
 
     /** 讲解详略三档（总计划 §1 目标 7）：即点即存，独立于"保存"按钮 */

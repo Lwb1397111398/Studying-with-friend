@@ -53,7 +53,7 @@ class NoteRunner(
     private val db: StudyDatabase,
     private val context: Context,
     private val settings: SettingsRepository,
-    private val chatJsonFn: ChatJsonFn,
+    private val chatTextFn: ChatTextFn,
     private val scope: CoroutineScope,
     private val gate: AiGate = AiGate(),
 ) {
@@ -61,7 +61,7 @@ class NoteRunner(
         db: StudyDatabase,
         context: Context,
         settings: SettingsRepository,
-    ) : this(db, context, settings, AiClientChatJsonFn, CoroutineScope(SupervisorJob() + Dispatchers.Default))
+    ) : this(db, context, settings, AiClientChatTextFn, CoroutineScope(SupervisorJob() + Dispatchers.Default))
 
     private val _state = MutableStateFlow<NoteRunState>(NoteRunState.Idle)
     val state: StateFlow<NoteRunState> = _state.asStateFlow()
@@ -80,7 +80,7 @@ class NoteRunner(
             }
             try {
                 _state.value = NoteRunState.Running(chapterId, 0, 0)
-                val outcome = NotePlanner(db, context, settings, chatJsonFn)
+                val outcome = NotePlanner(db, context, settings, chatTextFn)
                     .run(chapterId, force = force) { done, total ->
                         _state.value = NoteRunState.Running(chapterId, done, total)
                     }
