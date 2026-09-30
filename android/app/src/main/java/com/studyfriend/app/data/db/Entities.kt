@@ -71,7 +71,7 @@ data class ParagraphEntity(
     val chapterId: Long,
     val idx: Int,
     val text: String,
-    val role: String, // BODY / FRONT
+    val role: String, // BODY / FRONT / TOC
     val aiAction: String = "NONE", // NONE / SKIP / EXPLAIN / GROUP
     val groupId: Long? = null, // GROUP 时同组合并号
     val why: String? = null, // AI 决定理由，界面"为什么讲这段"

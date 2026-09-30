@@ -20,6 +20,7 @@ object DbValues {
     const val ROLE_BODY = "BODY"
     const val ROLE_FRONT = "FRONT"
     const val ROLE_BACK = "BACK"
+    const val ROLE_TOC = "TOC" // 目录条目（特殊展示 + AI 全链路跳过）
 
     // paragraphs.aiAction（粗读三态 + 未规划占位）
     const val ACT_NONE = "NONE"

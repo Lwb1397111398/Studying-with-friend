@@ -128,12 +128,16 @@ fun ReadScreen(
             },
         )
 
-        val markedCount = paragraphs.count { it.aiAction != DbValues.ACT_NONE }
+        // OPT-C C4：计数用正文视图（TOC 段永远无标注，混入计数会让"部分标注"态无法收敛）；
+        // LazyColumn 渲染仍用全量列表（目录条目按条目样式展示）
+        val bodyParagraphs = remember(paragraphs) { paragraphs.filter { it.role != DbValues.ROLE_TOC } }
+        val markedCount = bodyParagraphs.count { it.aiAction != DbValues.ACT_NONE }
         ActionBar(
             chapterId = chapterId,
             hasGist = !chapter?.gist.isNullOrBlank(),
             readDone = chapter?.readState == DbValues.READ_DONE,
-            paragraphCount = paragraphs.size,
+            paragraphCount = bodyParagraphs.size,
+            pureToc = bodyParagraphs.isEmpty() && paragraphs.isNotEmpty(),
             markedCount = markedCount,
             runState = runState,
             onStart = { app.roughReadRunner.start(chapterId, force = false) },
@@ -244,6 +248,7 @@ private fun ActionBar(
     hasGist: Boolean,
     readDone: Boolean,
     paragraphCount: Int,
+    pureToc: Boolean,
     markedCount: Int,
     runState: RoughRunState,
     onStart: () -> Unit,
@@ -346,7 +351,12 @@ private fun ActionBar(
 
             allUnmarked -> {
                 Text(
-                    if (paragraphCount == 0) "本章没有段落" else "搭子还没有读这一章",
+                    when {
+                        // 纯目录章：正文计数为 0 但渲染列表非空（OPT-C C4）
+                        paragraphCount == 0 && pureToc -> "本章是目录，无需粗读"
+                        paragraphCount == 0 -> "本章没有段落"
+                        else -> "搭子还没有读这一章"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -406,6 +416,18 @@ private val BodyStyle = TextStyle(fontSize = 16.sp, lineHeight = 26.sp)
 /** 段落行（计划 M4a §3 + 质检 P1-6 + §3.4 视觉）：讲/合并讲徽标 + why；SKIP 段全文半透明仍可读；EXPLAIN 左侧主题色竖条 */
 @Composable
 private fun ParaRow(p: ParagraphEntity) {
+    // OPT-C C4：目录条目特殊展示——小字次级色，无重点竖条/无 AI 徽标（TOC 段也不参与 AI 标注）
+    if (p.role == DbValues.ROLE_TOC) {
+        Text(
+            p.text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+        return
+    }
     // EXPLAIN 段左侧主题色竖条（M4a §3.4）：IntrinsicSize 让竖条随内容高度
     val explained = p.aiAction == DbValues.ACT_EXPLAIN
     Row(

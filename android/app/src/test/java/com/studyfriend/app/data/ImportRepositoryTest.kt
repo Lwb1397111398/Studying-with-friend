@@ -70,7 +70,8 @@ class ImportRepositoryTest {
             val tocParas = db.paragraphDao().byChapter(savedChapters[1].id)
             assertEquals(1, tocParas.size)
             assertEquals(0, tocParas[0].idx)
-            assertEquals(DbValues.ROLE_FRONT, tocParas[0].role)
+            // OPT-C C3：目录锚点区条目段 role=TOC（原 FRONT）
+            assertEquals(DbValues.ROLE_TOC, tocParas[0].role)
 
             assertEquals(1, db.bookDao().getAllFlow().first().size)
         } finally {

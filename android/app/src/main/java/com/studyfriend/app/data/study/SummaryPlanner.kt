@@ -10,6 +10,7 @@ import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.PromptLoader
 import com.studyfriend.app.data.db.ChapterAssetEntity
 import com.studyfriend.app.data.db.ChapterEntity
+import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.db.ReviewItemEntity
@@ -57,7 +58,11 @@ class SummaryPlanner(
         val key = settings.decryptKeyOrNull()
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
         val cfg = settings.load()
-        val paragraphs = db.paragraphDao().byChapter(chapterId)
+        // OPT-C C4：TOC 段不进总结包（章节要点/讲解卡/题目都不含目录条目）
+        val paragraphs = db.paragraphDao().byChapter(chapterId).filter { it.role != DbValues.ROLE_TOC }
+        if (paragraphs.isEmpty()) {
+            throw PlannerException("本章是目录或无正文内容，无需总结")
+        }
         if (paragraphs.none { it.aiAction != "NONE" }) {
             throw PlannerException("本章还没有粗读标注，请先完成粗读")
         }

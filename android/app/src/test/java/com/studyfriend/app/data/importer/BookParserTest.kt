@@ -168,7 +168,103 @@ class BookParserTest {
         val chapters = BookParser.parse(text)
         // 目录条目（点线+页码）不是标题；"目录" 与 "第一章 导论" 是仅有的章
         assertEquals(listOf("目录", "第一章 导论"), chapters.map { it.title })
-        assertEquals(DbValues.ROLE_FRONT, chapters[0].paras[0].role)
+        // 锚点块划入 TOC 区后，区内条目段为 ROLE_TOC（C3 Step 2b 有意变更）
+        assertEquals(DbValues.ROLE_TOC, chapters[0].paras[0].role)
+    }
+
+    // ---- OPT-C C2：目录点线变体 + 页眉护栏 ----
+
+    @Test
+    fun dotLeaderWithBulletChars_notATitle() {
+        // 民法总则 PDF 实测：点线里混入实心圆点 • / ‧，旧正则认不出来导致整行被当成章标题
+        val text = """
+            第一章 私法绪论·•··•··••·595
+
+            正文内容段落。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(1, chapters.size)
+        assertEquals("全文", chapters[0].title)
+    }
+
+    @Test
+    fun trailingPageNumberHeaderLine_notATitle() {
+        // 页眉行"CJK 标题 + 尾部页码"不是章标题，应留在正文里
+        val text = """
+            第一章 私法绪论 3
+            这是第一章的正文，讨论民法总则的意义与体系构造。
+
+            第一章 私法绪论 5
+            正文继续，仍在讨论私法的基础概念与体系。
+
+            第二章 民法的法源 49
+            第二章正文开始，法源是民法的根本问题之一。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(1, chapters.size)
+        assertEquals("全文", chapters[0].title)
+        val first = chapters[0].paras[0].text
+        assertTrue("页眉行应保留为正文段落，实际首段：$first", first.contains("第一章 私法绪论 3"))
+    }
+
+    // ---- OPT-C C3：TOC 区域识别与条目重组 ----
+
+    @Test
+    fun realTocPage_recognizedAsTocRegion_noGarbageChapters() {
+        // 民法总则（王泽鉴）实测目录页：跨行条目、孤立页码、点线变体混排
+        val toc = """
+            目录
+            第一章 私法绪论
+            一私法社会、私法秩序、私法原则.............................. 1
+            第一节 法律的斗争......................................................... 1
+            第二章 民法的法源及法律的适用
+            第一节
+            请求权、抗辩权及形成权...………………·…..……...
+            107
+            第七章条件与期限
+            —一－法律行为的规划及风险管控…………·……...…..
+            428
+            主要参考书目
+            ..................................................................
+            591
+            索弓
+            1·•··•··•··•··•··•··•··•··•··•·•··••·•··•··•··•··•··•··•·••·••·••·••·••·•• 595
+        """.trimIndent()
+        val body = "\n第一章 私法绪论 3\n这是第一章页眉形态的正文行。\n" +
+            "\n第一章 私法绪论\n\n第一节 法律的斗争\n\n这是第一章正文：法律的斗争是法律史上的常态。" +
+            "\n\n第二章 民法的法源及法律的适用\n\n这是第二章正文：法源包括法律、习惯法与法理。"
+        val chapters = BookParser.parse(toc + body)
+
+        // 目录条目不得成章：只应有 目录、第一章、第二章 三个章（页眉行"第一章 私法绪论 3"被 C2 护栏降级为正文）
+        assertEquals(3, chapters.size)
+        assertEquals("目录", chapters[0].title)
+        assertEquals("第一章 私法绪论", chapters[1].title)
+        assertEquals("第二章 民法的法源及法律的适用", chapters[2].title)
+        // 目录章段落全部 ROLE_TOC（含锚点行段），正文章段落为 BODY
+        assertTrue(chapters[0].paras.isNotEmpty() && chapters[0].paras.all { it.role == DbValues.ROLE_TOC })
+        assertTrue(chapters[1].paras.all { it.role == DbValues.ROLE_BODY })
+        // 跨行条目重组："第一节"与"请求权…107"并回一段（触发行并入累积）
+        assertTrue(chapters[0].paras.any { it.text.contains("第一节") && it.text.contains("107") })
+    }
+
+    @Test
+    fun tocRegionDetectedWithoutAnchor_byDensity() {
+        // 无"目录"锚点：密度兜底把连续点线条目块划为 TOC 区（区内不产标题命中），后随正文正常成章
+        val toc = """
+            第一章 私法绪论.............................. 1
+            第一节 法律的斗争..................................... 1
+            第二章 民法的法源..................................... 9
+        """.trimIndent()
+        val body = "\n\n第一章 私法绪论\n\n这是第一章正文。"
+        val chapters = BookParser.parse(toc + body)
+        assertEquals(1, chapters.size)
+        assertTrue(chapters[0].paras.any { it.role == DbValues.ROLE_TOC && it.text.contains("第一节") })
+    }
+
+    @Test
+    fun noAnchor_noTocRegion_backCompat() {
+        val text = "第一章 私法绪论\n\n正文A。\n\n第二章 民法的法源\n\n正文B。"
+        assertEquals(2, BookParser.parse(text).size)
     }
 
     // ---- 5.6 整书兜底与盲切 ----
@@ -211,7 +307,8 @@ class BookParserTest {
         """.trimIndent()
         val chapters = BookParser.parse(text)
         assertEquals(listOf("目录", "第一章 导论", "参考文献"), chapters.map { it.title })
-        assertEquals(DbValues.ROLE_FRONT, chapters[0].paras[0].role)
+        // 目录锚点块内条目为 ROLE_TOC（C3 Step 2b 有意变更）；正文章/文献章角色不变
+        assertEquals(DbValues.ROLE_TOC, chapters[0].paras[0].role)
         assertEquals(DbValues.ROLE_BODY, chapters[1].paras[0].role)
         assertEquals(DbValues.ROLE_BACK, chapters[2].paras[0].role)
     }

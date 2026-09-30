@@ -7,6 +7,7 @@ import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.FakeSecretStore
 import com.studyfriend.app.data.db.ChapterEntity
+import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.db.StudyDatabase
 import kotlinx.coroutines.CancellationException
@@ -440,6 +441,49 @@ class RoughReadPlannerTest {
         assertEquals(1, fake.mergeCalls)
         assertNull(outcome.interruptedAtBlock)
         assertEquals("只归并", db.chapterDao().byIdOnce(chapterId)!!.gist)
+        db.close()
+    }
+
+    // ---------- OPT-C C4：TOC 段全链路跳过 ----------
+
+    @Test
+    fun tocParagraphs_excludedFromRoughRead() = runBlocking {
+        val db = db()
+        // 断言一：混合章（1 段 BODY + 2 段 TOC）正常完成，分块请求不含 TOC 段
+        val chapterId = seedChapter(db, paras = 1)
+        db.paragraphDao().insertAll(
+            listOf(
+                ParagraphEntity(chapterId = chapterId, idx = 1, text = "第一节 法律的斗争……1", role = DbValues.ROLE_TOC),
+                ParagraphEntity(chapterId = chapterId, idx = 2, text = "第二节 人的集团与社团……2", role = DbValues.ROLE_TOC),
+            ),
+        )
+        val fake = FakeChat()
+        fake.onBlock = { _, _ -> fullPlan(listOf(0)) }
+        val outcome = plannerWithKey(db, fake).run(chapterId)
+
+        assertNull(outcome.interruptedAtBlock)
+        assertEquals(1, outcome.unitCount) // 只数 BODY 的 EXPLAIN
+        val userMsg = fake.requests[0].messages.last { it.role == "user" }.content
+        assertTrue("TOC 段不应进入粗读分块，实际：$userMsg", !userMsg.contains("第一节 法律的斗争……1"))
+        val paras = db.paragraphDao().byChapter(chapterId)
+        assertEquals("BODY 段正常标注", "EXPLAIN", paras.first { it.idx == 0 }.aiAction)
+        assertEquals("TOC 段不被标注", "NONE", paras.first { it.idx == 1 }.aiAction)
+
+        // 断言二：纯 TOC 章 fail-fast，文案含"目录"
+        val tocOnlyId = seedChapter(db, paras = 0)
+        db.paragraphDao().insertAll(
+            listOf(
+                ParagraphEntity(chapterId = tocOnlyId, idx = 0, text = "第一章 私法绪论……1", role = DbValues.ROLE_TOC),
+                ParagraphEntity(chapterId = tocOnlyId, idx = 1, text = "第一节 法律的斗争……1", role = DbValues.ROLE_TOC),
+            ),
+        )
+        val callsBefore = fake.blockCalls
+        val result = runCatching { plannerWithKey(db, fake).run(tocOnlyId) }
+
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()!!.message ?: ""
+        assertTrue("应提示目录章无需粗读，实际：$message", message.contains("目录"))
+        assertEquals("纯 TOC 章不应发任何块请求", callsBefore, fake.blockCalls)
         db.close()
     }
 }

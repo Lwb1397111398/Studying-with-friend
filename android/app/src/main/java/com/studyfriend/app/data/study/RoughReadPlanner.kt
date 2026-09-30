@@ -9,6 +9,7 @@ import com.studyfriend.app.data.ai.AiMessage
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.PromptLoader
 import com.studyfriend.app.data.db.ChapterEntity
+import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.db.StudyDatabase
 import kotlinx.coroutines.CancellationException
@@ -105,8 +106,9 @@ class RoughReadPlanner(
     ): RoughReadOutcome = withContext(Dispatchers.IO) {
         val chapter = db.chapterDao().byIdOnce(chapterId)
             ?: throw PlannerException("章节不存在")
-        val paragraphs = db.paragraphDao().byChapter(chapterId)
-        if (paragraphs.isEmpty()) throw PlannerException("本章没有段落")
+        // OPT-C C4：TOC 段不进粗读全链路（分块/标注/归并/计数都不含目录条目）
+        val paragraphs = db.paragraphDao().byChapter(chapterId).filter { it.role != DbValues.ROLE_TOC }
+        if (paragraphs.isEmpty()) throw PlannerException("本章是目录或无正文内容，无需粗读")
 
         val key = settings.decryptKeyOrNull()
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
@@ -190,7 +192,9 @@ class RoughReadPlanner(
             totalBlocks = blocks.size,
             mergeDegraded = degraded,
             mergeKeptOld = keptOld,
-            unitCount = countUnits(db.paragraphDao().byChapter(chapterId)),
+            unitCount = countUnits(
+                db.paragraphDao().byChapter(chapterId).filter { it.role != DbValues.ROLE_TOC },
+            ),
         )
     }
 
