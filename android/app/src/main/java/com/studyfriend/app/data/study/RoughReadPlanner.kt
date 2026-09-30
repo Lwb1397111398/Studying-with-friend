@@ -249,7 +249,7 @@ class RoughReadPlanner(
             model = cfg.model,
             temperature = 0.2,
             // 推理型模型的思考 token 计入 max_tokens：预算不足会被思考吃光、正文截断
-            maxTokens = (block.paragraphs.size * 130 + 600).coerceIn(8192, 32_768),
+            maxTokens = (block.paragraphs.size * 130 + 600).coerceIn(16_384, 32_768),
             messages = listOf(
                 AiMessage("system", filled),
                 AiMessage("user", paragraphsJson(block)),
@@ -316,7 +316,7 @@ class RoughReadPlanner(
                         baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
                         temperature = 0.2,
                         // 原值 800 会被推理模型的思考 token 吃光导致正文截断
-                        maxTokens = 8192,
+                        maxTokens = 16_384,
                         messages = listOf(
                             AiMessage("user", PromptLoader.load(context, PROMPT_MERGE) + contributions.joinToString("\n")),
                         ),

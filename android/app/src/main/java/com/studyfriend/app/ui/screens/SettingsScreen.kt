@@ -3,6 +3,8 @@ package com.studyfriend.app.ui.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +27,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.studyfriend.app.data.SettingsRepository
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(vm: SettingsViewModel) {
     val busy = vm.busy
@@ -57,9 +60,9 @@ fun SettingsScreen(vm: SettingsViewModel) {
                 singleLine = true,
             )
 
-            // 快捷预设：一键填入服务商地址与推荐模型（保存前不落库）
+            // 快捷预设：一键填入服务商地址与推荐模型（保存前不落库）；FlowRow 换行防溢出
             Text("快速填入", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SettingsRepository.PRESETS.forEach { (label, base, model) ->
                     FilterChip(
                         selected = vm.baseUrl == base && vm.model == model,

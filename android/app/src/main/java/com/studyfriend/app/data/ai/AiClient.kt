@@ -144,10 +144,16 @@ object AiClient {
         }
         // 立刻重打常撞限流窗口；稍等片刻再要 JSON（推理模型输出长，也给网关喘息）
         delay(1_500)
+        // 正文为空 = 思考吃满了输出预算（finish=length）：原样重打只会再收到一次空串，
+        // 必须翻倍预算并换提示（"不是合法 JSON"对空正文场景语义不准）。
+        // maxTokens=null 的请求无从翻倍、沿用服务端默认预算（当前所有 chatJson 调用方都显式传值）
+        val blankContent = first.isBlank()
         val retryReq = req.copy(
+            maxTokens = if (blankContent) req.maxTokens?.let { it * 2 } else req.maxTokens,
             messages = req.messages +
-                AiMessage("assistant", first.take(2000)) +
-                AiMessage("user", RETRY_HINT),
+                // 空正文时不追加空 content 的 assistant 消息（部分网关校验拒绝空 content）
+                (if (!blankContent) listOf(AiMessage("assistant", first.take(2000))) else emptyList()) +
+                AiMessage("user", if (blankContent) BLANK_CONTENT_HINT else RETRY_HINT),
         )
         val second = chat(retryReq, onDelta)
         try {
@@ -159,6 +165,8 @@ object AiClient {
     }
 
     private const val RETRY_HINT = "你上一次的输出不是合法 JSON。请只输出 JSON，不要任何其他文字、解释或代码围栏。"
+
+    private const val BLANK_CONTENT_HINT = "上一次回复没有任何正文内容（可能是思考耗尽了输出预算），请直接输出最终结果本身。"
 
     private fun bodyOf(req: ChatRequest): String = buildJsonObject {
         put("model", req.model)

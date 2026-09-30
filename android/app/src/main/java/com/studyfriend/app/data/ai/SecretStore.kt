@@ -75,6 +75,110 @@ class KeyStoreSecretStore : SecretStore {
     }
 }
 
+/**
+ * 密钥来源弹性链（OPT-A）：AndroidKeyStore 优先；任何异常（无 provider / keystore 损坏 /
+ * caller-nonce 被拒 / 生成失败）回退软件密钥文件，保证保存链无单点失败（实测 P1）。
+ * 密文来源前缀 k1:/s1:（无前缀=遗留 k1）决定解密用哪侧实现；标记实现失败即抛给上层
+ * 提示重填，不做静默删除（keystore 可能只是暂时故障，删除会毁掉本可恢复的 Key）。
+ * 保存侧两条路径全败时在此统一包装 SecretCryptoException（文案含底层原因）。
+ * 软件密钥存 noBackupFilesDir（沙箱内且不入云备份/设备迁移），权衡记录于 docs/plans/OPT-总计划.md §3。
+ */
+class ResilientSecretStore(context: android.content.Context) : SecretStore {
+
+    private val keystore = KeyStoreSecretStore()
+    private val soft = SoftwareKeyFileStore(context)
+
+    override fun encrypt(plain: String): String = try {
+        MARK_KEYSTORE + keystore.encrypt(plain)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // keystore 整链失败 → 软件密钥兜底，密文带 s1 标记
+        try {
+            MARK_SOFTWARE + soft.encrypt(plain)
+        } catch (e2: CancellationException) {
+            throw e2
+        } catch (e2: Exception) {
+            // 两条路径都失败：统一在此包装最终失败（含底层原因），调用方拿到 SecretCryptoException
+            throw SecretCryptoException("无法保存 API Key（密钥不可用：${e2.message ?: e.message ?: "未知"}）", e2)
+        }
+    }
+
+    override fun decrypt(payload: String): String {
+        val (marker, body) = splitMarker(payload)
+        val err = try {
+            return when (marker) {
+                MARK_SOFTWARE -> soft.decrypt(body)
+                else -> keystore.decrypt(body) // k1 与无前缀遗留密文同走 KeyStore
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            e
+        }
+        throw SecretCryptoException(
+            // err 本身可能已带"请重新填写"文案，取其 cause 的技术性原因，避免双层包装文案重复
+            "密钥已失效，请重新填写 API Key（${err.cause?.message ?: err.message ?: "密文无法解读"}）",
+            err,
+        )
+    }
+
+    private fun splitMarker(payload: String): Pair<String, String> =
+        splitCipherMarker(payload) ?: (MARK_KEYSTORE to payload) // 遗留密文无前缀
+}
+
+/** 密文来源前缀：k1 = AndroidKeyStore（含无前缀遗留密文），s1 = 软件密钥文件 */
+internal const val MARK_KEYSTORE = "k1:"
+internal const val MARK_SOFTWARE = "s1:"
+
+/** 按前缀拆分密文来源标记；无前缀（遗留 k1 密文）返回 null */
+internal fun splitCipherMarker(payload: String): Pair<String, String>? = when {
+    payload.startsWith(MARK_KEYSTORE) -> MARK_KEYSTORE to payload.removePrefix(MARK_KEYSTORE)
+    payload.startsWith(MARK_SOFTWARE) -> MARK_SOFTWARE to payload.removePrefix(MARK_SOFTWARE)
+    else -> null
+}
+
+/**
+ * 结构性损坏：带来源标记但 body 不是合法 Base64——密钥来源无关，任何实现都永远解不开，
+ * 删除是唯一出路；其余解密失败一律保留密文（keystore 可能只是暂时故障，重启可愈）。
+ */
+internal fun isStructurallyCorrupt(payload: String): Boolean {
+    val body = splitCipherMarker(payload)?.second ?: return false
+    return try {
+        java.util.Base64.getDecoder().decode(body)
+        false
+    } catch (e: IllegalArgumentException) {
+        true
+    }
+}
+
+/** AndroidKeyStore 不可用时的兜底：随机 AES-256 密钥存 noBackupFilesDir（Base64），协议不变 */
+class SoftwareKeyFileStore(context: android.content.Context) : SecretStore {
+
+    private val file = java.io.File(context.noBackupFilesDir, "secret_key.bin")
+
+    @Synchronized
+    private fun key(): javax.crypto.SecretKey {
+        if (file.exists()) {
+            try {
+                val raw = java.util.Base64.getDecoder().decode(file.readText())
+                return javax.crypto.spec.SecretKeySpec(raw, "AES")
+            } catch (e: Exception) {
+                // 密钥文件损坏（写入中断/磁盘满）：与 keystore 自愈同语义，删除重建
+                file.delete()
+            }
+        }
+        val k = SecretCrypto.newKey()
+        file.parentFile?.mkdirs()
+        file.writeText(java.util.Base64.getEncoder().encodeToString(k.encoded))
+        return k
+    }
+
+    override fun encrypt(plain: String): String = SecretCrypto.encrypt(plain, key())
+
+    override fun decrypt(payload: String): String = SecretCrypto.decrypt(payload, key())
+}
+
 /** 失效路径单测用：可配置 decrypt 抛异常的假实现（可逆"加密"用 reverse 模拟） */
 class FakeSecretStore(
     private val failDecrypt: Boolean = false,

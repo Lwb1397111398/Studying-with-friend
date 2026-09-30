@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.studyfriend.app.data.ai.SecretCrypto
 import com.studyfriend.app.data.ai.SecretCryptoException
 import com.studyfriend.app.data.ai.SecretStore
+import com.studyfriend.app.data.ai.isStructurallyCorrupt
 import com.studyfriend.app.data.db.SettingEntity
 import com.studyfriend.app.data.db.StudyDatabase
 import javax.crypto.SecretKey
@@ -19,7 +20,8 @@ data class SettingsSnapshot(
 /**
  * 设置存取（计划 M3 §1/§2）：普通配置直存 settings 表；
  * API Key 经 SecretStore 加密为 Base64(iv||ct) 存 `api_key_enc`，明文不落库。
- * 解密发现密钥失效（换机/清数据）时删掉旧密文，让用户重填。
+ * 解密失败不删密文（keystore 可能暂时故障）；仅"结构性损坏"（带来源标记但非合法
+ * Base64，永远解不开）删除密文让用户重填（OPT-A Task A2）。
  */
 class SettingsRepository(
     private val db: StudyDatabase,
@@ -65,13 +67,20 @@ class SettingsRepository(
         db.settingDao().delete(KEY_ENC)
     }
 
-    /** 解出明文 Key 供 AiClient 使用；密钥失效时删掉旧密文并返回 null */
+    /**
+     * 解出明文 Key 供 AiClient 使用。解密失败仅返回 null、保留密文（OPT-A）：
+     * keystore 可能只是暂时故障，删除会毁掉本可恢复的 Key；唯一例外是
+     * 结构性损坏（带 k1:/s1: 标记但 body 非合法 Base64）——任何实现都解不开，删除。
+     */
     suspend fun decryptKeyOrNull(): String? {
         val payload = db.settingDao().get(KEY_ENC)?.value ?: return null
+        if (isStructurallyCorrupt(payload)) {
+            db.settingDao().delete(KEY_ENC)
+            return null
+        }
         return try {
             store.decrypt(payload)
         } catch (e: SecretCryptoException) {
-            db.settingDao().delete(KEY_ENC)
             null
         }
     }
@@ -85,7 +94,8 @@ class SettingsRepository(
 
         /** 快捷预设（label, baseUrl, model）：设置页一键填入，保存前不落库 */
         val PRESETS = listOf(
-            Triple("商汤 · GLM-5.2（推荐）", "https://token.sensenova.cn/v1", "glm-5.2"),
+            Triple("美团 · LongCat（推荐）", "https://api.longcat.chat/openai/v1", "LongCat-2.5-Preview"),
+            Triple("商汤 · GLM-5.2", "https://token.sensenova.cn/v1", "glm-5.2"),
             Triple("商汤 · DeepSeek-V4", "https://token.sensenova.cn/v1", "deepseek-v4-flash"),
             Triple("商汤 · Flash-Lite（快）", "https://token.sensenova.cn/v1", "sensenova-6.8-flash-lite"),
         )

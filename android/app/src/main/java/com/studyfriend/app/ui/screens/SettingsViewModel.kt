@@ -12,7 +12,6 @@ import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
 import com.studyfriend.app.data.ai.ChatRequest
-import com.studyfriend.app.data.ai.KeyStoreSecretStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -20,7 +19,7 @@ import kotlinx.coroutines.launch
 /** 设置页：读写配置 + 测试连接（计划 M3 §1） */
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val repo = SettingsRepository((app as StudyApp).database, KeyStoreSecretStore())
+    private val repo = SettingsRepository((app as StudyApp).database, (app as StudyApp).secretStore)
 
     var baseUrl by mutableStateOf(SettingsRepository.DEFAULT_BASE)
     var model by mutableStateOf(SettingsRepository.DEFAULT_MODEL)
@@ -103,7 +102,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                         model = model,
                         temperature = AiClient.parseTemperature(tempText),
                         // 推理型模型会先输出思考 token：预算太小只能收到空正文
-                        maxTokens = 512,
+                        maxTokens = 2048,
                         messages = listOf(AiMessage("user", "ping")),
                     ),
                 ) { delta -> liveDelta += delta }

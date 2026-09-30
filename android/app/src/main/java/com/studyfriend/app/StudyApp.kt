@@ -3,7 +3,8 @@ package com.studyfriend.app
 import android.app.Application
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.ai.AiGate
-import com.studyfriend.app.data.ai.KeyStoreSecretStore
+import com.studyfriend.app.data.ai.ResilientSecretStore
+import com.studyfriend.app.data.ai.SecretStore
 import com.studyfriend.app.data.db.StudyDatabase
 import com.studyfriend.app.data.study.AiClientChatJsonFn
 import com.studyfriend.app.data.study.AiClientChatTextFn
@@ -24,8 +25,11 @@ class StudyApp : Application() {
     /** 全局 AI 互斥：粗读与讲解共用一把锁，任何时刻只跑一个 AI 任务（M4b §2.5） */
     val aiGate: AiGate = AiGate()
 
+    /** 应用级密钥仓单例（OPT-A）：keystore 优先、软件密钥兜底；设置页与双 Runner 共享 */
+    val secretStore: SecretStore by lazy { ResilientSecretStore(applicationContext) }
+
     /** 设置仓库（无状态、读时解密）：双 Runner 共享一份（质检 P2-5） */
-    private val settingsRepo: SettingsRepository by lazy { SettingsRepository(database, KeyStoreSecretStore()) }
+    private val settingsRepo: SettingsRepository by lazy { SettingsRepository(database, secretStore) }
 
     /** 全局唯一粗读任务管理：返回书架/换页不中断，start 前自动替换旧任务 */
     val roughReadRunner: RoughReadRunner by lazy {

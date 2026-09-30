@@ -184,4 +184,31 @@ class AiClientTest {
             server.stop()
         }
     }
+
+    @Test
+    fun chatJson_blankContent_retryDoublesMaxTokens_andUsesBlankHint() {
+        val calls = AtomicInteger(0)
+        val bodies = ConcurrentLinkedQueue<String>()
+        val server = MiniHttpServer { _, _, body, resp ->
+            bodies.add(body)
+            val n = calls.incrementAndGet()
+            // 第一次正文为空（推理模型思考吃满预算），第二次才给合法 JSON
+            resp.sse(if (n == 1) listOf("") else listOf("{\"a\":2}"))
+        }
+        try {
+            @Serializable
+            data class Dummy(val a: Int)
+            val result = runBlocking { AiClient.chatJson(request(server.baseUrl), serializer<Dummy>()) {} }
+            assertEquals(Dummy(2), result)
+            assertEquals(2, calls.get())
+            bodies.poll() // 第一次请求体
+            val retryBody = bodies.poll()
+            // request() 助手固定 maxTokens=16：空正文重试必须翻倍
+            assertTrue("重试请求应带翻倍预算 max_tokens=32", retryBody?.contains("\"max_tokens\":32") == true)
+            // 空正文场景的提示语义不是"不是合法 JSON"
+            assertTrue(retryBody?.contains("直接输出最终结果本身") == true)
+        } finally {
+            server.stop()
+        }
+    }
 }
