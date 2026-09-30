@@ -17,6 +17,7 @@ import com.studyfriend.app.data.db.ChapterEntity
 import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.importer.BookParser
+import com.studyfriend.app.data.importer.CancelledImportException
 import com.studyfriend.app.data.importer.CustomRegexNoMatchException
 import com.studyfriend.app.data.importer.DecodeException
 import com.studyfriend.app.data.importer.ParsedChapter
@@ -53,6 +54,21 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     var isPdf by mutableStateOf(false)
         private set
 
+    /** PDF 提取进度 (page,total)；null=非提取阶段 */
+    var progress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+
+    /** 当前阶段文案：读取文件 / 提取 PDF 文字 / 解析章节结构；null=空闲 */
+    var phase by mutableStateOf<String?>(null)
+        private set
+
+    private val cancelFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 用户取消：提取循环在下一个检查点中止（解析中点取消则解析完成后生效） */
+    fun cancelImport() {
+        if (busy) cancelFlag.set(true)
+    }
+
     private var sourceText: String? = null
     private var sourceType = DbValues.SRC_PASTE
     private var sourceUri = ""
@@ -70,9 +86,11 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 粘贴文本导入（无文件，编码不参与） */
     fun loadPasted(text: String) {
+        if (busy) return
         viewModelScope.launch {
             busy = true
             error = null
+            cancelFlag.set(false)
             try {
                 sourceText = text
                 sourceType = DbValues.SRC_PASTE
@@ -91,10 +109,12 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun loadFile(uri: Uri) {
+        if (busy) return // 防重复选择竞态
         val app = getApplication<StudyApp>()
         viewModelScope.launch {
             busy = true
             error = null
+            cancelFlag.set(false)
             try {
                 try {
                     app.contentResolver.takePersistableUriPermission(
@@ -111,8 +131,14 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     val isPdfFile = displayName.endsWith(".pdf", ignoreCase = true) ||
                         app.contentResolver.getType(uri) == "application/pdf"
                     val content = if (isPdfFile) {
-                        PdfLoader.extract(app, uri)
+                        phase = "提取 PDF 文字"
+                        PdfLoader.extract(
+                            app, uri,
+                            onProgress = { p, t -> progress = p to t },
+                            isCancelled = { cancelFlag.get() },
+                        )
                     } else {
+                        phase = "读取文件"
                         TextLoader.decode(
                             app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                                 ?: ByteArray(0),
@@ -121,6 +147,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     Triple(displayName, isPdfFile, content)
                 }
+                progress = null // 提取结束，进度条让位给解析阶段文案
                 sourceText = text
                 sourceType = if (pdf) DbValues.SRC_PDF else DbValues.SRC_TXT
                 sourceUri = uri.toString()
@@ -133,6 +160,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 parse()
             } catch (e: DecodeException) {
                 failRead(e.message)
+            } catch (e: CancelledImportException) {
+                // 取消≠失败：保留既有 chapters/sourceText，仅提示
+                parseNote = "已取消导入"
             } catch (e: PdfImportException) {
                 failRead(e.message)
             } catch (e: OutOfMemoryError) {
@@ -142,6 +172,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 failRead("读取失败：${e.message ?: "未知错误"}")
             } finally {
                 busy = false
+                progress = null
+                phase = null
             }
         }
     }
@@ -163,8 +195,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 换识别规则重切（§2.3）；null 恢复内置正则族。失败时保留当前解析结果 */
     fun reparse(regex: String?) {
+        if (busy) return
         viewModelScope.launch {
             busy = true
+            cancelFlag.set(false)
             try {
                 currentRegex = regex?.takeIf { it.isNotBlank() }
                 editedTitles.clear() // 章节列表即将重建，旧 index 改名不可信
@@ -233,6 +267,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         imported = false
         isPdf = false
         currentRegex = null
+        progress = null
+        phase = null
+        cancelFlag.set(false)
         editedTitles.clear()
     }
 
@@ -241,6 +278,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         val text = sourceText ?: return
         error = null
         parseNote = null
+        phase = "解析章节结构"
         try {
             val result = withContext(Dispatchers.Default) {
                 BookParser.parse(text, currentRegex)
@@ -263,6 +301,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             error = "识别规则正则无效：${e.description ?: e.message ?: "语法错误"}"
         } catch (e: CustomRegexNoMatchException) {
             error = e.message
+        } finally {
+            phase = null
         }
     }
 

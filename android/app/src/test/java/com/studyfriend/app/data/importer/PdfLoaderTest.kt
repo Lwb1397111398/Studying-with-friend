@@ -110,5 +110,89 @@ class PdfLoaderTest {
         } catch (e: PdfImportException) {
             assertTrue(e.message!!.contains("PDF"))
         }
+        assertTempFilesCleaned() // 损坏路径同样必须清理
+    }
+
+    @Test
+    fun progressCallback_advancesPerPage_includingBoundaries() {
+        val bytes = pdfBytes(listOf(fillerLines("Chapter 1 A", 4), fillerLines("Chapter 2 B", 4), fillerLines("Chapter 3 C", 4)))
+        val seen = mutableListOf<Pair<Int, Int>>()
+        // 尾随 lambda 会绑定到最后一个参数 isCancelled，进度回调必须用命名参数
+        PdfLoader.extract(context, toUri(bytes), onProgress = { p, t -> seen.add(p to t) })
+        assertEquals(0 to 3, seen.first())
+        assertEquals(3 to 3, seen.last())
+        assertEquals((0..3).toList(), seen.map { it.first }) // 单调不减且连续
+    }
+
+    @Test
+    fun cancelCheckpoint_throwsCancelledImport_andCleansTempFile() {
+        val bytes = pdfBytes(listOf(fillerLines("Chapter 1 A", 4), fillerLines("Chapter 2 B", 4)))
+        var calls = 0
+        try {
+            PdfLoader.extract(context, toUri(bytes), isCancelled = { ++calls > 1 }) // 在某个检查点触发（复制段/逐页段均可）
+            throw AssertionError("应当抛出取消")
+        } catch (e: PdfImportException) {
+            assertTrue(e.message!!.contains("取消"))
+        }
+        assertTempFilesCleaned()
+    }
+
+    @Test
+    fun tempFile_removedAfterSuccess() {
+        val bytes = pdfBytes(listOf(fillerLines("Chapter 1 A", 4)))
+        PdfLoader.extract(context, toUri(bytes))
+        assertTempFilesCleaned()
+    }
+
+    @Test
+    fun pageLoopCheckpoint_cancelsAfterProgressStarted() {
+        // 专项覆盖逐页检查点（上一例对小 fixture 实际触发在复制段）：
+        // 若页循环无检查点，extract 会正常完成 → AssertionError，本例即红
+        val bytes = pdfBytes(
+            listOf(fillerLines("Chapter 1 A", 4), fillerLines("Chapter 2 B", 4), fillerLines("Chapter 3 C", 4)),
+        )
+        var progressed = 0
+        try {
+            PdfLoader.extract(
+                context, toUri(bytes),
+                onProgress = { _, _ -> progressed++ },
+                isCancelled = { progressed >= 2 }, // (0,total) 与第 1 页进度已发后，在页循环内中止
+            )
+            throw AssertionError("应当抛出取消")
+        } catch (e: PdfImportException) {
+            assertTrue(e.message!!.contains("取消"))
+            assertTrue("取消应发生在页循环推进之后", progressed >= 2)
+        }
+        assertTempFilesCleaned()
+    }
+
+    @Test
+    fun copySectionCheckpoint_cancelsBeforePageLoop_onLargeFile() {
+        // 闭合验收缺口：>64KB 多块文件，第 2 个 64KB 块的复制检查点即触发取消；
+        // progressed==0 证明取消发生在复制段（若删掉复制循环内检查点，取消会
+        // 延迟到页循环、progressed≥1，本例即红）
+        val pages = List(200) { fillerLines("Chapter filler page $it", 50) }
+        val bytes = pdfBytes(pages)
+        assertTrue("fixture 必须 >64KB 才能跨多个复制块", bytes.size > 64 * 1024)
+        var calls = 0
+        var progressed = 0
+        try {
+            PdfLoader.extract(
+                context, toUri(bytes),
+                onProgress = { _, _ -> progressed++ },
+                isCancelled = { ++calls > 1 },
+            )
+            throw AssertionError("应当抛出取消")
+        } catch (e: PdfImportException) {
+            assertTrue(e.message!!.contains("取消"))
+            assertEquals("取消应发生在复制段（未进入页循环）", 0, progressed)
+        }
+        assertTempFilesCleaned()
+    }
+
+    /** 三路径（成功/取消/损坏）共用的清理断言 */
+    private fun assertTempFilesCleaned() {
+        val leftovers = context.cacheDir.listFiles { f -> f.name.startsWith("import_") } ?: emptyArray()
+        assertTrue("不应残留临时文件：${leftovers.toList()}", leftovers.isEmpty())
     }
 }

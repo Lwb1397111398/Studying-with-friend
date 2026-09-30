@@ -55,6 +55,8 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
     val author = vm.author
     val encoding = vm.encoding
     val isPdf = vm.isPdf
+    val phase = vm.phase
+    val progress = vm.progress
 
     var showPaste by remember { mutableStateOf(false) }
     var encMenuOpen by remember { mutableStateOf(false) }
@@ -108,7 +110,8 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
             if (!isPdf) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("编码：", style = MaterialTheme.typography.bodyMedium)
-                    OutlinedButton(onClick = { encMenuOpen = true }) { Text(encoding) }
+                    // busy 期间禁用：否则选中新编码后 loadFile 被守卫拦截，下拉与实际解码编码不一致
+                    OutlinedButton(onClick = { encMenuOpen = true }, enabled = !busy) { Text(encoding) }
                     DropdownMenu(expanded = encMenuOpen, onDismissRequest = { encMenuOpen = false }) {
                         encodingChoices.forEach { choice ->
                             DropdownMenuItem(
@@ -140,13 +143,25 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
                 }
             }
 
-            if (busy && chapters.isEmpty()) {
+            // 守卫用 phase/progress 而非 busy：落库阶段（busy=true 但两态皆空）不可中断事务，
+            // 沿用顶部不定进度条、不渲染取消按钮；仅提取段（含复制段）取消即时可达检查点
+            if (phase != null || progress != null) {
+                val p = progress
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    CircularProgressIndicator(Modifier.height(16.dp))
-                    Text("正在读取与解析…", style = MaterialTheme.typography.bodySmall)
+                    if (p != null) {
+                        LinearProgressIndicator(
+                            progress = { p.first.toFloat() / p.second },
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text("提取 PDF ${p.first}/${p.second} 页", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        CircularProgressIndicator(Modifier.height(16.dp))
+                        Text(phase ?: "", style = MaterialTheme.typography.bodySmall)
+                    }
+                    TextButton(onClick = { vm.cancelImport() }) { Text("取消") }
                 }
             }
 
