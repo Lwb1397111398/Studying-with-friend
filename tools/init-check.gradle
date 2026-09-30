@@ -1,0 +1,14 @@
+allprojects {
+    afterEvaluate { proj ->
+        def ext = proj.extensions.findByName("android")
+        if (ext != null) {
+            try {
+                ext.sourceSets.getByName("test").assets.srcDirs.each {
+                    println "TEST_ASSET_DIR: ${it}"
+                }
+            } catch (Exception e) {
+                println "TEST_ASSET_DIR_ERROR: ${e}"
+            }
+        }
+    }
+}
