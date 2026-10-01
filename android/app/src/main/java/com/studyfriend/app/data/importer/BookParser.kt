@@ -36,7 +36,7 @@ object BookParser {
     private val RE_C_NUM = Regex("^\\d{1,3}(\\.\\d{1,3})+[、.．]?\\s*\\S")
     private val RE_C_NUM1 = Regex("^\\d{1,3}[、.．]\\s*\\S")
 
-    // 标题不以句读标点结尾（护栏）
+    // 标题不以句读标点结尾（护栏）。与下方 RE_MID_PUNCT 同属标点护栏体系，加字符时两处对齐
     private val END_PUNCT = "。？！，、；,.?!;"
 
     // 目录条目形态：点线/省略号 + 页码结尾（"第一章 导论……1"），不是标题。
@@ -46,6 +46,18 @@ object BookParser {
     // 页眉护栏（OPT-C C2）：行尾"CJK 字 + 页码"（如页眉"第一章 私法绪论 3"）不是标题。
     // 只拦内置 A/B 档命中（C 档样式数字内嵌不受影响；custom 路径 = 用户手工重切，不拦）
     private val RE_TRAIL_PAGE = Regex("[\\u4e00-\\u9FFF]\\s*\\d{1,4}\\s*$")
+
+    // A 档实书回归护栏（OPT-D，E2E 真书《民法总则》630 页实测发现）：
+    // 正文里引用章节结构的行（"第二章婚姻规定，未使……" / "第四章：法律行为 第一节：权利能力"）
+    // 会被 RE_A_HAN 误判成章标题并吞走正文。三道护栏只作用于 A_HAN 命中：
+    // ①超长不认（真章标题如"第二章 民法的法源及法律的适用"仅 15 字）；
+    // ②行中含句读不认（章标题不以逗号分句）；
+    // ③章+节同行不认（真章标题独占一行，"第X节"另起一行）。
+    // 英文 Chapter 行（A_LATIN）天然偏长，不受此限；B/C 档与 custom 路径不拦。
+    private const val A_TITLE_MAX_LEN = 24
+    // 顿号(、)刻意不在列：法定书章名大量含顿号（如《民法典》"物权的设立、变更、转让和消灭"）
+    private val RE_MID_PUNCT = Regex("[，,；;]")
+    private val RE_SECTION_INLINE = Regex("第[一二三四五六七八九十百千0-9零〇两]+[节讲]")
 
     private const val TITLE_MAX_LEN = 40
     private const val BLIND_CUT_THRESHOLD = 50_000
@@ -265,6 +277,12 @@ object BookParser {
         // 页眉护栏：内置 A/B 档命中但行尾是"CJK+页码"（PDF 页眉"第一章 私法绪论 3"）→ 降为正文。
         // 英文标题（Chapter 12 Something）不以 CJK 结尾，不受影响；C 档数字内嵌样式不受影响
         if (hit.second != "CUSTOM" && hit.first <= GRADE_B && RE_TRAIL_PAGE.containsMatchIn(t)) return null
+        // OPT-D：A 档中文命中三护栏（超长 / 行中句读 / 章+节同行）→ 正文，见常量处注释
+        if (hit.second == "A_HAN") {
+            if (t.length > A_TITLE_MAX_LEN) return null
+            if (RE_MID_PUNCT.containsMatchIn(t)) return null
+            if (RE_SECTION_INLINE.containsMatchIn(t)) return null
+        }
         return hit
     }
 

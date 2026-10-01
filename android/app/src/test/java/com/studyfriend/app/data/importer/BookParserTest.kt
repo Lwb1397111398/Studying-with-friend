@@ -348,4 +348,70 @@ class BookParserTest {
     fun customRegex_invalidPattern_throws() {
         BookParser.parse("正文。", "^[未闭合")
     }
+
+    // ---- 5.11 A 档实书回归护栏（E2E 真书《民法总则》发现：正文引用章节结构的句子被误判为章标题） ----
+
+    @Test
+    fun longCommaClauseAfterChapterPrefix_notATitle() {
+        // 正文行"第二章婚姻规定，未使相同性别二人，……"是行文长句，不是章标题
+        val text = """
+            第一章 导论
+
+            导论正文。
+
+            第二章婚姻规定，未使相同性别二人，得为经营共同生活之目的，成立具有特别考量
+
+            后续正文段落。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 导论"), chapters.map { it.title })
+        assertTrue(chapters[0].paras.any { it.text.startsWith("第二章婚姻规定") })
+    }
+
+    @Test
+    fun chapterPlusSectionSameLine_notATitle() {
+        // "第四章：法律行为 第一节：权利能力"是正文引用的章+节合并行，不是章标题
+        val text = """
+            第一章 导论
+
+            第四章：法律行为 第一节：权利能力
+
+            正文继续。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 导论"), chapters.map { it.title })
+        assertTrue(chapters[0].paras.any { it.text.contains("第一节") })
+    }
+
+    @Test
+    fun overlyLongHanChapterLine_notATitle() {
+        // 超过 24 字的"第X章"行是行文不是标题
+        val longLine = "第二章这一章的标题长得实在离谱已经完全超出了正常书籍章节标题应有的长度"
+        val text = """
+            第一章 导论
+
+            $longLine
+
+            正文继续。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 导论"), chapters.map { it.title })
+        assertTrue(chapters[0].paras.any { it.text.contains("应有的长度") })
+    }
+
+    @Test
+    fun ideographCommaInRealStatuteTitle_stillAChapter() {
+        // 顿号是法定书章名常态（《民法典》物权编第二章），不得因行中顿号误杀（评审 P2-1）
+        val text = """
+            第一章 导论
+
+            导论正文。
+
+            第二章 物权的设立、变更、转让和消灭
+
+            物权正文。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 导论", "第二章 物权的设立、变更、转让和消灭"), chapters.map { it.title })
+    }
 }
