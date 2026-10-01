@@ -210,15 +210,17 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 视觉转写器（OPT-E）：开关开且有可用 Key 才建；复用同一 API 地址与 Key，
-     * 模型用独立的 visionModel（聊天用的文本模型不一定带视觉）。
+     * 视觉转写器（OPT-E）：开关开且有可用 Key 才建；模型独立（聊天用的文本模型
+     * 不一定带视觉）。地址/Key 可配专属值（视觉供应商与文本模型不同家），
+     * 留空回退主配置。
      * 返回 null = 跳过视觉；此时扫描版会由 PdfLoader 按原语义抛友好提示。
      */
     private suspend fun visionOrNull(): VisionTranscriber? {
         val snap = settings.load()
         if (!snap.visionEnabled) return null
-        val key = settings.decryptKeyOrNull() ?: return null
-        return VisionTranscriber(snap.baseUrl, key, snap.visionModel)
+        val key = settings.resolveVisionKeyOrNull() ?: return null
+        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
+        return VisionTranscriber(base, key, snap.visionModel)
     }
 
     /**

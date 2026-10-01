@@ -147,4 +147,38 @@ class SettingsRepoTest {
         // 验收 3：LongCat 必须居首位（全列表唯一推荐位）
         assertEquals("美团 · LongCat（推荐）", SettingsRepository.PRESETS.first().first)
     }
+
+    @Test
+    fun visionIndependentBaseAndKey_roundTripAndFallback() = runBlocking {
+        // 视觉专属地址/Key 独立存取；未配置时视觉 Key 回退主 Key；清除后同样回退
+        val database = db()
+        val repo = SettingsRepository(database, FakeSecretStore())
+        try {
+            repo.save("https://a.example.com/v1", "m1", 0.3, "main-key-123")
+            assertFalse(repo.load().hasVisionKey)
+            assertEquals("main-key-123", repo.resolveVisionKeyOrNull())
+
+            repo.saveVision(true, "vision-m", "https://vision.example.com/v1", "vision-key-789")
+            val snap = repo.load()
+            assertTrue(snap.hasVisionKey)
+            assertEquals("https://vision.example.com/v1", snap.visionBaseUrl)
+            assertEquals("vision-m", snap.visionModel)
+            assertEquals("vision-key-789", repo.decryptVisionKeyOrNull())
+            assertEquals("vision-key-789", repo.resolveVisionKeyOrNull())
+            assertEquals("main-key-123", repo.decryptKeyOrNull()) // 主 Key 不受影响
+
+            // 开关即点即存（其余参数缺省）不覆盖已存的地址与 Key
+            repo.saveVision(false)
+            val snap2 = repo.load()
+            assertFalse(snap2.visionEnabled)
+            assertEquals("https://vision.example.com/v1", snap2.visionBaseUrl)
+            assertEquals("vision-key-789", repo.resolveVisionKeyOrNull())
+
+            repo.clearVisionKey()
+            assertFalse(repo.load().hasVisionKey)
+            assertEquals("main-key-123", repo.resolveVisionKeyOrNull())
+        } finally {
+            database.close()
+        }
+    }
 }

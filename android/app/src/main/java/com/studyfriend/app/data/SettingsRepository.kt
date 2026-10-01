@@ -19,6 +19,10 @@ data class SettingsSnapshot(
     val visionEnabled: Boolean,
     /** 视觉转写模型：与聊天模型分离（聊天用的文本模型不一定带视觉） */
     val visionModel: String,
+    /** 视觉专属 API 地址：空 = 跟主配置同一家（文本走 A 家、视觉兜底走 B 家时才填） */
+    val visionBaseUrl: String,
+    /** 是否已存视觉专属 Key（明文不出库） */
+    val hasVisionKey: Boolean,
 )
 
 /**
@@ -45,6 +49,8 @@ class SettingsRepository(
             visionEnabled = db.settingDao().get(KEY_VISION_ENABLED)?.value != "false",
             visionModel = db.settingDao().get(KEY_VISION_MODEL)?.value
                 ?.takeIf { it.isNotBlank() } ?: DEFAULT_VISION_MODEL,
+            visionBaseUrl = db.settingDao().get(KEY_VISION_BASE)?.value.orEmpty(),
+            hasVisionKey = db.settingDao().get(KEY_VISION_KEY_ENC)?.value != null,
         )
     }
 
@@ -74,21 +80,60 @@ class SettingsRepository(
         db.settingDao().delete(KEY_ENC)
     }
 
-    /** 视觉兜底配置（OPT-E）：开关即点即存；模型名非空时一并更新 */
-    suspend fun saveVision(enabled: Boolean, model: String? = null) {
+    /**
+     * 视觉兜底配置（OPT-E）：开关即点即存；模型/地址/Key 随"保存"按钮落库。
+     * null = 保持不变（即点即存路径只传开关，不覆盖输入框里未保存的值）；
+     * baseUrl 传空串 = 显式清空专属地址（回退主配置）；Key 只在非空时加密写入。
+     */
+    suspend fun saveVision(
+        enabled: Boolean,
+        model: String? = null,
+        baseUrl: String? = null,
+        keyPlain: String? = null,
+    ) {
         db.withTransaction {
             db.settingDao().upsert(SettingEntity(KEY_VISION_ENABLED, if (enabled) "true" else "false"))
             if (!model.isNullOrBlank()) {
                 db.settingDao().upsert(SettingEntity(KEY_VISION_MODEL, model.trim()))
             }
+            if (baseUrl != null) {
+                db.settingDao().upsert(SettingEntity(KEY_VISION_BASE, baseUrl.trim()))
+            }
+            if (!keyPlain.isNullOrBlank()) {
+                val payload = store.encrypt(keyPlain.trim())
+                db.settingDao().upsert(SettingEntity(KEY_VISION_KEY_ENC, payload))
+            }
         }
     }
+
+    /** 清除视觉专属 Key（之后视觉回退用主 Key） */
+    suspend fun clearVisionKey() {
+        db.settingDao().delete(KEY_VISION_KEY_ENC)
+    }
+
+    /** 视觉兜底实际生效的 Key：专属 Key 优先，未配置回退主 Key（同一家时两处不用重复填） */
+    suspend fun resolveVisionKeyOrNull(): String? =
+        decryptVisionKeyOrNull() ?: decryptKeyOrNull()
 
     /**
      * 解出明文 Key 供 AiClient 使用。解密失败仅返回 null、保留密文（OPT-A）：
      * keystore 可能只是暂时故障，删除会毁掉本可恢复的 Key；唯一例外是
      * 结构性损坏（带 k1:/s1: 标记但 body 非合法 Base64）——任何实现都解不开，删除。
      */
+    /** 解视觉专属 Key，逻辑同 [decryptKeyOrNull]（仅结构性损坏才删密文） */
+    suspend fun decryptVisionKeyOrNull(): String? {
+        val payload = db.settingDao().get(KEY_VISION_KEY_ENC)?.value ?: return null
+        if (isStructurallyCorrupt(payload)) {
+            db.settingDao().delete(KEY_VISION_KEY_ENC)
+            return null
+        }
+        return try {
+            store.decrypt(payload)
+        } catch (e: SecretCryptoException) {
+            null
+        }
+    }
+
     suspend fun decryptKeyOrNull(): String? {
         val payload = db.settingDao().get(KEY_ENC)?.value ?: return null
         if (isStructurallyCorrupt(payload)) {
@@ -107,6 +152,8 @@ class SettingsRepository(
         const val KEY_DETAIL = "note_detail"
         const val KEY_VISION_ENABLED = "vision_enabled"
         const val KEY_VISION_MODEL = "vision_model"
+        const val KEY_VISION_BASE = "vision_base"
+        const val KEY_VISION_KEY_ENC = "vision_key_enc"
         val DETAIL_LEVELS = listOf("简略", "标准", "深入")
         const val DEFAULT_BASE = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"

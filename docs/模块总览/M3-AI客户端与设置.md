@@ -8,6 +8,7 @@
 | 功能 | 说明 |
 | --- | --- |
 | 设置页 | API 地址（placeholder 提示"一般以 /v1 结尾"）/ 模型名 / 温度（0.0–1.0）/ API Key 密码框（打码显示、trailingIcon 清除） |
+| 视觉兜底配置 | 开关（即点即存）+ 视觉 API 地址 + 视觉 API Key（独立加密存 `vision_key_enc`）+ 视觉模型名；地址/Key 留空回退主配置（文本走 A 家、视觉兜底走 B 家时才填专属值）； OPT-E 引入 |
 | Key 加密存储 | AndroidKeyStore AES-256 密钥 + SecretCrypto 协议：12B 随机 IV + 128 位 GCM tag，payload = `Base64(iv||ct)` 存 settings 表 `api_key_enc`，明文 Key 永不落库 |
 | 密钥失效自愈 | 解密任何异常（换机/清数据/密文损坏）→ 删旧密文 + 中文提示重填；encrypt 同样包装为 SecretCryptoException |
 | URL 规范化 | trim → 去尾 `/` → 非 `/chat/completions` 结尾自动拼上；用户粘贴全路径/带尾斜杠都兼容 |
@@ -26,7 +27,7 @@ data/ai/SecretCrypto.kt       AES/GCM 协议（纯 JVM object，encrypt/decrypt/
 data/ai/JsonSlicer.kt         JSON 剥壳（配平扫描，JsonSliceException）
 data/ai/AiClient.kt           SSE 客户端（normalizeChatUrl/parseTemperature/chat/chatJson/extractDelta）
 data/ai/SecretStore.kt        SecretStore 接口 + KeyStoreSecretStore + FakeSecretStore（测试）
-data/SettingsRepository.kt    load/save/clearKey/decryptKeyOrNull（hasKey 只给"是否已存"）
+data/SettingsRepository.kt    load/save/clearKey/decryptKeyOrNull + saveVision/clearVisionKey/decryptVisionKeyOrNull/resolveVisionKeyOrNull（hasKey/hasVisionKey 只给"是否已存"）
 data/db/Daos.kt               SettingDao.delete(key)（M3 新增）
 ui/screens/SettingsViewModel.kt  save/testConnection/cancelTest/clearKey，busy/testing 双向防抖
 ui/screens/SettingsScreen.kt  表单 UI + 实时流式预览 + 红/绿状态行
@@ -55,7 +56,7 @@ test/.../SettingsRepoTest.kt  4 用例（roundTrip/健康解密/失效删键/cle
 - JsonSlicer：直通 / json 围栏 / ``` 围栏 / 前后噪声 / 深嵌套 / 字符串内括号 / 转义反斜杠引号 / 数组 / 无 JSON 抛 / 未闭合抛
 - SecretCrypto：中文符号 roundtrip / 两次密文不同 / 篡改抛 / 错钥抛 / 短 payload 抛 / 非 Base64 抛
 - AiClient：SSE 顺序+全文 / 请求头与体（Bearer、stream、model、max_tokens）/ 401 / 404 / **取消 5s 返回（等 header 竞态消除）** / URL 规范化×3 / 温度解析×6 / 重试成功（calls=2、第二次含"只输出 JSON"）/ 两次失败抛含原文
-- SettingsRepo：save+load roundTrip（默认值/hasKey/密文不含明文/不传 Key 不清密文）/ 健康解密 / 失效删键 hasKey 归 false / clearKey
+- SettingsRepo：save+load roundTrip（默认值/hasKey/密文不含明文/不传 Key 不清密文）/ 健康解密 / 失效删键 hasKey 归 false / clearKey / 视觉独立配置（专属地址+Key 往返、未配回退主 Key、开关即点即存不覆盖、清除后回退）
 
 ## 质检记录
 

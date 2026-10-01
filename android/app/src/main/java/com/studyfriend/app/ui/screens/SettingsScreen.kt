@@ -110,7 +110,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
                     Text("识别困难的页用视觉模型转写", style = MaterialTheme.typography.labelLarge)
                     Text(
                         "扫描版 PDF 和文字损坏的页面交给视觉模型识别；需服务商提供视觉模型，" +
-                            "转写失败的页自动回退文字层内容",
+                            "转写失败的页自动回退文字层内容。可单独配视觉服务商，留空跟随上方配置",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -118,6 +118,26 @@ fun SettingsScreen(vm: SettingsViewModel) {
                 Switch(checked = vm.visionEnabled, onCheckedChange = { vm.changeVisionEnabled(it) })
             }
             if (vm.visionEnabled) {
+                OutlinedTextField(
+                    value = vm.visionBaseUrl,
+                    onValueChange = { vm.visionBaseUrl = it },
+                    label = { Text("视觉 API 地址（保存后生效）") },
+                    placeholder = { Text("留空用上方 API 地址") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = vm.visionKeyInput,
+                    onValueChange = { vm.visionKeyInput = it },
+                    label = { Text("视觉 API Key") },
+                    placeholder = { Text(if (vm.hasVisionKey) "已保存（输入以更换）" else "留空用上方 API Key") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    trailingIcon = {
+                        if (vm.hasVisionKey) TextButton(onClick = { vm.clearVisionKey() }) { Text("清除") }
+                    },
+                )
                 OutlinedTextField(
                     value = vm.visionModel,
                     onValueChange = { vm.visionModel = it },

@@ -41,10 +41,16 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     var detailLevel by mutableStateOf("标准")
         private set
 
-    /** 视觉兜底（OPT-E）：开关即点即存；模型随"保存"按钮落库 */
+    /** 视觉兜底（OPT-E）：开关即点即存；模型/地址/Key 随"保存"按钮落库 */
     var visionEnabled by mutableStateOf(true)
         private set
     var visionModel by mutableStateOf(SettingsRepository.DEFAULT_VISION_MODEL)
+
+    /** 视觉专属地址：空 = 跟主配置同一家（文本走 A 家、视觉兜底走 B 家时才填） */
+    var visionBaseUrl by mutableStateOf("")
+    var visionKeyInput by mutableStateOf("")
+    var hasVisionKey by mutableStateOf(false)
+        private set
 
     private var testJob: Job? = null
 
@@ -58,6 +64,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             detailLevel = repo.detailLevel()
             visionEnabled = s.visionEnabled
             visionModel = s.visionModel
+            visionBaseUrl = s.visionBaseUrl
+            hasVisionKey = s.hasVisionKey
         }
     }
 
@@ -70,10 +78,14 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val temp = AiClient.parseTemperature(tempText)
                 repo.save(baseUrl, model, temp, keyInput.takeIf { it.isNotBlank() })
-                repo.saveVision(visionEnabled, visionModel)
+                repo.saveVision(visionEnabled, visionModel, visionBaseUrl, visionKeyInput.takeIf { it.isNotBlank() })
                 if (keyInput.isNotBlank()) {
                     hasKey = true
                     keyInput = ""
+                }
+                if (visionKeyInput.isNotBlank()) {
+                    hasVisionKey = true
+                    visionKeyInput = ""
                 }
                 tempText = temp.toString()
                 message = "已保存"
@@ -140,6 +152,22 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 视觉兜底开关（OPT-E）：即点即存，独立于"保存"按钮 */
+    fun clearVisionKey() {
+        if (busy || testing) return
+        viewModelScope.launch {
+            try {
+                repo.clearVisionKey()
+                hasVisionKey = false
+                visionKeyInput = ""
+                message = "已清除视觉专属 Key，视觉兜底回退用主 Key"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = "清除视觉 Key 失败：" + (e.message ?: "未知错误")
+            }
+        }
+    }
+
     fun changeVisionEnabled(enabled: Boolean) {
         if (enabled == visionEnabled) return
         visionEnabled = enabled
