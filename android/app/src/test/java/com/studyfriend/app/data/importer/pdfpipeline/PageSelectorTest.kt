@@ -76,7 +76,9 @@ class PageSelectorTest {
     fun tooManyPickedPages_rejected() {
         val pages = (1..61).map { page(it, rawChars = 0) }
         val sel = PageSelector.select(pages, scanned = false)
-        assertEquals(61, (sel as PageSelector.Selection.TooMany).totalPages)
+        val tooMany = sel as PageSelector.Selection.TooMany
+        assertEquals(61, tooMany.totalPages)
+        assertEquals(61, tooMany.pages.size) // OPT-F：picked 页号带回供后台队列入队
     }
 
     @Test
@@ -90,6 +92,8 @@ class PageSelectorTest {
     fun scanned_beyondLimit_rejected() {
         val pages = (1..81).map { page(it) }
         val sel = PageSelector.select(pages, scanned = true)
-        assertEquals(81, (sel as PageSelector.Selection.TooMany).totalPages)
+        val tooMany = sel as PageSelector.Selection.TooMany
+        assertEquals(81, tooMany.totalPages)
+        assertEquals(81, tooMany.pages.size) // OPT-F：扫描版整书页号也带回（队列上限由调用方把关）
     }
 }

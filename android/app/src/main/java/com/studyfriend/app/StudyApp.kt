@@ -12,9 +12,11 @@ import com.studyfriend.app.data.study.NoteRunner
 import com.studyfriend.app.data.study.OverviewRunner
 import com.studyfriend.app.data.study.RoughReadRunner
 import com.studyfriend.app.data.study.SummaryRunner
+import com.studyfriend.app.data.vision.VisionScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class StudyApp : Application() {
     val database: StudyDatabase by lazy { StudyDatabase.build(this) }
@@ -28,8 +30,8 @@ class StudyApp : Application() {
     /** 应用级密钥仓单例（OPT-A）：keystore 优先、软件密钥兜底；设置页与双 Runner 共享 */
     val secretStore: SecretStore by lazy { ResilientSecretStore(applicationContext) }
 
-    /** 设置仓库（无状态、读时解密）：双 Runner 共享一份（质检 P2-5） */
-    private val settingsRepo: SettingsRepository by lazy { SettingsRepository(database, secretStore) }
+    /** 设置仓库（无状态、读时解密）：双 Runner 与视觉后台 Worker 共享一份（质检 P2-5） */
+    val settingsRepo: SettingsRepository by lazy { SettingsRepository(database, secretStore) }
 
     /** 全局唯一粗读任务管理：返回书架/换页不中断，start 前自动替换旧任务 */
     val roughReadRunner: RoughReadRunner by lazy {
@@ -75,5 +77,12 @@ class StudyApp : Application() {
             scope = appScope,
             gate = aiGate,
         )
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        // 视觉后台队列断点续跑（OPT-F）：进程死亡/设备重启后，把仍有 PENDING 页的书
+        // 重新挂上 WorkManager（KEEP 不打断在跑的任务；WorkManager 自身持久化是主保障）
+        appScope.launch { VisionScheduler.restorePending(database, this@StudyApp) }
     }
 }

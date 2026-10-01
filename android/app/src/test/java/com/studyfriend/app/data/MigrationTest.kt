@@ -62,4 +62,28 @@ class MigrationTest {
             }
         }
     }
+
+    @Test
+    fun migrate2To3_visionQueueTableUsable() {
+        val dbName = "migration-test-23.db"
+        helper.createDatabase(dbName, 2).use { v2 ->
+            v2.execSQL(
+                "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                    "overviewJson, createdAt, updatedAt) " +
+                    "VALUES ('民法总则', '', 'PDF', 'uri://x', 'READY', 1, NULL, 1, 1)",
+            )
+        }
+        helper.runMigrationsAndValidate(dbName, 3, true, *MIGRATIONS).use { v3 ->
+            // 新表写读回验（vision_queue：单 FK + (bookId,pageNo) 唯一索引）
+            v3.execSQL(
+                "INSERT INTO vision_queue (bookId, uri, pageNo, originChars, status, attempts, updatedAt) " +
+                    "VALUES (1, 'uri://x', 148, 812, 'PENDING', 0, 1)",
+            )
+            v3.query("SELECT status, originChars FROM vision_queue WHERE bookId = 1 AND pageNo = 148").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals("PENDING", cur.getString(0))
+                assertEquals(812, cur.getInt(1))
+            }
+        }
+    }
 }

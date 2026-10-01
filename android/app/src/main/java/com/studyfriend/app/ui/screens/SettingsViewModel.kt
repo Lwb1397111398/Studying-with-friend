@@ -12,6 +12,7 @@ import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
 import com.studyfriend.app.data.ai.ChatRequest
+import com.studyfriend.app.data.vision.VisionScheduler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -88,6 +89,9 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                     visionKeyInput = ""
                 }
                 tempText = temp.toString()
+                // OPT-F：视觉配置变了（开关/Key/模型），队列里有待转写页的书立即重调度
+                val appCtx = getApplication<StudyApp>()
+                VisionScheduler.reenqueueAllPending(appCtx.database, appCtx)
                 message = "已保存"
             } catch (e: CancellationException) {
                 throw e
@@ -174,6 +178,10 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 repo.saveVision(enabled)
+                // OPT-F：开关切换后重调度（开了→拿到配置立即开跑；关了→Worker 读不到
+                // 转写器自动退避重试空转，不烧钱，无需取消任务）
+                val app = getApplication<StudyApp>()
+                VisionScheduler.reenqueueAllPending(app.database, app)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

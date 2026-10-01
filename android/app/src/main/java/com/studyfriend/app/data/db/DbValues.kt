@@ -29,6 +29,11 @@ object DbValues {
     const val ACT_EXPLAIN = "EXPLAIN"
     const val ACT_GROUP = "GROUP"
 
+    // vision_queue.status（视觉后台队列，OPT-F）
+    const val VQ_PENDING = "PENDING"
+    const val VQ_DONE = "DONE"
+    const val VQ_FAILED = "FAILED"
+
     // quiz_attempts.verdict
     const val VERDICT_CORRECT = "CORRECT"
     const val VERDICT_WRONG = "WRONG"

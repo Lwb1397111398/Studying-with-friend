@@ -69,4 +69,21 @@ private val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
-val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2)
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // 视觉后台队列（OPT-F）：createSql 逐字段抄自 Entity 定义，漏抄会被迁移校验报红
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `vision_queue` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                "`bookId` INTEGER NOT NULL, `uri` TEXT NOT NULL, `pageNo` INTEGER NOT NULL, " +
+                "`originChars` INTEGER NOT NULL, `status` TEXT NOT NULL, `attempts` INTEGER NOT NULL, " +
+                "`updatedAt` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_vision_queue_bookId` ON `vision_queue` (`bookId`)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_vision_queue_bookId_pageNo` ON `vision_queue` (`bookId`, `pageNo`)",
+        )
+    }
+}
+
+val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)

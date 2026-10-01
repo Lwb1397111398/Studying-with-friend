@@ -23,7 +23,9 @@ object PageSelector {
 
     sealed class Selection {
         data class Pages(val pages: List<Int>) : Selection()
-        data class TooMany(val totalPages: Int) : Selection()
+
+        /** 可疑页超出单次同步转写上限；picked 带全量可疑页（OPT-F 起供后台队列入队，调用方不再必须拒绝导入） */
+        data class TooMany(val totalPages: Int, val pages: List<Int>) : Selection()
         data object None : Selection()
     }
 
@@ -32,7 +34,7 @@ object PageSelector {
             return if (pages.size <= WHOLE_BOOK_MAX_PAGES) {
                 Selection.Pages(pages.map { it.pageNum })
             } else {
-                Selection.TooMany(pages.size)
+                Selection.TooMany(pages.size, pages.map { it.pageNum })
             }
         }
         val picked = pages.filter { p ->
@@ -45,7 +47,7 @@ object PageSelector {
         }.map { it.pageNum }
         return when {
             picked.isEmpty() -> Selection.None
-            picked.size > NORMAL_MAX_PAGES -> Selection.TooMany(picked.size)
+            picked.size > NORMAL_MAX_PAGES -> Selection.TooMany(picked.size, picked)
             else -> Selection.Pages(picked)
         }
     }

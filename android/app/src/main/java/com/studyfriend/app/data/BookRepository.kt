@@ -35,6 +35,29 @@ class BookRepository(private val db: StudyDatabase) {
 
     // ---- 书 ----
     fun shelfFlow() = db.bookDao().getAllFlow()
+
+    /**
+     * 视觉增强完成后的整书内容替换（OPT-F）：事务内删旧章重插（段落/笔记/资产/
+     * 排期随 CASCADE 清空），bookId 不变。守卫（无任何 AI 消费）由调用方
+     * VisionRebuilder 保证；章节/段落 idx 按列表序回填，同 importBook。
+     */
+    suspend fun replaceBookContent(
+        bookId: Long,
+        book: BookEntity,
+        chapters: List<Pair<ChapterEntity, List<ParagraphEntity>>>,
+    ) = db.withTransaction {
+        db.chapterDao().deleteByBook(bookId)
+        chapters.forEachIndexed { ci, (chapter, paras) ->
+            val chapterId = db.chapterDao().insertAll(
+                listOf(chapter.copy(bookId = bookId, idx = ci)),
+            )[0]
+            db.paragraphDao().insertAll(
+                paras.mapIndexed { pi, p -> p.copy(chapterId = chapterId, idx = pi) },
+            )
+        }
+        db.bookDao().update(book.copy(totalChapters = chapters.size))
+    }
+
     fun bookProgressFlow(bookId: Long) = db.bookDao().getProgressFlow(bookId)
     suspend fun getBook(bookId: Long) = db.bookDao().get(bookId)
     suspend fun addBook(book: BookEntity) = db.bookDao().insert(book)
@@ -45,6 +68,13 @@ class BookRepository(private val db: StudyDatabase) {
     /** 调用方须保证书已存在（仅 UPDATE，bookId 无效时静默无操作） */
     suspend fun saveOverviewJson(bookId: Long, json: String, now: Long) =
         db.bookDao().saveOverviewJson(bookId, json, now)
+
+    // ---- 视觉后台队列（OPT-F） ----
+    suspend fun addVisionQueue(items: List<com.studyfriend.app.data.db.VisionQueueEntity>) =
+        db.visionQueueDao().insertAll(items)
+
+    /** 书架徽标：每本书的视觉增强进度（无队列的书不出现在流里） */
+    fun visionProgressFlow() = db.visionQueueDao().progressByBookFlow()
 
     // ---- 目录 ----
     fun chaptersFlow(bookId: Long) = db.chapterDao().byBookFlow(bookId)

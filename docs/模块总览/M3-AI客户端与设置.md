@@ -8,7 +8,7 @@
 | 功能 | 说明 |
 | --- | --- |
 | 设置页 | API 地址（placeholder 提示"一般以 /v1 结尾"）/ 模型名 / 温度（0.0–1.0）/ API Key 密码框（打码显示、trailingIcon 清除） |
-| 视觉兜底配置 | 开关（即点即存）+ 视觉 API 地址 + 视觉 API Key（独立加密存 `vision_key_enc`）+ 视觉模型名；地址/Key 留空回退主配置（文本走 A 家、视觉兜底走 B 家时才填专属值）； OPT-E 引入 |
+| 视觉兜底配置 | 开关 + 视觉 API 地址 + 视觉 API Key（独立加密存 `vision_key_enc`）+ 视觉模型名；地址/Key 留空回退主配置（文本走 A 家、视觉兜底走 B 家时才填专属值）； OPT-E 引入。**OPT-F 起：点「保存」若视觉队列有待转写页，自动重调度全部队列任务（`reenqueueAllPending`，REPLACE）——新 Key/模型立即生效开跑；App 启动还有 `restorePending` 续跑兜底（进程死亡/重启不丢队列）** |
 | Key 加密存储 | AndroidKeyStore AES-256 密钥 + SecretCrypto 协议：12B 随机 IV + 128 位 GCM tag，payload = `Base64(iv||ct)` 存 settings 表 `api_key_enc`，明文 Key 永不落库 |
 | 密钥失效自愈 | 解密任何异常（换机/清数据/密文损坏）→ 删旧密文 + 中文提示重填；encrypt 同样包装为 SecretCryptoException |
 | URL 规范化 | trim → 去尾 `/` → 非 `/chat/completions` 结尾自动拼上；用户粘贴全路径/带尾斜杠都兼容 |

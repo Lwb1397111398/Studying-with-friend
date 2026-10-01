@@ -10,15 +10,9 @@ import org.junit.Test
 /**
  * 视觉转写（OPT-E）：MiniHttpServer 模拟龙猫 OpenAI 兼容端点。
  * 覆盖：请求体带 image_url 段、JSON 解析、剥围栏、长度守卫、失败重试后回退 null。
+ * OPT-F：transcribePage 直接收 originChars（长度守卫口径由调用方传入）。
  */
 class VisionTranscriberTest {
-
-    private fun pageOf(originChars: Int): PageOut = PageOut(
-        pageNum = 1, tocLike = false, rawChars = originChars, puaCount = 0,
-        lineCount = 10, shortLineCount = 0,
-        paras = List(3) { Para("正".repeat(originChars / 3)) },
-        firstLine = null, lastLine = null,
-    )
 
     @Test
     fun transcribe_parsesBodyAndFootnotes_andSendsImagePart() {
@@ -30,7 +24,7 @@ class VisionTranscriberTest {
         try {
             val t = runBlocking {
                 VisionTranscriber(server.baseUrl, "sk-test", "LongCat-2.5-Preview")
-                    .transcribePage(pageOf(100), "QUJD")
+                    .transcribePage(100, "QUJD")
             }
             assertEquals(listOf("第一段", "第二段"), t!!.body)
             assertEquals(listOf("注1", "注2"), t.footnotes)
@@ -51,7 +45,7 @@ class VisionTranscriberTest {
         }
         try {
             val t = runBlocking {
-                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(pageOf(50), "QQ==")
+                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(50, "QQ==")
             }
             assertEquals(listOf("围栏内的段"), t!!.body)
             assertEquals(0, t.footnotes.size)
@@ -69,7 +63,7 @@ class VisionTranscriberTest {
         }
         try {
             val t = runBlocking {
-                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(pageOf(300), "QQ==")
+                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(300, "QQ==")
             }
             assertNull("转写字符 < 原页一半且原页>200 → 弃用", t)
             assertEquals("应重试 1 次后放弃", 2, calls)
@@ -86,7 +80,7 @@ class VisionTranscriberTest {
         }
         try {
             val t = runBlocking {
-                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(pageOf(100), "QQ==")
+                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(100, "QQ==")
             }
             assertEquals(listOf("比原文短"), t!!.body)
         } finally {
@@ -103,7 +97,7 @@ class VisionTranscriberTest {
         }
         try {
             val t = runBlocking {
-                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(pageOf(100), "QQ==")
+                VisionTranscriber(server.baseUrl, "k", "m").transcribePage(100, "QQ==")
             }
             assertNull(t)
             assertEquals(2, calls)

@@ -54,11 +54,11 @@ class VisionTranscriber(
 
     /**
      * 转写单页。长度守卫（经验帖校准）：转写字符 < 清洗后原页×0.5 且原页 > 200 字
-     * → 判定漏转/截断，按失败处理。守卫口径用清洗后段落字符合计，不用 rawChars
-     * （rawChars 含将被删掉的页眉页码，会让守卫失真）。
+     * → 判定漏转/截断，按失败处理。守卫口径用清洗后段落字符合计（originChars 由
+     * 调用方传入——导入路径取 page.paras 字数，后台队列路径取 vision_queue.originChars），
+     * 不用 rawChars（rawChars 含将被删掉的页眉页码，会让守卫失真）。
      */
-    suspend fun transcribePage(page: PageOut, pngBase64: String): PageTranscription? {
-        val originChars = page.paras.sumOf { it.text.length }
+    suspend fun transcribePage(originChars: Int, pngBase64: String): PageTranscription? {
         repeat(TRANSCRIBE_ATTEMPTS) { attempt ->
             val t = try {
                 parseTranscription(callModel(pngBase64))

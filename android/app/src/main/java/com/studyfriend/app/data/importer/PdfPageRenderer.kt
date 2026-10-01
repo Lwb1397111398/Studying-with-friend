@@ -13,8 +13,9 @@ import java.io.Closeable
  * 页面渲染（OPT-E）：android 自带 PdfRenderer（不走 pdfbox 渲染，省一份实现），
  * 把选中页渲成 140dpi PNG → Base64，交给视觉转写。
  *
- * 内存纪律：RGB_565（A4 一页约 4MB）+ 用完即 recycle + PNG 压缩后即释放，
- * 任意时刻只有一页位图驻留。
+ * 内存纪律：ARGB_8888（PdfRenderer.render 只认这一种，RGB_565 会抛
+ * Unsupported pixel format；A4 一页 140dpi 约 9MB）+ 用完即 recycle +
+ * PNG 压缩后即释放，任意时刻只有一页位图驻留。
  */
 class PdfPageRenderer(context: Context, uri: Uri) : Closeable {
 
@@ -31,7 +32,7 @@ class PdfPageRenderer(context: Context, uri: Uri) : Closeable {
             val bmp = Bitmap.createBitmap(
                 (page.width * scale).toInt().coerceAtLeast(1),
                 (page.height * scale).toInt().coerceAtLeast(1),
-                Bitmap.Config.RGB_565,
+                Bitmap.Config.ARGB_8888,
             )
             try {
                 bmp.eraseColor(Color.WHITE)

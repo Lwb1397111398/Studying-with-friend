@@ -29,6 +29,7 @@ import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.BookRepository
 import com.studyfriend.app.data.db.BookEntity
 import com.studyfriend.app.data.db.DbValues
+import com.studyfriend.app.data.db.VisionProgress
 
 @Composable
 fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
@@ -39,6 +40,9 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
     val now = remember { System.currentTimeMillis() }
     val dueCounts by repo.dueCountByBookFlow(now).collectAsStateWithLifecycle(initialValue = emptyList())
     val dueByBook = remember(dueCounts) { dueCounts.associate { it.bookId to it.cnt } }
+    // 视觉增强徽标（OPT-F）：后台转写进度 "视觉增强 x/y"，有队列的书才显示
+    val visionProgress by repo.visionProgressFlow().collectAsStateWithLifecycle(initialValue = emptyList())
+    val visionByBook = remember(visionProgress) { visionProgress.associate { it.bookId to it } }
 
     Box(Modifier.fillMaxSize()) {
         val list = books
@@ -48,7 +52,7 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
                 title = "书架还是空的",
                 subtitle = "点右下角 + 导入 TXT，开始和搭子一起读书",
             )
-            else -> BookList(list, dueByBook, onOpenBook)
+            else -> BookList(list, dueByBook, visionByBook, onOpenBook)
         }
 
         FloatingActionButton(
@@ -63,7 +67,12 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
 }
 
 @Composable
-private fun BookList(books: List<BookEntity>, dueByBook: Map<Long, Int>, onOpenBook: (Long) -> Unit) {
+private fun BookList(
+    books: List<BookEntity>,
+    dueByBook: Map<Long, Int>,
+    visionByBook: Map<Long, VisionProgress>,
+    onOpenBook: (Long) -> Unit,
+) {
     LazyColumn(Modifier.fillMaxSize()) {
         item {
             Text(
@@ -91,6 +100,10 @@ private fun BookList(books: List<BookEntity>, dueByBook: Map<Long, Int>, onOpenB
                         if (book.totalChapters > 0) {
                             if (isNotEmpty()) append(" · ")
                             append("${book.totalChapters} 章")
+                        }
+                        visionByBook[book.id]?.let { vp ->
+                            if (isNotEmpty()) append(" · ")
+                            append(if (vp.done >= vp.total) "视觉增强完成" else "视觉增强 ${vp.done}/${vp.total}")
                         }
                     }
                     if (subtitle.isNotBlank()) {

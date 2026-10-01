@@ -15,8 +15,9 @@ import androidx.room.RoomDatabase
         ChapterAssetEntity::class,
         QuizAttemptEntity::class,
         ReviewItemEntity::class,
+        VisionQueueEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class StudyDatabase : RoomDatabase() {
@@ -28,6 +29,7 @@ abstract class StudyDatabase : RoomDatabase() {
     abstract fun chapterAssetDao(): ChapterAssetDao
     abstract fun quizAttemptDao(): QuizAttemptDao
     abstract fun reviewItemDao(): ReviewItemDao
+    abstract fun visionQueueDao(): VisionQueueDao
 
     companion object {
         fun build(context: Context): StudyDatabase =

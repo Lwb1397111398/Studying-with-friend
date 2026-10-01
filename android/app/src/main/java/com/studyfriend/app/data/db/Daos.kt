@@ -262,3 +262,43 @@ data class BookDueCount(
     val bookId: Long,
     val cnt: Int,
 )
+
+// ============ 视觉后台队列（OPT-F） ============
+
+@Dao
+interface VisionQueueDao {
+
+    @Insert
+    suspend fun insertAll(items: List<VisionQueueEntity>)
+
+    @Query("SELECT * FROM vision_queue WHERE bookId = :bookId ORDER BY pageNo")
+    suspend fun byBook(bookId: Long): List<VisionQueueEntity>
+
+    /** 有未消化任务的书（含 FAILED 定格页的书不在此列——FAILED 不再自动重试防烧钱） */
+    @Query("SELECT DISTINCT bookId FROM vision_queue WHERE status = 'PENDING'")
+    suspend fun booksWithPending(): List<Long>
+
+    @Query("UPDATE vision_queue SET status = :status, attempts = :attempts, updatedAt = :now WHERE id = :id")
+    suspend fun updateStatus(id: Long, status: String, attempts: Int, now: Long)
+
+    /** 书架徽标：每本书的视觉增强进度（完成页数/总页数） */
+    @Query("SELECT bookId, SUM(status = 'DONE') AS done, COUNT(*) AS total FROM vision_queue GROUP BY bookId")
+    fun progressByBookFlow(): Flow<List<VisionProgress>>
+
+    /** 守卫查询：该书是否有任何 AI 消费（标注/笔记/资产/排期任一存在即不可重建） */
+    @Query(
+        "SELECT EXISTS(SELECT 1 FROM paragraphs p JOIN chapters c ON p.chapterId = c.id " +
+            "WHERE c.bookId = :bookId AND p.aiAction != 'NONE') " +
+            "OR EXISTS(SELECT 1 FROM para_notes n JOIN chapters c ON n.chapterId = c.id WHERE c.bookId = :bookId) " +
+            "OR EXISTS(SELECT 1 FROM chapter_assets a JOIN chapters c ON a.chapterId = c.id WHERE c.bookId = :bookId) " +
+            "OR EXISTS(SELECT 1 FROM review_items r WHERE r.bookId = :bookId)",
+    )
+    suspend fun hasAnyAiConsumption(bookId: Long): Boolean
+}
+
+/** 书架徽标投影：视觉增强进度（OPT-F） */
+data class VisionProgress(
+    val bookId: Long,
+    val done: Int,
+    val total: Int,
+)

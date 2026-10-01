@@ -7,6 +7,7 @@ import com.studyfriend.app.data.ai.SecretStore
 import com.studyfriend.app.data.ai.isStructurallyCorrupt
 import com.studyfriend.app.data.db.SettingEntity
 import com.studyfriend.app.data.db.StudyDatabase
+import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import javax.crypto.SecretKey
 
 /** 设置页配置快照（Key 永不明文出库，只给"是否已存"） */
@@ -114,6 +115,18 @@ class SettingsRepository(
     /** 视觉兜底实际生效的 Key：专属 Key 优先，未配置回退主 Key（同一家时两处不用重复填） */
     suspend fun resolveVisionKeyOrNull(): String? =
         decryptVisionKeyOrNull() ?: decryptKeyOrNull()
+
+    /**
+     * 组装视觉转写器（OPT-F）：开关开且有可用 Key 才建，null = 视觉不可用。
+     * 导入同步路径与后台队列 Worker 共用这一个入口；地址/模型专属优先、留空回退主配置。
+     */
+    suspend fun buildVisionTranscriber(): VisionTranscriber? {
+        val snap = load()
+        if (!snap.visionEnabled) return null
+        val key = resolveVisionKeyOrNull() ?: return null
+        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
+        return VisionTranscriber(base, key, snap.visionModel)
+    }
 
     /**
      * 解出明文 Key 供 AiClient 使用。解密失败仅返回 null、保留密文（OPT-A）：

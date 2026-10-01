@@ -77,6 +77,35 @@ data class ParagraphEntity(
     val why: String? = null, // AI 决定理由，界面"为什么讲这段"
 )
 
+/**
+ * 视觉后台队列（OPT-F）：超出单次同步转写上限的可疑页，导入时先用文字层内容
+ * 入库，页级转写任务落此表交 WorkManager 慢慢消化（每页一任务，断点续跑）。
+ * originChars 存该页清洗后段落字符合计（VisionTranscriber 长度守卫口径），
+ * Worker 免重跑整书提取。
+ */
+@Entity(
+    tableName = "vision_queue",
+    foreignKeys = [
+        ForeignKey(
+            entity = BookEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["bookId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("bookId"), Index(value = ["bookId", "pageNo"], unique = true)],
+)
+data class VisionQueueEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val uri: String, // PDF 内容 uri（Worker 重渲染视觉输入用，导入时已持久化读权限）
+    val pageNo: Int, // 1-based PDF 页号
+    val originChars: Int,
+    val status: String, // PENDING / DONE / FAILED
+    val attempts: Int = 0,
+    val updatedAt: Long,
+)
+
 /** 一条段落讲解（可覆盖 1~N 个段落，paraIds 为 JSON 数组） */
 @Entity(
     tableName = "para_notes",

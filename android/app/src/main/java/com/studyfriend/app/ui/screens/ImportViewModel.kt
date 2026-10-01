@@ -27,14 +27,14 @@ import com.studyfriend.app.data.importer.PdfImportException
 import com.studyfriend.app.data.importer.PdfLoader
 import com.studyfriend.app.data.importer.PdfPageRenderer
 import com.studyfriend.app.data.importer.TextLoader
-import com.studyfriend.app.data.importer.pdfpipeline.PageOut
 import com.studyfriend.app.data.importer.pdfpipeline.PageSelector
 import com.studyfriend.app.data.importer.pdfpipeline.PageTranscription
 import com.studyfriend.app.data.importer.pdfpipeline.Para
-import com.studyfriend.app.data.importer.pdfpipeline.TranscriptionJson
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import com.studyfriend.app.data.importer.pdfpipeline.joinTexts
-import java.io.File
+import com.studyfriend.app.data.db.VisionQueueEntity
+import com.studyfriend.app.data.vision.VisionCache
+import com.studyfriend.app.data.vision.VisionScheduler
 import java.util.regex.PatternSyntaxException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -89,6 +89,12 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     private var lastUri: Uri? = null
     /** 视觉转写统计备注（OPT-E）；解析兜底提示不存在时在 parseNote 里展示 */
     private var visionStatsNote: String? = null
+
+    /**
+     * 超单次上限的可疑页暂存（OPT-F）：页号 to 清洗后字数。导入不再拒绝，
+     * 文字层先行；确认落库后写 vision_queue 交 WorkManager 后台逐页转写。
+     */
+    private var pendingVisionItems: List<Pair<Int, Int>>? = null
     /** 改名按 index 记；换文件/重切会清空，避免错位串到别的章 */
     private val editedTitles = mutableStateMapOf<Int, String>()
 
@@ -150,7 +156,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     val content: String
                     if (isPdfFile) {
                         phase = "提取 PDF 文字"
-                        val vision = visionOrNull()
+                        val vision = settings.buildVisionTranscriber()
                         val result = PdfLoader.extract(
                             app, uri,
                             onProgress = { p, t -> progress = p to t },
@@ -210,35 +216,32 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 视觉转写器（OPT-E）：开关开且有可用 Key 才建；模型独立（聊天用的文本模型
-     * 不一定带视觉）。地址/Key 可配专属值（视觉供应商与文本模型不同家），
-     * 留空回退主配置。
-     * 返回 null = 跳过视觉；此时扫描版会由 PdfLoader 按原语义抛友好提示。
-     */
-    private suspend fun visionOrNull(): VisionTranscriber? {
-        val snap = settings.load()
-        if (!snap.visionEnabled) return null
-        val key = settings.resolveVisionKeyOrNull() ?: return null
-        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
-        return VisionTranscriber(base, key, snap.visionModel)
-    }
-
-    /**
-     * 视觉兜底主流程：选页 → 逐页渲染+转写 → 整页替换段落（在 crossPageMerge
-     * 之前——先合并再替换会产生重复文本）。逐页落盘缓存：单页约 1 分钟，结果按
-     * uri hash+页号存 cacheDir，重试/重导同一本书不重复烧时间（评审 must_fix）。
-     * 单页失败只回退该页文字层内容，不阻断导入（经验帖：失败回退不阻断）。
+     * 视觉兜底主流程（OPT-F 起，双路）：
+     * - 可疑页 ≤ 单次上限（60/80）：沿用同步转写——导入完成即增强完毕，小书体验不变。
+     * - 超上限：不再拒绝导入。文字层先行照常出书，页级任务暂存 [pendingVisionItems]，
+     *   确认落库后写 vision_queue 交 WorkManager 后台逐页消化（每页约 1 分钟，
+     *   失败自动重试、进程被杀自动续跑）；同步转写的逐页落盘缓存两路共用，
+     *   后台页完成前阅读看到的是文字层内容。
      */
     private suspend fun applyVision(result: PdfExtractResult, uri: Uri, vision: VisionTranscriber?) {
-        if (vision == null) return
         val selected = when (val sel = PageSelector.select(result.pages, scanned = result.scanned)) {
             is PageSelector.Selection.Pages -> sel.pages
-            is PageSelector.Selection.TooMany -> throw PdfImportException(
-                "需要视觉识别的页面太多（${sel.totalPages} 页，超过单次上限）；请把文件拆小后分批导入",
-            )
+            is PageSelector.Selection.TooMany -> {
+                if (sel.pages.size > VisionScheduler.MAX_QUEUE_PAGES) throw PdfImportException(
+                    "需要视觉识别的页面太多（${sel.totalPages} 页，超过后台队列上限）；请把文件拆小后分批导入",
+                )
+                pendingVisionItems = sel.pages.map { pageNo ->
+                    val page = result.pages.first { it.pageNum == pageNo }
+                    pageNo to page.paras.sumOf { it.text.length }
+                }
+                visionStatsNote =
+                    "检测到 ${sel.pages.size} 页画质可疑，先用文字层内容导入；" +
+                        "完成导入后 App 会在后台自动视觉增强这些页（每页约 1 分钟，可正常阅读，无需等待）"
+                return
+            }
             PageSelector.Selection.None -> return
         }
-        if (selected.isEmpty()) return
+        if (selected.isEmpty() || vision == null) return
         var replaced = 0
         phase = "视觉转写（每页约 1 分钟，请耐心等待）"
         try {
@@ -247,7 +250,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     if (cancelFlag.get()) throw CancelledImportException()
                     progress = (done + 1) to selected.size
                     val page = result.pages.first { it.pageNum == pageNo }
-                    val t = cachedOrTranscribe(renderer, uri, pageNo, page, vision)
+                    val originChars = page.paras.sumOf { it.text.length }
+                    val t = cachedOrTranscribe(renderer, uri, pageNo, originChars, vision)
                     if (t != null) {
                         page.paras.clear()
                         page.paras.addAll(t.body.map { Para(it) })
@@ -273,25 +277,16 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         renderer: PdfPageRenderer,
         uri: Uri,
         pageNo: Int,
-        page: PageOut,
+        originChars: Int,
         vision: VisionTranscriber,
     ): PageTranscription? {
-        val cache = visionCacheFile(uri, pageNo)
-        if (cache.exists()) {
-            TranscriptionJson.parse(cache.readText())?.let { return it }
-        }
-        val t = vision.transcribePage(page, renderer.renderPageBase64(pageNo - 1))
+        VisionCache.read(getApplication(), uri.toString(), pageNo)?.let { return it }
+        val t = vision.transcribePage(originChars, renderer.renderPageBase64(pageNo - 1))
         if (t != null) {
-            runCatching { cache.writeText(TranscriptionJson.encode(t)) }
+            VisionCache.write(getApplication(), uri.toString(), pageNo, t)
         }
         return t
     }
-
-    private fun visionCacheFile(uri: Uri, pageNo: Int): File =
-        File(
-            getApplication<StudyApp>().cacheDir,
-            "vision_${uri.toString().hashCode().toString(16)}_$pageNo.json",
-        )
 
     /** 编码下拉选择；TXT 文件读取过即用新编码重读（手动兜底链路） */
     fun onEncodingChanged(choice: String) {
@@ -347,7 +342,23 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                 }
-                repo.importBook(book, pairs)
+                val newBookId = repo.importBook(book, pairs)
+                // OPT-F：后台视觉队列——超上限页已文字层入库，这里落队列并交 WorkManager
+                pendingVisionItems?.takeIf { it.isNotEmpty() }?.let { items ->
+                    repo.addVisionQueue(
+                        items.map { (pageNo, originChars) ->
+                            VisionQueueEntity(
+                                bookId = newBookId,
+                                uri = sourceUri,
+                                pageNo = pageNo,
+                                originChars = originChars,
+                                status = DbValues.VQ_PENDING,
+                                updatedAt = now,
+                            )
+                        },
+                    )
+                    VisionScheduler.enqueue(getApplication(), newBookId)
+                }
                 imported = true
             } catch (e: Exception) {
                 error = "保存失败：${e.message ?: "未知错误"}"
@@ -370,6 +381,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         error = null
         parseNote = null
         visionStatsNote = null
+        pendingVisionItems = null
         chapters = emptyList()
         imported = false
         isPdf = false
@@ -396,13 +408,18 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 return
             }
             chapters = result
-            parseNote = when {
+            // 兜底提示与视觉统计可同时成立（无标题盲切 + 部分页排队视觉转写），拼接而非互斥
+            val blindNote = when {
                 // 只凭 blindCut 标记判断兜底态，避免自定义规则命中"全文"时误报
                 result.first().blindCut && result.size == 1 ->
                     "未识别到章节标题，已整本作为一章；可换识别规则重新识别"
                 result.first().blindCut ->
                     "未识别到章节标题，已按每约 3000 字盲切为 ${result.size} 个部分"
-                else -> visionStatsNote
+                else -> null
+            }
+            parseNote = when {
+                blindNote != null && visionStatsNote != null -> "$blindNote；$visionStatsNote"
+                else -> blindNote ?: visionStatsNote
             }
         } catch (e: PatternSyntaxException) {
             error = "识别规则正则无效：${e.description ?: e.message ?: "语法错误"}"
