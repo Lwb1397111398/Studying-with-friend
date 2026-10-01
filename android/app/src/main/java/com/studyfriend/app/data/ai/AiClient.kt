@@ -19,6 +19,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.addJsonObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -28,7 +29,8 @@ import kotlin.coroutines.coroutineContext
 /** AI 调用失败，message 为可直接展示的中文；httpCode 非 2xx 时携带（M4 粗读用于区分可否重试） */
 class AiException(message: String, val httpCode: Int? = null) : Exception(message)
 
-data class AiMessage(val role: String, val content: String)
+/** images：data URI 形式（data:image/png;base64,…）的图片，供视觉模型；空 = 纯文本消息 */
+data class AiMessage(val role: String, val content: String, val images: List<String> = emptyList())
 
 data class ChatRequest(
     val baseUrl: String,
@@ -37,6 +39,8 @@ data class ChatRequest(
     val temperature: Double = 0.3,
     val maxTokens: Int? = null,
     val messages: List<AiMessage>,
+    /** 读超时（ms）：视觉转写单页要 60 秒级，这类长任务调大；默认 90s 供聊天/JSON */
+    val readTimeoutMs: Int = 90_000,
 )
 
 /**
@@ -80,7 +84,7 @@ object AiClient {
             try {
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 15_000
-                conn.readTimeout = 90_000
+                conn.readTimeout = req.readTimeoutMs
                 conn.doOutput = true
                 conn.setRequestProperty("Authorization", "Bearer ${req.apiKey}")
                 conn.setRequestProperty("Content-Type", "application/json")
@@ -177,7 +181,23 @@ object AiClient {
             req.messages.forEach { m ->
                 addJsonObject {
                     put("role", m.role)
-                    put("content", m.content)
+                    if (m.images.isEmpty()) {
+                        put("content", m.content)
+                    } else {
+                        // OpenAI 兼容视觉格式：content 为 parts 数组（文本段 + image_url 段）
+                        putJsonArray("content") {
+                            addJsonObject {
+                                put("type", "text")
+                                put("text", m.content)
+                            }
+                            m.images.forEach { uri ->
+                                addJsonObject {
+                                    put("type", "image_url")
+                                    putJsonObject("image_url") { put("url", uri) }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

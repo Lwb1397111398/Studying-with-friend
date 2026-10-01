@@ -414,4 +414,42 @@ class BookParserTest {
         val chapters = BookParser.parse(text)
         assertEquals(listOf("第一章 导论", "第二章 物权的设立、变更、转让和消灭"), chapters.map { it.title })
     }
+
+    // ---- 5.12 破折号副标题救回（E2E 真书《民法总则》第一章实证） ----
+
+    @Test
+    fun subtitleDashLine_rescuedAsChapterTitle() {
+        // "章名 ——副标题"25 字超长被护栏拦 → 破折号截断救回，标题取前半
+        val text = """
+            第一章 私法绪论 ——私法社会、私法秩序、私法原则
+
+            绪论正文。
+
+            第二章 民法的法源
+
+            法源正文。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 私法绪论", "第二章 民法的法源"), chapters.map { it.title })
+    }
+
+    @Test
+    fun subtitleDash_bodySentence_notRescued() {
+        // 正文行破折号后带句末标点或行中句读 → 不救，维持拦截
+        val text = """
+            第一章 导论
+
+            正文其一。
+
+            第一章讲完——他走了。
+
+            正文其二。
+
+            第一章 侵权责任——违约与侵权的竞合，参见第 100 页
+
+            正文其三。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 导论"), chapters.map { it.title })
+    }
 }

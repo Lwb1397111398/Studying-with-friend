@@ -248,7 +248,9 @@ object BookParser {
                 val t = line.trim()
                 if (!isTitleCandidate(t)) continue
                 val hit = matchTitle(t, custom) ?: continue
-                hits.add(TitleHit(bi, li, hit.first, hit.second, t))
+                // A_HAN_SUB：护栏拦下后破折号截断救回的副标题章名，标题取前半
+                val title = if (hit.second == "A_HAN_SUB") subtitleCut(t) ?: t else t
+                hits.add(TitleHit(bi, li, hit.first, hit.second, title))
                 break // 一个块最多一个标题
             }
         }
@@ -279,11 +281,31 @@ object BookParser {
         if (hit.second != "CUSTOM" && hit.first <= GRADE_B && RE_TRAIL_PAGE.containsMatchIn(t)) return null
         // OPT-D：A 档中文命中三护栏（超长 / 行中句读 / 章+节同行）→ 正文，见常量处注释
         if (hit.second == "A_HAN") {
-            if (t.length > A_TITLE_MAX_LEN) return null
-            if (RE_MID_PUNCT.containsMatchIn(t)) return null
+            if (t.length > A_TITLE_MAX_LEN || RE_MID_PUNCT.containsMatchIn(t)) {
+                // 破折号副标题救回：真书第一章"章名 ——副标题"超长被拦，截断取前半（subtitleCut）
+                return if (subtitleCut(t) != null) GRADE_A to "A_HAN_SUB" else null
+            }
             if (RE_SECTION_INLINE.containsMatchIn(t)) return null
         }
         return hit
+    }
+
+    /**
+     * 副标题截断：返回破折号前的章名部分；救不回返回 null（维持原拦截）。
+     * 真书《民法总则》第一章实证："第一章 私法绪论 ——私法社会、私法秩序、私法原则"
+     * 25 字被超长护栏拦。破折号是中文书副标题强特征：前半须仍是干净章名
+     * （不超长/无句读/无节号），后半须无行中句读且不以句末标点结尾
+     * （防"第一章讲完——他走了。"式正文行）。尾页码/目录点线护栏在更早环节已拦。
+     */
+    private fun subtitleCut(t: String): String? {
+        val dashIdx = t.indexOfFirst { c -> c.code == 0x2014 || c.code == 0x2500 || c.code == 0x2E3A || c == '-' || c == '－' }
+        if (dashIdx <= 0) return null
+        val head = t.substring(0, dashIdx).trim()
+        val tail = t.substring(dashIdx).trimStart('—', '─', '-', '－', ' ', '　')
+        if (head.isEmpty() || tail.isEmpty() || head.length > A_TITLE_MAX_LEN) return null
+        if (RE_MID_PUNCT.containsMatchIn(head) || RE_SECTION_INLINE.containsMatchIn(head)) return null
+        if (tail.last() in END_PUNCT || RE_MID_PUNCT.containsMatchIn(tail)) return null
+        return head
     }
 
     private fun roleFor(title: String): String = when (title) {

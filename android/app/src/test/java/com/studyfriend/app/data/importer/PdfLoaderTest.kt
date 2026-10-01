@@ -14,6 +14,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -43,9 +44,10 @@ class PdfLoaderTest {
             doc.addPage(page)
             val cs = PDPageContentStream(doc, page)
             var y = 750f
-            lines.forEach { line ->
+            // 章标题（每页第一行）用更大字号：真实书标题字号 > 正文，段落组装据此隔离标题
+            lines.forEachIndexed { li, line ->
                 cs.beginText()
-                cs.setFont(font, 11f)
+                cs.setFont(font, if (li == 0) 14f else 11f)
                 cs.newLineAtOffset(50f, y)
                 cs.showText(line)
                 cs.endText()
@@ -78,7 +80,7 @@ class PdfLoaderTest {
                 fillerLines("Chapter 2 Going Deeper", 4),
             ),
         )
-        val text = PdfLoader.extract(context, toUri(bytes))
+        val text = PdfLoader.extract(context, toUri(bytes)).assembleText()
         assertTrue(text.contains("Chapter 1"))
         assertTrue(text.contains("Chapter 2"))
 
@@ -117,7 +119,7 @@ class PdfLoaderTest {
     fun progressCallback_advancesPerPage_includingBoundaries() {
         val bytes = pdfBytes(listOf(fillerLines("Chapter 1 A", 4), fillerLines("Chapter 2 B", 4), fillerLines("Chapter 3 C", 4)))
         val seen = mutableListOf<Pair<Int, Int>>()
-        // 尾随 lambda 会绑定到最后一个参数 isCancelled，进度回调必须用命名参数
+        // 进度回调必须用命名参数（签名尾参是 allowScanned: Boolean）
         PdfLoader.extract(context, toUri(bytes), onProgress = { p, t -> seen.add(p to t) })
         assertEquals(0 to 3, seen.first())
         assertEquals(3 to 3, seen.last())
@@ -188,6 +190,44 @@ class PdfLoaderTest {
             assertEquals("取消应发生在复制段（未进入页循环）", 0, progressed)
         }
         assertTempFilesCleaned()
+    }
+
+    @Test
+    fun cleaner_stripsHeaderAndPageNum_keepsBody() {
+        // 真书痛点缩样（OPT-E）：8pt 页眉在顶部条带、孤页码在页底、11pt 正文——
+        // 旧管线三者全部混进正文，新管线按几何+字号剔除
+        val doc = PDDocument()
+        val page = PDPage(PDRectangle.A4)
+        doc.addPage(page)
+        val cs = PDPageContentStream(doc, page)
+        cs.beginText()
+        cs.setFont(PDType1Font.HELVETICA, 8f)
+        cs.newLineAtOffset(50f, 800f)
+        cs.showText("Book Title HEADER MARK")
+        cs.endText()
+        var y = 700f
+        repeat(4) {
+            cs.beginText()
+            cs.setFont(PDType1Font.HELVETICA, 11f)
+            cs.newLineAtOffset(50f, y)
+            cs.showText("Body line $it of real content for the page.")
+            cs.endText()
+            y -= 16f
+        }
+        cs.beginText()
+        cs.setFont(PDType1Font.HELVETICA, 11f)
+        cs.newLineAtOffset(300f, 40f)
+        cs.showText("1")
+        cs.endText()
+        cs.close()
+        val out = ByteArrayOutputStream()
+        doc.save(out)
+        doc.close()
+
+        val text = PdfLoader.extract(context, toUri(out.toByteArray())).assembleText()
+        assertFalse("页眉应被剔除", text.contains("HEADER MARK"))
+        assertFalse("页码行应被剔除", text.lines().any { it.trim() == "1" })
+        assertTrue("正文必须保留", text.contains("Body line 2"))
     }
 
     /** 三路径（成功/取消/损坏）共用的清理断言 */

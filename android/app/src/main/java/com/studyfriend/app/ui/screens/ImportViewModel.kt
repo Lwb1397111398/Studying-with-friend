@@ -12,6 +12,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.BookRepository
+import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.db.BookEntity
 import com.studyfriend.app.data.db.ChapterEntity
 import com.studyfriend.app.data.db.DbValues
@@ -21,10 +22,21 @@ import com.studyfriend.app.data.importer.CancelledImportException
 import com.studyfriend.app.data.importer.CustomRegexNoMatchException
 import com.studyfriend.app.data.importer.DecodeException
 import com.studyfriend.app.data.importer.ParsedChapter
+import com.studyfriend.app.data.importer.PdfExtractResult
 import com.studyfriend.app.data.importer.PdfImportException
 import com.studyfriend.app.data.importer.PdfLoader
+import com.studyfriend.app.data.importer.PdfPageRenderer
 import com.studyfriend.app.data.importer.TextLoader
+import com.studyfriend.app.data.importer.pdfpipeline.PageOut
+import com.studyfriend.app.data.importer.pdfpipeline.PageSelector
+import com.studyfriend.app.data.importer.pdfpipeline.PageTranscription
+import com.studyfriend.app.data.importer.pdfpipeline.Para
+import com.studyfriend.app.data.importer.pdfpipeline.TranscriptionJson
+import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
+import com.studyfriend.app.data.importer.pdfpipeline.joinTexts
+import java.io.File
 import java.util.regex.PatternSyntaxException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,6 +45,7 @@ import kotlinx.coroutines.withContext
 class ImportViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = BookRepository((app as StudyApp).database)
+    private val settings = SettingsRepository((app as StudyApp).database, (app as StudyApp).secretStore)
 
     var bookTitle by mutableStateOf("")
     var author by mutableStateOf("")
@@ -74,6 +87,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     private var sourceUri = ""
     /** 最近一次尝试读取的文件，手动改编码后据此重读 */
     private var lastUri: Uri? = null
+    /** 视觉转写统计备注（OPT-E）；解析兜底提示不存在时在 parseNote 里展示 */
+    private var visionStatsNote: String? = null
     /** 改名按 index 记；换文件/重切会清空，避免错位串到别的章 */
     private val editedTitles = mutableStateMapOf<Int, String>()
 
@@ -98,6 +113,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 isPdf = false
                 currentRegex = null
                 editedTitles.clear()
+                visionStatsNote = null
                 if (bookTitle.isBlank()) bookTitle = "粘贴笔记"
                 parse()
             } catch (e: Exception) {
@@ -125,21 +141,27 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 // 先记住本次文件：解码失败（如编码不对）后改下拉，onEncodingChanged 据此重读
                 lastUri = uri
+                visionStatsNote = null // 新文件读取开始，旧书的视觉统计作废
                 // IO：文件名/mime 查询 + 解码/PDF 提取都在 IO 线程，结果回主线程赋值
                 val (name, pdf, text) = withContext(Dispatchers.IO) {
                     val displayName = queryDisplayName(uri) ?: uri.lastPathSegment.orEmpty()
                     val isPdfFile = displayName.endsWith(".pdf", ignoreCase = true) ||
                         app.contentResolver.getType(uri) == "application/pdf"
-                    val content = if (isPdfFile) {
+                    val content: String
+                    if (isPdfFile) {
                         phase = "提取 PDF 文字"
-                        PdfLoader.extract(
+                        val vision = visionOrNull()
+                        val result = PdfLoader.extract(
                             app, uri,
                             onProgress = { p, t -> progress = p to t },
                             isCancelled = { cancelFlag.get() },
+                            allowScanned = vision != null,
                         )
+                        applyVision(result, uri, vision)
+                        content = result.assembleText()
                     } else {
                         phase = "读取文件"
-                        TextLoader.decode(
+                        content = TextLoader.decode(
                             app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                                 ?: ByteArray(0),
                             encoding,
@@ -186,6 +208,88 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         chapters = emptyList()
         isPdf = false
     }
+
+    /**
+     * 视觉转写器（OPT-E）：开关开且有可用 Key 才建；复用同一 API 地址与 Key，
+     * 模型用独立的 visionModel（聊天用的文本模型不一定带视觉）。
+     * 返回 null = 跳过视觉；此时扫描版会由 PdfLoader 按原语义抛友好提示。
+     */
+    private suspend fun visionOrNull(): VisionTranscriber? {
+        val snap = settings.load()
+        if (!snap.visionEnabled) return null
+        val key = settings.decryptKeyOrNull() ?: return null
+        return VisionTranscriber(snap.baseUrl, key, snap.visionModel)
+    }
+
+    /**
+     * 视觉兜底主流程：选页 → 逐页渲染+转写 → 整页替换段落（在 crossPageMerge
+     * 之前——先合并再替换会产生重复文本）。逐页落盘缓存：单页约 1 分钟，结果按
+     * uri hash+页号存 cacheDir，重试/重导同一本书不重复烧时间（评审 must_fix）。
+     * 单页失败只回退该页文字层内容，不阻断导入（经验帖：失败回退不阻断）。
+     */
+    private suspend fun applyVision(result: PdfExtractResult, uri: Uri, vision: VisionTranscriber?) {
+        if (vision == null) return
+        val selected = when (val sel = PageSelector.select(result.pages, scanned = result.scanned)) {
+            is PageSelector.Selection.Pages -> sel.pages
+            is PageSelector.Selection.TooMany -> throw PdfImportException(
+                "需要视觉识别的页面太多（${sel.totalPages} 页，超过单次上限）；请把文件拆小后分批导入",
+            )
+            PageSelector.Selection.None -> return
+        }
+        if (selected.isEmpty()) return
+        var replaced = 0
+        phase = "视觉转写（每页约 1 分钟，请耐心等待）"
+        try {
+            PdfPageRenderer(getApplication(), uri).use { renderer ->
+                for ((done, pageNo) in selected.withIndex()) {
+                    if (cancelFlag.get()) throw CancelledImportException()
+                    progress = (done + 1) to selected.size
+                    val page = result.pages.first { it.pageNum == pageNo }
+                    val t = cachedOrTranscribe(renderer, uri, pageNo, page, vision)
+                    if (t != null) {
+                        page.paras.clear()
+                        page.paras.addAll(t.body.map { Para(it) })
+                        if (t.footnotes.isNotEmpty()) {
+                            page.paras.add(Para(joinTexts(t.footnotes), footnote = true))
+                        }
+                        replaced++
+                    }
+                }
+            }
+            visionStatsNote = "视觉转写替换了 $replaced/${selected.size} 页"
+        } catch (e: CancelledImportException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            visionStatsNote = "视觉转写未完成，已保留文字层内容：${e.message ?: "未知错误"}"
+        }
+    }
+
+    /** 视觉缓存命中直接用；未命中渲染+转写并落盘（落盘失败不影响本次导入） */
+    private suspend fun cachedOrTranscribe(
+        renderer: PdfPageRenderer,
+        uri: Uri,
+        pageNo: Int,
+        page: PageOut,
+        vision: VisionTranscriber,
+    ): PageTranscription? {
+        val cache = visionCacheFile(uri, pageNo)
+        if (cache.exists()) {
+            TranscriptionJson.parse(cache.readText())?.let { return it }
+        }
+        val t = vision.transcribePage(page, renderer.renderPageBase64(pageNo - 1))
+        if (t != null) {
+            runCatching { cache.writeText(TranscriptionJson.encode(t)) }
+        }
+        return t
+    }
+
+    private fun visionCacheFile(uri: Uri, pageNo: Int): File =
+        File(
+            getApplication<StudyApp>().cacheDir,
+            "vision_${uri.toString().hashCode().toString(16)}_$pageNo.json",
+        )
 
     /** 编码下拉选择；TXT 文件读取过即用新编码重读（手动兜底链路） */
     fun onEncodingChanged(choice: String) {
@@ -263,6 +367,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         busy = false
         error = null
         parseNote = null
+        visionStatsNote = null
         chapters = emptyList()
         imported = false
         isPdf = false
@@ -295,7 +400,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     "未识别到章节标题，已整本作为一章；可换识别规则重新识别"
                 result.first().blindCut ->
                     "未识别到章节标题，已按每约 3000 字盲切为 ${result.size} 个部分"
-                else -> null
+                else -> visionStatsNote
             }
         } catch (e: PatternSyntaxException) {
             error = "识别规则正则无效：${e.description ?: e.message ?: "语法错误"}"

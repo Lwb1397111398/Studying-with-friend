@@ -41,6 +41,11 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     var detailLevel by mutableStateOf("标准")
         private set
 
+    /** 视觉兜底（OPT-E）：开关即点即存；模型随"保存"按钮落库 */
+    var visionEnabled by mutableStateOf(true)
+        private set
+    var visionModel by mutableStateOf(SettingsRepository.DEFAULT_VISION_MODEL)
+
     private var testJob: Job? = null
 
     init {
@@ -51,6 +56,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             tempText = s.temperature.toString()
             hasKey = s.hasKey
             detailLevel = repo.detailLevel()
+            visionEnabled = s.visionEnabled
+            visionModel = s.visionModel
         }
     }
 
@@ -63,6 +70,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val temp = AiClient.parseTemperature(tempText)
                 repo.save(baseUrl, model, temp, keyInput.takeIf { it.isNotBlank() })
+                repo.saveVision(visionEnabled, visionModel)
                 if (keyInput.isNotBlank()) {
                     hasKey = true
                     keyInput = ""
@@ -129,6 +137,21 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         baseUrl = baseUrlPreset
         model = modelPreset
         message = "已填入「$modelPreset」预设，填好 Key 后点保存"
+    }
+
+    /** 视觉兜底开关（OPT-E）：即点即存，独立于"保存"按钮 */
+    fun changeVisionEnabled(enabled: Boolean) {
+        if (enabled == visionEnabled) return
+        visionEnabled = enabled
+        viewModelScope.launch {
+            try {
+                repo.saveVision(enabled)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = "保存视觉开关失败：${e.message ?: "未知错误"}"
+            }
+        }
     }
 
     /** 讲解详略三档（总计划 §1 目标 7）：即点即存，独立于"保存"按钮 */

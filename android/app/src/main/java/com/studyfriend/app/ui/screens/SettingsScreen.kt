@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -98,6 +99,33 @@ fun SettingsScreen(vm: SettingsViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
             )
+
+            // 视觉兜底（OPT-E）：扫描版/坏字页交给视觉模型整页转写；开关即点即存
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("识别困难的页用视觉模型转写", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "扫描版 PDF 和文字损坏的页面交给视觉模型识别；需服务商提供视觉模型，" +
+                            "转写失败的页自动回退文字层内容",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = vm.visionEnabled, onCheckedChange = { vm.changeVisionEnabled(it) })
+            }
+            if (vm.visionEnabled) {
+                OutlinedTextField(
+                    value = vm.visionModel,
+                    onValueChange = { vm.visionModel = it },
+                    label = { Text("视觉模型名（保存后生效）") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+            }
 
             // 讲解详略三档（总计划 §1 目标 7）：即选即存
             Text("讲解详略", style = MaterialTheme.typography.labelLarge)

@@ -21,7 +21,7 @@ class MiniResponse(private val raw: OutputStream) {
     fun sse(chunks: List<String>) {
         raw.write("HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\n\r\n".toByteArray())
         chunks.forEach { chunk ->
-            val esc = chunk.replace("\\", "\\\\").replace("\"", "\\\"")
+            val esc = chunk.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
             raw.write("data: {\"choices\":[{\"delta\":{\"content\":\"$esc\"}}]}\n\n".toByteArray())
         }
         raw.write("data: [DONE]\n\n".toByteArray())

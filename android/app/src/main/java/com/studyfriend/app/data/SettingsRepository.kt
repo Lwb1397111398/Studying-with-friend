@@ -15,6 +15,10 @@ data class SettingsSnapshot(
     val model: String,
     val temperature: Double,
     val hasKey: Boolean,
+    /** 视觉兜底开关（OPT-E）：默认开；无 Key 时导入流程自动跳过视觉 */
+    val visionEnabled: Boolean,
+    /** 视觉转写模型：与聊天模型分离（聊天用的文本模型不一定带视觉） */
+    val visionModel: String,
 )
 
 /**
@@ -38,6 +42,9 @@ class SettingsRepository(
             model = model.ifBlank { DEFAULT_MODEL },
             temperature = temp,
             hasKey = db.settingDao().get(KEY_ENC)?.value != null,
+            visionEnabled = db.settingDao().get(KEY_VISION_ENABLED)?.value != "false",
+            visionModel = db.settingDao().get(KEY_VISION_MODEL)?.value
+                ?.takeIf { it.isNotBlank() } ?: DEFAULT_VISION_MODEL,
         )
     }
 
@@ -67,6 +74,16 @@ class SettingsRepository(
         db.settingDao().delete(KEY_ENC)
     }
 
+    /** 视觉兜底配置（OPT-E）：开关即点即存；模型名非空时一并更新 */
+    suspend fun saveVision(enabled: Boolean, model: String? = null) {
+        db.withTransaction {
+            db.settingDao().upsert(SettingEntity(KEY_VISION_ENABLED, if (enabled) "true" else "false"))
+            if (!model.isNullOrBlank()) {
+                db.settingDao().upsert(SettingEntity(KEY_VISION_MODEL, model.trim()))
+            }
+        }
+    }
+
     /**
      * 解出明文 Key 供 AiClient 使用。解密失败仅返回 null、保留密文（OPT-A）：
      * keystore 可能只是暂时故障，删除会毁掉本可恢复的 Key；唯一例外是
@@ -88,9 +105,13 @@ class SettingsRepository(
     companion object {
         const val KEY_ENC = "api_key_enc"
         const val KEY_DETAIL = "note_detail"
+        const val KEY_VISION_ENABLED = "vision_enabled"
+        const val KEY_VISION_MODEL = "vision_model"
         val DETAIL_LEVELS = listOf("简略", "标准", "深入")
         const val DEFAULT_BASE = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"
+        /** 视觉兜底默认模型（OPT-E）：龙猫 2.5 预览版，实测书页整页转写可用 */
+        const val DEFAULT_VISION_MODEL = "LongCat-2.5-Preview"
 
         /** 快捷预设（label, baseUrl, model）：设置页一键填入，保存前不落库 */
         val PRESETS = listOf(
