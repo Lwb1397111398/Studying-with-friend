@@ -128,9 +128,11 @@ fun ReadScreen(
             },
         )
 
-        // OPT-C C4：计数用正文视图（TOC 段永远无标注，混入计数会让"部分标注"态无法收敛）；
-        // LazyColumn 渲染仍用全量列表（目录条目按条目样式展示）
-        val bodyParagraphs = remember(paragraphs) { paragraphs.filter { it.role != DbValues.ROLE_TOC } }
+        // OPT-C C4：计数用正文视图（TOC/脚注段永远无标注，混入计数会让"部分标注"态无法收敛）；
+        // LazyColumn 渲染仍用全量列表（目录条目/脚注按次级样式展示）
+        val bodyParagraphs = remember(paragraphs) {
+            paragraphs.filter { it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE }
+        }
         val markedCount = bodyParagraphs.count { it.aiAction != DbValues.ACT_NONE }
         ActionBar(
             chapterId = chapterId,
@@ -417,7 +419,8 @@ private val BodyStyle = TextStyle(fontSize = 16.sp, lineHeight = 26.sp)
 @Composable
 private fun ParaRow(p: ParagraphEntity) {
     // OPT-C C4：目录条目特殊展示——小字次级色，无重点竖条/无 AI 徽标（TOC 段也不参与 AI 标注）
-    if (p.role == DbValues.ROLE_TOC) {
+    // OPT-E：脚注段同款次级展示（真书 E2E 后新增 ROLE_FOOTNOTE，AI 全链路跳过）
+    if (p.role == DbValues.ROLE_TOC || p.role == DbValues.ROLE_FOOTNOTE) {
         Text(
             p.text,
             style = MaterialTheme.typography.bodySmall,

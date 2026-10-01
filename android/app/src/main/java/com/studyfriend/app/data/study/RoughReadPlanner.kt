@@ -107,7 +107,10 @@ class RoughReadPlanner(
         val chapter = db.chapterDao().byIdOnce(chapterId)
             ?: throw PlannerException("章节不存在")
         // OPT-C C4：TOC 段不进粗读全链路（分块/标注/归并/计数都不含目录条目）
-        val paragraphs = db.paragraphDao().byChapter(chapterId).filter { it.role != DbValues.ROLE_TOC }
+        // OPT-E：脚注段同样跳过（页面引注不属于章节正文）
+        val paragraphs = db.paragraphDao().byChapter(chapterId).filter {
+            it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE
+        }
         if (paragraphs.isEmpty()) throw PlannerException("本章是目录或无正文内容，无需粗读")
 
         val key = settings.decryptKeyOrNull()
@@ -193,7 +196,9 @@ class RoughReadPlanner(
             mergeDegraded = degraded,
             mergeKeptOld = keptOld,
             unitCount = countUnits(
-                db.paragraphDao().byChapter(chapterId).filter { it.role != DbValues.ROLE_TOC },
+                db.paragraphDao().byChapter(chapterId).filter {
+                    it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE
+                },
             ),
         )
     }

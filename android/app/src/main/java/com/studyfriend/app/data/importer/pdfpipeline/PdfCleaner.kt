@@ -83,11 +83,13 @@ object PdfCleaner {
                 rightBuckets[(x1 / 2).toInt()] = (rightBuckets[(x1 / 2).toInt()] ?: 0) + l.text.length
             }
         }
+        // 桶键 = (x/2)（2pt 粒度），还原必须 ×2 —— E2E 实证：曾误写 /2 造成双重除 2，
+        // left=6.5/right=88.5 垃圾边距 → 缩进判定恒真（句末行全断）→ 正文碎段 33%
         val left = modeBucket(leftBuckets, preferHigh = false).let {
-            if (it == Int.MIN_VALUE) 36f else it / 2.0f
+            if (it == Int.MIN_VALUE) 36f else it * 2.0f
         }
         val right = modeBucket(rightBuckets, preferHigh = true).let {
-            if (it == Int.MIN_VALUE) (dims.getOrNull(0)?.first ?: 595f) - 36f else it / 2.0f
+            if (it == Int.MIN_VALUE) (dims.getOrNull(0)?.first ?: 595f) - 36f else it * 2.0f
         }
 
         val gaps = mutableListOf<Float>()
@@ -155,6 +157,42 @@ object PdfCleaner {
         return false
     }
 
+    /**
+     * 页眉文本特征第二路（偶数页形态）："页码 空格 书名"——数字开头(1~4位) +
+     * 纯 CJK 结尾(2~12字)无任何标点。E2E 实证：《民法总则》偶数页页眉
+     * "10 民法总则"…“236 民法总则”，pdfbox 对部分页报 size=正文，且行尾无页码
+     * （页码在行首），headerLikeText 的尾部页码判据认不出。残留 135 条且
+     * 占据下页首段位置阻断跨页续接。条带内由调用方保证。
+     */
+    private fun headerPageNumLike(t: String): Boolean {
+        var i = 0
+        var digits = 0
+        while (i < t.length && t[i] in '0'..'9') { i++; digits++ }
+        if (digits == 0 || digits > 4) return false
+        if (i < t.length && t[i] == ' ') i++
+        var cjk = 0
+        while (i < t.length && t[i].code in 0x4E00..0x9FFF) { i++; cjk++ }
+        return i == t.length && cjk in 2..12
+    }
+
+    /**
+     * 脚注文本特征（字号判据的兜底路）：行首脚注编号符。E2E 实证：同书两种
+     * 口径——字号报对的页脚注正常收集，报 size=正文的页脚注整页混进正文
+     * （段首＠ 110 条 + 含"参见" 287 段）；脚注编号圈码①被坏字体映射成
+     * ＠/0/O/心 等随机字符，不可枚举还原，只能按"行首符"整体认。
+     * O/0/心 为排除行首小数（0.5）/英文（O'Reilly）误收，要求次字符是 CJK。
+     */
+    private fun footnoteMarked(t: String): Boolean {
+        if (t.isEmpty()) return false
+        val c0 = t.first()
+        if (c0.code in 0x2460..0x2473) return true       // 圈码①…⑳（编号未坏时）
+        if (c0.code == 0xFF20 || c0.code == 0x40) return true // ＠/@（圈码坏映射主形态）
+        if (c0.code == 0x30 || c0.code == 0x4F || c0.code == 0x6F || c0.code == 0x5FC3) {
+            return t.length > 1 && t[1].code in 0x4E00..0x9FFF
+        }
+        return t.startsWith("参见")
+    }
+
     // ---------------------------------------------------------------- 清洗
 
     /**
@@ -184,15 +222,19 @@ object PdfCleaner {
                 val norm = stripControl(maybeYiNormalize(line.text))
                 if (norm.isBlank()) continue
                 val l = line.copy(text = norm.trim())
-                // 页眉：顶部条带 + 短行，且 小字号；或字号与正文相同但行首章名样+行尾页码
-                // （E2E 实证：《民法总则》部分偶数页页眉 pdfbox 报 size=正文，字号判据漏）
+                // 页眉：顶部条带 + 短行，且 小字号；或字号与正文相同但行首章名样+行尾页码；
+                // 或"页码 书名"形态（偶数页页眉，行首数字）。三个文本路都只作字号判据的兜底
+                // （E2E 实证：《民法总则》部分页眉 pdfbox 报 size=正文，字号判据漏）
                 if (l.y0 in 0f..headerBand && l.text.length <= HEADER_MAX_CHARS &&
-                    (l.size in 0.1f..(stats.bodySize * HEADER_SIZE_FACTOR) || headerLikeText(l.text))
+                    (l.size in 0.1f..(stats.bodySize * HEADER_SIZE_FACTOR) ||
+                        headerLikeText(l.text) || headerPageNumLike(l.text))
                 ) continue
                 // 页码行（目录页不删）
                 if (!tocLike && RE_PAGE_NUM.matches(l.text)) continue
-                // 脚注：底部条带 + 显著小字号（目录页不收）
-                if (!tocLike && l.y0 >= footerBandStart && l.size in 0.1f..(stats.bodySize * FOOTER_SIZE_FACTOR)) {
+                // 脚注：底部条带 + 显著小字号；或行首脚注编号符（文本路兜底，目录页不收）
+                if (!tocLike && l.y0 >= footerBandStart &&
+                    (l.size in 0.1f..(stats.bodySize * FOOTER_SIZE_FACTOR) || footnoteMarked(l.text))
+                ) {
                     footnotes.add(l.text)
                     continue
                 }

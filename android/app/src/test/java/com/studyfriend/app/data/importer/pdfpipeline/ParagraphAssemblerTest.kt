@@ -71,6 +71,26 @@ class ParagraphAssemblerTest {
     }
 
     @Test
+    fun lineGapBeyondPitch_openSentenceTopAligned_keepsMerging() {
+        // E2E 实证：句中说一半的顶格续行遇行距抖动 → 不许行距断段（守卫）
+        val lines = bodyLines("一段话还没有说完，", startY = 100f) +
+            bodyLines("后面继续说。", startY = 140f) // dy=40 > 20，但上句未完且顶格
+        val s = stats.copy(pitchThreshold = 20f)
+        val paras = ParagraphAssembler.assemble(lines, s)
+        assertEquals(1, paras.size)
+    }
+
+    @Test
+    fun lineGapBeyondPitch_openSentenceIndented_breaks() {
+        // 上句未完但本行缩进起新段（段中缩进强调句，罕见但存在）→ 缩进强信号仍断
+        val lines = bodyLines("一段话还没有说完，", startY = 100f) +
+            line("缩进的新段说。", x0 = 70f, y0 = 140f) // 70 ≥ 58 缩进
+        val s = stats.copy(pitchThreshold = 20f)
+        val paras = ParagraphAssembler.assemble(lines, s)
+        assertEquals(2, paras.size)
+    }
+
+    @Test
     fun firstLineIndent_breaksParagraph_atSentenceEnd() {
         val lines = bodyLines("上一段说完了。") +
             line("新的一段缩进起步，说完了。", x0 = 70f, y0 = 114f) // 70 ≥ 50+0.8×10=58

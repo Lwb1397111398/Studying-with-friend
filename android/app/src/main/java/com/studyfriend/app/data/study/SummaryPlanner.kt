@@ -59,7 +59,10 @@ class SummaryPlanner(
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
         val cfg = settings.load()
         // OPT-C C4：TOC 段不进总结包（章节要点/讲解卡/题目都不含目录条目）
-        val paragraphs = db.paragraphDao().byChapter(chapterId).filter { it.role != DbValues.ROLE_TOC }
+        // OPT-E：脚注段同样跳过（页面引注不属于章节正文）
+        val paragraphs = db.paragraphDao().byChapter(chapterId).filter {
+            it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE
+        }
         if (paragraphs.isEmpty()) {
             throw PlannerException("本章是目录或无正文内容，无需总结")
         }

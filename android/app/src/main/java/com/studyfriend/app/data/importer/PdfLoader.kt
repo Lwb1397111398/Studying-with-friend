@@ -38,9 +38,13 @@ class PdfExtractResult(
         // 单个 \n 会把全书挤成一个块、只认出第一个章标题（DebugDump 实证）。
         // 例外：目录页条目用单 \n 连成整页一个块——条目一段一条会击穿
         // BookParser 的目录区密度判定，无点线条目会漏成假章（真书探针实证）。
+        // 脚注段打〔脚注〕前缀（BookParser.FOOTNOTE_MARK）：解析器剥掉后标
+        // ROLE_FOOTNOTE，脚注不混进正文流（真书 E2E：脚注误混正文约 300 段）。
         return pages.joinToString("\n\n") { page ->
             val sep = if (page.tocLike) "\n" else "\n\n"
-            page.paras.joinToString(sep) { it.text }
+            page.paras.joinToString(sep) {
+                if (it.footnote) BookParser.FOOTNOTE_MARK + it.text else it.text
+            }
         }
     }
 }

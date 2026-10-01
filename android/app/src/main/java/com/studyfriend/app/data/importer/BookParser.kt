@@ -74,6 +74,13 @@ object BookParser {
     const val WHOLE_BOOK_TITLE = "全文"
 
     /**
+     * 脚注段前缀（OPT-E 管线协议）：PdfLoader.assembleText 给 footnote 段打上
+     * 此前缀，本解析器识别后剥掉并把段落标为 ROLE_FOOTNOTE。TXT 路径不经过
+     * assembleText；正文偶有此前缀时剥掉标脚注，语义恰好一致，无害。
+     */
+    const val FOOTNOTE_MARK = "〔脚注〕"
+
+    /**
      * TOC 连续区（块下标闭区间）。锚点路径记录锚点行坐标（区内唯一可产标题命中的行）；
      * anchorLine = -1 表示无锚点、按密度兜底划区。
      */
@@ -113,7 +120,8 @@ object BookParser {
 
         val chapters = mutableListOf<ParsedChapter>()
         var curTitle = "开篇"
-        var curRole = DbValues.ROLE_BODY
+        // 开篇章（第一个标题命中前的封面/版权/总序）标 FRONT：无用前置信息有 role 归属
+        var curRole = DbValues.ROLE_FRONT
         var curParas = mutableListOf<ParsedPara>()
 
         fun flush() {
@@ -152,7 +160,19 @@ object BookParser {
                     }
                 }
                 else -> {
-                    for (para in parasOf(lines, curRole)) curParas.add(para)
+                    // 脚注段（管线协议前缀）：剥前缀、标 FOOTNOTE，AI 与阅读主流程跳过
+                    val firstLine = lines.firstOrNull()?.trim().orEmpty()
+                    if (firstLine.startsWith(FOOTNOTE_MARK)) {
+                        curParas.add(
+                            ParsedPara(firstLine.removePrefix(FOOTNOTE_MARK), DbValues.ROLE_FOOTNOTE),
+                        )
+                    } else if (isTocBlock(lines)) {
+                        // 目录区外的散条目块（目录尾页没盖进 tocRegion，E2E 实证漏进
+                        // 第一章开头）：仍按条目重组标 ROLE_TOC，不混进正文
+                        curParas.addAll(tocEntries(lines))
+                    } else {
+                        for (para in parasOf(lines, curRole)) curParas.add(para)
+                    }
                 }
             }
         }

@@ -452,4 +452,64 @@ class BookParserTest {
         val chapters = BookParser.parse(text)
         assertEquals(listOf("第一章 导论"), chapters.map { it.title })
     }
+
+    // ---- 5.13 role 标记补全（E2E 真书整本实测：无用信息要有角色归属） ----
+
+    @Test
+    fun footnotePara_prefixStrippedAndMarked() {
+        // PDF 管线协议：〔脚注〕前缀由 PdfLoader.assembleText 打上，解析器剥掉标 FOOTNOTE
+        val text = """
+            第一章 导论
+
+            正文其一。
+
+            ${BookParser.FOOTNOTE_MARK}① 参见王泽鉴《民法总则》第 12 页。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(1, chapters.size)
+        val fn = chapters[0].paras.last()
+        assertEquals(DbValues.ROLE_FOOTNOTE, fn.role)
+        assertEquals("① 参见王泽鉴《民法总则》第 12 页。", fn.text)
+    }
+
+    @Test
+    fun openingParas_roleFront() {
+        // 第一个标题命中前的封面/版权/总序段归 FRONT
+        val text = """
+            民法总则：2022 年重排版
+
+            王泽鉴 著
+
+            北京大学出版社出版，版权所有，翻印必究。
+
+            第一章 导论
+
+            正文其一。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("开篇", "第一章 导论"), chapters.map { it.title })
+        assertTrue(chapters[0].paras.isNotEmpty())
+        assertTrue(chapters[0].paras.all { it.role == DbValues.ROLE_FRONT })
+        assertEquals(DbValues.ROLE_BODY, chapters[1].paras[0].role)
+    }
+
+    @Test
+    fun strayTocEntriesAfterChapter_roleToc() {
+        // 目录尾散条目（没盖进 tocRegion、落在第一章后）：标 TOC 不混正文
+        val text = """
+            第一章 导论
+
+            正文其一。
+
+            第一节 民法的法源…………107
+
+            第二节 权利主体…………208
+
+            正文其二。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(1, chapters.size)
+        val roles = chapters[0].paras.map { it.role }
+        assertEquals(listOf(DbValues.ROLE_BODY, DbValues.ROLE_TOC, DbValues.ROLE_TOC, DbValues.ROLE_BODY), roles)
+    }
 }

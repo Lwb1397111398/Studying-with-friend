@@ -80,8 +80,13 @@ object ParagraphAssembler {
                     flush()
                     cur.append(line.text)
                 }
-                // 5. 行距超过段落阈值
-                !dy.isNaN() && stats.pitchThreshold != null && dy > stats.pitchThreshold -> {
+                // 5. 行距超过段落阈值（守卫：上一行句末、或本行缩进起新段，才许断——
+                //    E2E 实证：句中说一半的顶格续行遇行距抖动被误断，正文碎段重灾区）
+                !dy.isNaN() && stats.pitchThreshold != null && dy > stats.pitchThreshold &&
+                    (
+                        endsSentence(p.text) ||
+                            line.x0 >= stats.left + INDENT_FACTOR * stats.bodySize
+                        ) -> {
                     flush()
                     cur.append(line.text)
                 }

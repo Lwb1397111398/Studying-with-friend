@@ -52,6 +52,18 @@ class PdfCleanerTest {
         assertNull(s.pitchThreshold)
     }
 
+    @Test
+    fun docStats_leftRight_restoredAtFullScale_notDoubleHalved() {
+        // E2E 实证（双重除 2 bug）：桶键 = x/2，还原必须 ×2。
+        // 正文左边距 26（多字符加权）、右缘 354 → left≈26/right≈354，而非 6.5/88.5
+        val lines = List(8) { i ->
+            line("正文第 $i 行内容足够长一点", x0 = 26f, x1 = 354f, y0 = 100f + i * 16f)
+        } + line("缩进段首行", x0 = 48f, x1 = 300f, y0 = 300f)
+        val s = PdfCleaner.docStats(listOf(lines), listOf(dim))
+        assertEquals(26f, s.left, 2.0f)
+        assertEquals(354f, s.right, 2.0f)
+    }
+
     // ---------------------------------------------------------------- clean
 
     @Test
@@ -267,5 +279,43 @@ class PdfCleanerTest {
         )
         val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
         assertTrue(out[0].paras.any { it.text.startsWith("第一章") })
+    }
+
+    @Test
+    fun clean_removesEvenPageHeader_numFirstBookNameLast() {
+        // E2E 实证（偶数页页眉"236 民法总则"）：行首数字+纯 CJK 结尾、无页码在尾部，
+        // headerLikeText 认不出；pdfbox 对部分页报 size=正文，字号判据也漏 → 文本第二路
+        val page = listOf(
+            line("236 民法总则", y0 = 48f, size = 10f),
+            line("正文内容继续往下写，讲的是权利客体问题。", y0 = 110f, x1 = 520f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertFalse(out[0].paras.any { it.text.contains("民法总则") })
+        assertEquals(1, out[0].paras.size)
+    }
+
+    @Test
+    fun clean_keepsBodyLineStartingWithNumber_belowHeaderBand() {
+        // 反证：条带下方"3 人以上"起头的正文行不能被数字开头文本路误删
+        val page = listOf(
+            line("3 人以上共同实施的侵权行为，适用连带责任规定。", y0 = 116f, x1 = 520f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertEquals(1, out[0].paras.size)
+    }
+
+    @Test
+    fun clean_footerMarkedLine_collectedEvenAtBodySize() {
+        // E2E 实证：脚注编号圈码坏映射成＠、pdfbox 报 size=正文 → 字号路漏，
+        // 靠"行首脚注符"文本路兜底收进脚注段
+        val page = listOf(
+            line("正文大段内容讲完了。", y0 = 300f, x1 = 520f),
+            line("＠ 参见王泽鉴《民法总则》第 12 页。", y0 = 700f, size = 10f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        val fn = out[0].paras.filter { it.footnote }
+        assertEquals(1, fn.size)
+        assertTrue(fn[0].text.contains("参见王泽鉴"))
+        assertEquals(1, out[0].paras.count { !it.footnote })
     }
 }
