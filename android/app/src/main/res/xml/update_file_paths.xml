@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用自更新（M7）：FileProvider 只开放下载更新包的缓存子目录 -->
+<paths>
+    <cache-path
+        name="updates"
+        path="updates/" />
+</paths>

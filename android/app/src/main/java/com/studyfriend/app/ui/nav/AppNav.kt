@@ -11,6 +11,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -32,6 +33,8 @@ import com.studyfriend.app.ui.screens.SettingsScreen
 import com.studyfriend.app.ui.screens.SettingsViewModel
 import com.studyfriend.app.ui.screens.ShelfScreen
 import com.studyfriend.app.ui.screens.TocConfirmScreen
+import com.studyfriend.app.ui.screens.UpdateDialog
+import com.studyfriend.app.ui.screens.UpdateViewModel
 
 object Routes {
     const val SHELF = "shelf"
@@ -66,6 +69,9 @@ fun AppNav() {
 
     // Activity 级共享：Import 与 TocConfirm 两屏用同一份解析状态
     val importVm: ImportViewModel = viewModel()
+    // 应用自更新（M7）：Activity 级单例，弹窗挂全局任何页面都能弹；进 App 静默检查一次
+    val updateVm: UpdateViewModel = viewModel()
+    LaunchedEffect(Unit) { updateVm.autoCheckIfNeeded() }
 
     Scaffold(
         bottomBar = {
@@ -90,6 +96,7 @@ fun AppNav() {
             }
         },
     ) { padding ->
+        UpdateDialog(vm = updateVm)
         NavHost(
             navController = navController,
             startDestination = Routes.SHELF,
@@ -108,7 +115,7 @@ fun AppNav() {
             composable(Routes.REVIEW) { ReviewScreen() }
             composable(Routes.SETTINGS) {
                 val settingsVm: SettingsViewModel = viewModel()
-                SettingsScreen(vm = settingsVm)
+                SettingsScreen(vm = settingsVm, updateVm = updateVm)
             }
             composable(Routes.IMPORT) {
                 ImportScreen(vm = importVm, onNext = { navController.navigate(Routes.TOC) })

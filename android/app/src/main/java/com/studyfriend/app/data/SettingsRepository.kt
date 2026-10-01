@@ -24,6 +24,12 @@ data class SettingsSnapshot(
     val visionBaseUrl: String,
     /** 是否已存视觉专属 Key（明文不出库） */
     val hasVisionKey: Boolean,
+    /** 应用自更新（M7）：是否已存 GitHub 只读令牌（明文不出库） */
+    val hasGithubToken: Boolean,
+    /** 发现新版本自动弹窗检查；默认开 */
+    val updateAutoCheck: Boolean,
+    /** 更新源 API 地址覆盖：仅测试/私有部署用，空 = 官方 GitHub API */
+    val updateApiBase: String,
 )
 
 /**
@@ -52,6 +58,9 @@ class SettingsRepository(
                 ?.takeIf { it.isNotBlank() } ?: DEFAULT_VISION_MODEL,
             visionBaseUrl = db.settingDao().get(KEY_VISION_BASE)?.value.orEmpty(),
             hasVisionKey = db.settingDao().get(KEY_VISION_KEY_ENC)?.value != null,
+            hasGithubToken = db.settingDao().get(KEY_GITHUB_TOKEN_ENC)?.value != null,
+            updateAutoCheck = db.settingDao().get(KEY_UPDATE_AUTO)?.value != "false",
+            updateApiBase = db.settingDao().get(KEY_UPDATE_API_BASE)?.value.orEmpty(),
         )
     }
 
@@ -112,6 +121,45 @@ class SettingsRepository(
         db.settingDao().delete(KEY_VISION_KEY_ENC)
     }
 
+    // ---- 应用自更新（M7）：GitHub 只读令牌 / 自动检查开关 / 上次检查时间 ----
+
+    /** 保存 GitHub 只读令牌：与 AI Key 同一套加密落库，明文不落盘 */
+    suspend fun saveGithubToken(plain: String) {
+        val payload = store.encrypt(plain.trim())
+        db.settingDao().upsert(SettingEntity(KEY_GITHUB_TOKEN_ENC, payload))
+    }
+
+    suspend fun clearGithubToken() {
+        db.settingDao().delete(KEY_GITHUB_TOKEN_ENC)
+    }
+
+    /** 解出 GitHub 令牌：解密失败返回 null 且不删密文（逻辑同 AI Key，仅结构性损坏才删） */
+    suspend fun decryptGithubTokenOrNull(): String? {
+        val payload = db.settingDao().get(KEY_GITHUB_TOKEN_ENC)?.value ?: return null
+        if (isStructurallyCorrupt(payload)) {
+            db.settingDao().delete(KEY_GITHUB_TOKEN_ENC)
+            return null
+        }
+        return try {
+            store.decrypt(payload)
+        } catch (e: SecretCryptoException) {
+            null
+        }
+    }
+
+    /** 自动检查开关（即点即存） */
+    suspend fun setUpdateAutoCheck(enabled: Boolean) {
+        db.settingDao().upsert(SettingEntity(KEY_UPDATE_AUTO, if (enabled) "true" else "false"))
+    }
+
+    /** 每次真正联网检查后记录时间，自动检查据此节流（24 小时一次） */
+    suspend fun markUpdateChecked() {
+        db.settingDao().upsert(SettingEntity(KEY_UPDATE_LAST, System.currentTimeMillis().toString()))
+    }
+
+    suspend fun updateLastCheckedMs(): Long =
+        db.settingDao().get(KEY_UPDATE_LAST)?.value?.toLongOrNull() ?: 0L
+
     /** 视觉兜底实际生效的 Key：专属 Key 优先，未配置回退主 Key（同一家时两处不用重复填） */
     suspend fun resolveVisionKeyOrNull(): String? =
         decryptVisionKeyOrNull() ?: decryptKeyOrNull()
@@ -167,6 +215,11 @@ class SettingsRepository(
         const val KEY_VISION_MODEL = "vision_model"
         const val KEY_VISION_BASE = "vision_base"
         const val KEY_VISION_KEY_ENC = "vision_key_enc"
+        // 应用自更新（M7）
+        const val KEY_GITHUB_TOKEN_ENC = "github_token_enc"
+        const val KEY_UPDATE_AUTO = "update_auto_check"
+        const val KEY_UPDATE_LAST = "update_last_check_ms"
+        const val KEY_UPDATE_API_BASE = "update_api_base"
         val DETAIL_LEVELS = listOf("简略", "标准", "深入")
         const val DEFAULT_BASE = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"

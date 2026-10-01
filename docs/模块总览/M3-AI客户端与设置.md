@@ -68,3 +68,10 @@ test/.../SettingsRepoTest.kt  4 用例（roundTrip/健康解密/失效删键/cle
 ## 对后续模块的接口承诺
 
 M4 段落讲解 / M5 章末总结将复用 `AiClient.chatJson(req, deserializer, onDelta)`：温度/maxTokens/messages 全可配、取消可传播（哨兵机制）、JSON 失败自动重试——批量队列只需管好自己的并发与限速。
+
+## M7 追加（应用自更新的设置面）
+
+- 设置页新增「应用更新」区块：当前版本（BuildConfig.VERSION_NAME）、手动「检查更新」、「自动检查更新」开关（即点即存）、GitHub 访问令牌输入（密码框 + 已存清除）+「保存令牌」+「如何获取令牌？」步骤指引弹窗。界面与状态机在 `UpdateViewModel/UpdateDialog`（详见 M7），本模块只提供存储面。
+- `SettingsRepository` 新增：`github_token_enc`（与 AI Key 同一套 SecretCrypto 加密落库）、`update_auto_check`（缺省开）、`update_last_check_ms`（24h 节流）、`update_api_base`（测试覆盖用隐藏键，默认空 = 官方 GitHub API）。
+- `SettingsSnapshot` 相应加 `hasGithubToken / updateAutoCheck / updateApiBase` 三字段。
+- 最后更新：2026-10-01（M7 接入）。
