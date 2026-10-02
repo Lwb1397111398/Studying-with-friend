@@ -7,7 +7,9 @@ import com.studyfriend.app.data.ai.SecretStore
 import com.studyfriend.app.data.ai.isStructurallyCorrupt
 import com.studyfriend.app.data.db.SettingEntity
 import com.studyfriend.app.data.db.StudyDatabase
+import com.studyfriend.app.data.importer.pdfpipeline.TocVisionParser
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
+import java.io.File
 import javax.crypto.SecretKey
 
 /** 设置页配置快照（Key 永不明文出库，只给"是否已存"） */
@@ -174,6 +176,19 @@ class SettingsRepository(
         val key = resolveVisionKeyOrNull() ?: return null
         val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
         return VisionTranscriber(base, key, snap.visionModel)
+    }
+
+    /**
+     * 组装目录探针（P3b-1）：与 [buildVisionTranscriber] 同源快照（开关/Key/专属地址
+     * 留空回退主配置），视觉不可用 → null（探针静默跳过）。cacheDir/renderFn 由调用方
+     * 绑定（探针逐页渲染→调用→释放，内存峰值 ≤1 页图）。
+     */
+    suspend fun buildTocVisionParser(cacheDir: File, renderFn: (Int) -> String): TocVisionParser? {
+        val snap = load()
+        if (!snap.visionEnabled) return null
+        val key = resolveVisionKeyOrNull() ?: return null
+        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
+        return TocVisionParser(base, key, snap.visionModel, cacheDir, renderFn = renderFn)
     }
 
     /**

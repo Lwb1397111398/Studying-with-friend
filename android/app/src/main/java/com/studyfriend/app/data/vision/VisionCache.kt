@@ -12,8 +12,11 @@ import java.io.File
  */
 object VisionCache {
 
+    /** uri → 缓存文件名哈希（P3b-1 目录缓存共用此算法，禁止复制实现） */
+    fun uriHash(uri: String): String = uri.hashCode().toString(16)
+
     fun file(context: Context, uri: String, pageNo: Int): File =
-        File(context.cacheDir, "vision_${uri.hashCode().toString(16)}_$pageNo.json")
+        File(context.cacheDir, "vision_${uriHash(uri)}_$pageNo.json")
 
     /** 未命中/损坏一律返回 null（调用方按未转写处理） */
     fun read(context: Context, uri: String, pageNo: Int): PageTranscription? =

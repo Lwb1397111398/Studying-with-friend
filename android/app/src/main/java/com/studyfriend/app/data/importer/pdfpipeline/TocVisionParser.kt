@@ -1,0 +1,249 @@
+package com.studyfriend.app.data.importer.pdfpipeline
+
+import android.util.Log
+import com.studyfriend.app.data.ai.AiClient
+import com.studyfriend.app.data.ai.AiException
+import com.studyfriend.app.data.ai.AiMessage
+import com.studyfriend.app.data.ai.ChatRequest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+import java.time.Duration
+import java.time.Instant
+
+/**
+ * 目录页视觉识别（P3b-1 探针）：把 tocLike 页图交给视觉模型，产出结构化目录条目。
+ * 与 [VisionTranscriber]（忠实转写整页文本）职责不同：本类是结构化提取（Parser）。
+ *
+ * 探针定位：只产数据（调用方记 logcat + 内存暂存），不参与分章（P3b-2 消费）；
+ * 任何环节失败 → null，导入行为与不挂探针时逐字节一致。
+ *
+ * 重试策略独立于 VisionTranscriber（仅网络错/超时重试 1 次；4 次调用场景不值得
+ * 抽共享接口）：若 VisionTranscriber 重试策略变更（如加指数退避），此处需手动
+ * 评估同步。不经 VisionScheduler——单书 ≤4 次轻量调用；调用量 >10 次/书、或
+ * 总目录页数 >4 页且处理耗时 >3 页预算时重新评估接入。
+ *
+ * 缓存（cacheDir 由构造器传入）：全有全无——整体成功才写 `toc_v{N}_{uriHash}.json`
+ * （原子写 temp+rename）；失败写 `toc_fail_v{N}_{uriHash}.marker`（30 天 TTL 内同书
+ * 跳过探针，防坏目录页每导必烧）。TocJson.kt 顶部记录格式版本历史；Prompt/解析
+ * 规则/模型变更时递增 [FORMAT_VERSION]（旧版本缓存与 marker 因文件名不同自然失效）。
+ */
+class TocVisionParser(
+    private val baseUrl: String,
+    private val apiKey: String,
+    private val model: String,
+    private val cacheDir: File,
+    private val enabled: Boolean = true,
+    private val chatFn: suspend (ChatRequest) -> String = { req -> AiClient.chat(req) },
+    private val renderFn: (Int) -> String,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+
+    /**
+     * 逐页识别目录。入参=调用方选好的 tocLike 物理页号（1-based，升序）+ 文件
+     * uriHash（缓存/marker 文件名用）。内部逐页「渲染→调用→释放」不预加载全部页，
+     * 内存峰值 ≤1 页图。任一环节失败整体返 null（半份目录不采纳），已成功页丢弃。
+     */
+    suspend fun parse(pageNumbers: List<Int>, uriHash: String): List<TocEntry>? =
+        withContext(Dispatchers.IO) {
+            if (!enabled || pageNumbers.isEmpty()) return@withContext null
+            val start = clock()
+            fun elapsed() = clock() - start
+
+            val cacheFile = File(cacheDir, "toc_v${FORMAT_VERSION}_${uriHash}.json")
+            readCache(cacheFile)?.let {
+                Log.i(TAG, "cache hit ($uriHash, ${it.size} entries)")
+                return@withContext it
+            }
+
+            val marker = File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}.marker")
+            if (markerFresh(marker)) {
+                Log.i(TAG, "fail marker fresh, skip probe ($uriHash)")
+                return@withContext null
+            }
+
+            val all = mutableListOf<TocEntry>()
+            for (pageNo in pageNumbers) {
+                // 统一前置检查（首次与重试同判据）：容量算术 (300−12)/60≈4.8 → 4 页整
+                if (elapsed() + READ_TIMEOUT_MS > TOTAL_TIMEOUT_MS) {
+                    Log.w(TAG, "toc budget exhausted after ${all.size} entries, page $pageNo dropped")
+                    return@withContext null
+                }
+                val pageStart = clock()
+                val pngBase64 = try {
+                    renderFn(pageNo)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "page render failed: $pageNo", e)
+                    return@withContext null
+                }
+                val raw = callWithRetry(pngBase64, ::elapsed)
+                    ?: return@withContext null
+                // 单页只解析不守卫（目录尾页可能条目很少，页级守卫会误杀）；
+                // 守卫作用于拼接全集：条目数/level=1/非降序跨页连续性一次判足
+                val pageEntries = TocJson.parse(raw, applyGuards = false)
+                if (pageEntries != null && pageEntries.isEmpty()) {
+                    Log.w(TAG, "page $pageNo: all entries filtered out")
+                }
+                if (pageEntries == null) {
+                    Log.w(TAG, "page $pageNo returned unparseable JSON")
+                    writeMarker(marker)
+                    return@withContext null
+                }
+                // 单页耗时=渲染+调用+解析（E2E 敏感性报告口径，P3b-2 调参依据）
+                Log.i(TAG, "page $pageNo: ${pageEntries.size} entries, ${clock() - pageStart}ms")
+                all += pageEntries
+            }
+
+            if (!TocJson.passesGuards(all)) {
+                Log.w(TAG, "TOC pages may be misidentified: ${pageNumbers.size} pages, ${all.size} entries failed guards")
+                writeMarker(marker)
+                return@withContext null
+            }
+
+            marker.delete()
+            writeCache(cacheFile, all)
+            val level1 = all.count { it.level == 1 }
+            Log.i(
+                TAG,
+                "toc entries=${all.size} (level1=$level1, level2=${all.size - level1}, " +
+                    "pageRange=${all.mapNotNull { it.page }.minOrNull()}..${all.mapNotNull { it.page }.maxOrNull()})",
+            )
+            if (all.size < MIN_QUALITY_ENTRIES) {
+                Log.w(TAG, "toc quality warning: ${all.size} entries, below minimum $MIN_QUALITY_ENTRIES")
+            }
+            all
+        }
+
+    /** 网络错/超时重试 1 次（重试前再查预算）；其余异常与 JSON 解析失败同罚：不重试 */
+    private suspend fun callWithRetry(pngBase64: String, elapsed: () -> Long): String? {
+        repeat(TRANSCRIBE_ATTEMPTS) { attempt ->
+            if (attempt > 0 && elapsed() + READ_TIMEOUT_MS > TOTAL_TIMEOUT_MS) {
+                Log.w(TAG, "retry skipped: no budget left")
+                return null
+            }
+            try {
+                return chatFn(request(pngBase64))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val retryable = e is IOException || (e as? AiException)?.httpCode != null
+                Log.w(TAG, "page call failed (attempt ${attempt + 1}, retryable=$retryable): ${e.message}")
+                if (!retryable || attempt == TRANSCRIBE_ATTEMPTS - 1) return null
+            }
+        }
+        return null
+    }
+
+    private fun request(pngBase64: String) = ChatRequest(
+        baseUrl = baseUrl,
+        apiKey = apiKey,
+        model = model,
+        temperature = 0.1,
+        maxTokens = 8000,
+        messages = listOf(
+            AiMessage(role = "user", content = PROMPT, images = listOf("data:image/png;base64,$pngBase64")),
+        ),
+        readTimeoutMs = READ_TIMEOUT_MS.toInt(),
+    )
+
+    /** 未命中/损坏/版本不符/超大一律 null（调用方重建）；并发边界：探针期单线程调用 */
+    private fun readCache(f: File): List<TocEntry>? = try {
+        if (!f.isFile()) null
+        else if (f.length() > MAX_CACHE_BYTES) {
+            Log.w(TAG, "cache oversize (${f.length()}B), rebuild")
+            null
+        } else TocJson.parse(f.readText())
+    } catch (e: Exception) {
+        Log.w(TAG, "cache read failed, rebuild: ${e.message}")
+        null
+    }
+
+    /** 原子写：temp+rename 杜绝读到半截 JSON；写失败只记日志不废已成功结果 */
+    private fun writeCache(f: File, entries: List<TocEntry>) {
+        try {
+            cacheDir.mkdirs()
+            val tmp = File(cacheDir, f.name + ".tmp")
+            tmp.writeText(
+                buildString {
+                    append("{\"entries\":[")
+                    entries.joinTo(this, separator = ",") { e ->
+                        val page = e.page?.toString() ?: "null"
+                        "{\"title\":${jsonQuote(e.title)},\"page\":$page,\"level\":${e.level}}"
+                    }
+                    append("]}")
+                },
+            )
+            // Linux（Android 真机）renameTo 原子覆盖已存在目标，无 TOCTOU 窗口；
+            // 桌面 JVM（单测）renameTo 不覆盖，失败时退回先删再 rename——此时窗口内
+            // 读方最多 miss 重建，无害。rename 成功则 tmp 已不存在，两次失败路径
+            // 均有 tmp.delete() 兜底，无孤儿文件
+            if (!tmp.renameTo(f)) {
+                f.delete()
+                if (!tmp.renameTo(f)) tmp.delete()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "cache write failed (result still returned): ${e.message}")
+        }
+    }
+
+    /** marker 内容=ISO 时间戳；写失败仅记日志（熔断失效=下次重导多烧几次调用） */
+    private fun writeMarker(marker: File) {
+        try {
+            cacheDir.mkdirs()
+            marker.writeText(Instant.ofEpochMilli(clock()).toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "marker write failed: ${e.message}")
+        }
+    }
+
+    private fun markerFresh(marker: File): Boolean = try {
+        if (!marker.exists()) false
+        else {
+            val ts = Instant.parse(marker.readText().trim())
+            Duration.between(ts, Instant.ofEpochMilli(clock())).toMillis() < MARKER_TTL_MS
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    private fun jsonQuote(s: String): String = buildString {
+        append('"')
+        s.forEach { c ->
+            when (c) {
+                '"' -> append("\\\"")
+                '\\' -> append("\\\\")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> if (c < ' ') append("\\u%04x".format(c.code)) else append(c)
+            }
+        }
+        append('"')
+    }
+
+    companion object {
+        private const val TAG = "P3b"
+        /** 缓存/marker 格式版本：Prompt、解析规则或模型变更时递增（历史见 TocJson.kt 头） */
+        const val FORMAT_VERSION = 3
+        private const val TRANSCRIBE_ATTEMPTS = 2
+        private const val READ_TIMEOUT_MS = 60_000L
+        private const val TOTAL_TIMEOUT_MS = 300_000L
+        private const val MARKER_TTL_MS = 30L * 24 * 60 * 60 * 1000
+        private const val MIN_QUALITY_ENTRIES = 10
+
+        /** 缓存文件大小上限：正常目录 JSON 仅数 KB（真书实测 <5KB），超限视为损坏走重建 */
+        private const val MAX_CACHE_BYTES = 1_000_000L
+
+        private val PROMPT =
+            "这是书的目录页照片。把目录条目提取为 JSON：" +
+                "{\"entries\":[{\"title\":\"条目标题原文\",\"page\":123,\"level\":1}]}。" +
+                "要求：只输出 JSON，不要解释或代码围栏；title 忠实原文不改写不翻译；" +
+                "page=条目点线后标注的页码整数，看不到页码用 null；" +
+                "level：章/篇/部/编/卷/回等大标题=1，节/小节=2，三级及以下条目（如（一）、1.）也记 2；" +
+                "双栏目录按先左栏后右栏、栏内从上到下顺序输出；忽略页眉、页脚、本页页码。"
+    }
+}

@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -30,11 +31,13 @@ import com.studyfriend.app.data.importer.TextLoader
 import com.studyfriend.app.data.importer.pdfpipeline.PageSelector
 import com.studyfriend.app.data.importer.pdfpipeline.PageTranscription
 import com.studyfriend.app.data.importer.pdfpipeline.Para
+import com.studyfriend.app.data.importer.pdfpipeline.TocEntry
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import com.studyfriend.app.data.importer.pdfpipeline.joinTexts
 import com.studyfriend.app.data.db.VisionQueueEntity
 import com.studyfriend.app.data.vision.VisionCache
 import com.studyfriend.app.data.vision.VisionScheduler
+import java.io.File
 import java.util.regex.PatternSyntaxException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -89,6 +92,11 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     private var lastUri: Uri? = null
     /** 视觉转写统计备注（OPT-E）；解析兜底提示不存在时在 parseNote 里展示 */
     private var visionStatsNote: String? = null
+
+    /** P3b-1 目录探针产物（过整体守卫的目录条目全集）；null=未识别/失败/跳过。
+     *  P3b-1 只产不消费（logcat 诊断），P3b-2 目录驱动切章起才消费。 */
+    var tocResult: List<TocEntry>? = null
+        private set
 
     /**
      * 超单次上限的可疑页暂存（OPT-F）：页号 to 清洗后字数。导入不再拒绝，
@@ -164,6 +172,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             allowScanned = vision != null,
                         )
                         applyVision(result, uri, vision)
+                        runTocProbe(result, uri)
                         // P3a 字号证据链：PDF 路径打〔标题〕前缀，parse 侧按 isPdf 同步认标
                         content = result.assembleText(styleAware = true)
                     } else {
@@ -270,6 +279,44 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             throw e
         } catch (e: Exception) {
             visionStatsNote = "视觉转写未完成，已保留文字层内容：${e.message ?: "未知错误"}"
+        }
+    }
+
+    /**
+     * P3b-1 目录探针（纯产数据）：前 200 页内 tocLike 页升序取前 4，视觉识别为
+     * 结构化目录存入 [tocResult] 并记 logcat。任何失败只让 tocResult 保持 null，
+     * 导入行为（正文/章节）完全不变；P3b-2 目录驱动切章起才消费该数据。
+     */
+    private suspend fun runTocProbe(result: PdfExtractResult, uri: Uri) {
+        // 连续导入时先清掉上一本的目录：无 tocLike/视觉未配置/异常三条早退路径都不得残留旧数据
+        tocResult = null
+        try {
+            val tocPages = result.pages
+                .filter { it.tocLike && it.pageNum <= 200 }
+                .map { it.pageNum }
+                .take(4)
+            if (tocPages.isEmpty()) {
+                Log.i("P3b", "no tocLike pages")
+                return
+            }
+            Log.i("P3b", "toc probe pages=$tocPages")
+            PdfPageRenderer(getApplication(), uri).use { renderer ->
+                val parser = settings.buildTocVisionParser(
+                    File(getApplication<Application>().cacheDir, "vision_cache/toc"),
+                ) { pageNo -> renderer.renderPageBase64(pageNo - 1) }
+                if (parser == null) {
+                    Log.i("P3b", "vision unavailable, toc probe skipped")
+                    return
+                }
+                tocResult = parser.parse(tocPages, VisionCache.uriHash(uri.toString()))
+                if (tocResult == null) {
+                    Log.i("P3b", "toc probe: no entries (failed, budget exhausted or cached failure)")
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("P3b", "toc probe failed", e)
         }
     }
 

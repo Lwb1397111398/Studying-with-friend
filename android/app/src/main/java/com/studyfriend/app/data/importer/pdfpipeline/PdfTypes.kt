@@ -60,3 +60,8 @@ data class DocStats(
     /** 行距断段阈值（pt）；null = 行距无信号（样本太少且无谷点），退化为句末即断 */
     val pitchThreshold: Float?,
 )
+
+/** 目录条目（P3b-1 视觉识别产物）；page=条目标注页码（null=未见页码），level 1=章/篇/部/编/卷/回 2=节。
+ *  level 维持两级：章节树 UI（P3b-3）的层级由标题前缀（第X章/第X节）推导，
+ *  TocEntry.level 只承担粗分职责，三级及以下条目按 PROMPT 统一记 2。 */
+data class TocEntry(val title: String, val page: Int?, val level: Int)
