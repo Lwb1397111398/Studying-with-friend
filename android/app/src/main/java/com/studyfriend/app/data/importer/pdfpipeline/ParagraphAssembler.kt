@@ -67,27 +67,39 @@ object ParagraphAssembler {
         val paras = mutableListOf<Para>()
         val cur = StringBuilder()
         var prev: PLine? = null
+        // 段内最大字号（P3a 字号证据）：初值 0f 仅作下界；取 max 而非首行——
+        // 正常路径（字号跳变断段生效）与 min 无差别，极端误接路径下保留标题信号。
+        // curMax 只在行文本实际进入 cur 时更新（takeIn）：断段臂先 flush 再 takeIn，
+        // 顺序反了会把断段行的字号混进前一段（单测 p3a_titleFollowedByBody 锁定）
+        var curMax = 0f
 
         fun flush() {
             val t = cur.toString().trim()
-            if (t.isNotEmpty()) paras.add(Para(t))
+            if (t.isNotEmpty()) paras.add(Para(t, size = curMax))
             cur.setLength(0)
+            curMax = 0f
         }
 
-        fun appendJoined(text: String) {
+        fun takeIn(line: PLine) {
+            curMax = max(curMax, line.size)
+            cur.append(line.text)
+        }
+
+        fun appendJoined(line: PLine) {
             if (cur.isEmpty()) {
-                cur.append(text)
+                takeIn(line)
                 return
             }
-            val first = text.firstOrNull()
+            val first = line.text.firstOrNull()
             val joiner = if (first != null && isCjkLike(cur.last()) && isCjkLike(first)) "" else " "
-            cur.append(joiner).append(text)
+            cur.append(joiner).append(line.text)
+            curMax = max(curMax, line.size)
         }
 
         for (line in lines) {
             val p = prev
             if (p == null) {
-                cur.append(line.text)
+                takeIn(line)
                 prev = line
                 continue
             }
@@ -102,26 +114,26 @@ object ParagraphAssembler {
             when {
                 // 1. 段首禁则标点：无条件并回
                 first != null && first in LEADING_NO_BREAK -> {
-                    hitStats.hit("1_noBreakJoin"); appendJoined(line.text)
+                    hitStats.hit("1_noBreakJoin"); appendJoined(line)
                 }
                 // 2. 标题行：折行合并或独立成段
                 isTitle -> {
                     if (prevTitle && !dy.isNaN() && dy >= 0f && dy <= TITLE_FOLD_FACTOR * p.size) {
-                        hitStats.hit("2_titleFold"); appendJoined(line.text) // 标题自身折行
+                        hitStats.hit("2_titleFold"); appendJoined(line) // 标题自身折行
                     } else {
                         hitStats.hit("2_titleNew"); flush()
-                        cur.append(line.text)
+                        takeIn(line)
                     }
                 }
                 // 3. 标题后的正文：标题独立成段
                 prevTitle -> {
                     hitStats.hit("3_afterTitle"); flush()
-                    cur.append(line.text)
+                    takeIn(line)
                 }
                 // 4. y 回跳
                 !dy.isNaN() && dy < -Y_JUMP_FACTOR * max(p.size, line.size) -> {
                     hitStats.hit("4_yJump"); flush()
-                    cur.append(line.text)
+                    takeIn(line)
                 }
                 // 4.5 深缩进标签块：≈2字缩进的短行（列表/标签项）独立成段
                 //     （默认关闭：真书正文排版下误拆严重，见 deepIndentBlockEnabled 注释）
@@ -129,19 +141,19 @@ object ParagraphAssembler {
                     line.x0 >= 0f && line.x0 >= stats.left + DEEP_INDENT_FACTOR * stats.bodySize &&
                     line.x1 < stats.right - SHORT_LINE_FACTOR * line.size -> {
                     hitStats.hit("4.5_deepIndent"); flush()
-                    cur.append(line.text)
+                    takeIn(line)
                 }
                 // 4.75 满行必接：段落末行几乎必然不满 → 上一行满行即未完，续接
                 //     （修复"满行+句末+顶格续行"被行距抖动/短行臂误断的段裂）
                 fullLineJoinEnabled && !strongNewSeg && topAligned &&
                     p.x1 >= stats.right - FULL_LINE_FACTOR * stats.bodySize -> {
-                    hitStats.hit("4.75_fullLineJoin"); appendJoined(line.text)
+                    hitStats.hit("4.75_fullLineJoin"); appendJoined(line)
                 }
                 // 4.875 近满行接：近满+句末+顶格续行 = 段中句号
                 !strongNewSeg && topAligned &&
                     p.x1 >= stats.right - NEAR_FULL_FACTOR * stats.bodySize &&
                     endsSentence(p.text) -> {
-                    hitStats.hit("4.875_nearFullJoin"); appendJoined(line.text)
+                    hitStats.hit("4.875_nearFullJoin"); appendJoined(line)
                 }
                 // 5. 行距超过段落阈值（守卫：上一行句末、或本行缩进起新段，才许断——
                 //    E2E 实证：句中说一半的顶格续行遇行距抖动被误断，正文碎段重灾区）
@@ -151,28 +163,28 @@ object ParagraphAssembler {
                             line.x0 >= stats.left + INDENT_FACTOR * stats.bodySize
                         ) -> {
                     hitStats.hit("5_pitch"); flush()
-                    cur.append(line.text)
+                    takeIn(line)
                 }
                 // 6. 首行缩进 + 上一行句末
                 line.x0 >= 0f && line.x0 >= stats.left + INDENT_FACTOR * stats.bodySize &&
                     endsSentence(p.text) -> {
                     hitStats.hit("6_indentSent"); flush()
-                    cur.append(line.text)
+                    takeIn(line)
                 }
                 // 7. 短行 + 上一行句末
                 line.x0 >= 0f && line.x1 < stats.right - SHORT_LINE_FACTOR * line.size &&
                     endsSentence(p.text) -> {
                     hitStats.hit("7_shortLineSent"); flush()
-                    cur.append(line.text)
+                    takeIn(line)
                 }
                 // 8. 无行距信号兜底：中宽行句末即断（满行/近满已被 4.75/4.875 续接）
                 stats.pitchThreshold == null && endsSentence(p.text) -> {
                     hitStats.hit("8_fallbackSent"); flush()
-                    cur.append(line.text)
+                    takeIn(line)
                 }
                 // 9. 默认续接
                 else -> {
-                    hitStats.hit("9_defaultJoin"); appendJoined(line.text)
+                    hitStats.hit("9_defaultJoin"); appendJoined(line)
                 }
             }
             prev = line

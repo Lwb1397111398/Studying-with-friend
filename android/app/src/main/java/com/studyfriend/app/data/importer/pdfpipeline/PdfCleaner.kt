@@ -252,7 +252,7 @@ object PdfCleaner {
                     PageOut(
                         idx + 1, tocLike = true, rawChars = allText.length, puaCount = puaCount,
                         lineCount = 0, shortLineCount = 0,
-                        paras = kept.map { Para(it.text) },
+                        paras = kept.map { Para(it.text, size = it.size) },
                         firstLine = null, lastLine = null,
                     ),
                 )
@@ -304,7 +304,11 @@ object PdfCleaner {
             if (firstGeom.x0 >= stats.left + 0.8f * stats.bodySize) continue
             if (firstGeom.size >= stats.bodySize * 1.15f) continue
             cur.paras.removeAt(0)
-            prev.paras[prev.paras.size - 1] = Para(joinTexts(listOf(last.text, first.text)))
+            // size 取两侧 max（P3a）：305 行守卫已保证首段非标题，此处防御性保留字号证据
+            prev.paras[prev.paras.size - 1] = Para(
+                joinTexts(listOf(last.text, first.text)),
+                size = max(last.size, first.size),
+            )
         }
     }
 

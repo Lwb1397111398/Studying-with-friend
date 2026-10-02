@@ -1,8 +1,14 @@
 package com.studyfriend.app.data.importer
 
 import com.studyfriend.app.data.db.DbValues
+import com.studyfriend.app.data.importer.pdfpipeline.DocStats
+import com.studyfriend.app.data.importer.pdfpipeline.PageOut
+import com.studyfriend.app.data.importer.pdfpipeline.PLine
+import com.studyfriend.app.data.importer.pdfpipeline.Para
+import com.studyfriend.app.data.importer.pdfpipeline.ParagraphAssembler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 /** M2 计划 §5.1-§5.6：段落切分 / 标题档位 / 护栏 / 兜底 / 角色 */
@@ -511,5 +517,245 @@ class BookParserTest {
         assertEquals(1, chapters.size)
         val roles = chapters[0].paras.map { it.role }
         assertEquals(listOf(DbValues.ROLE_BODY, DbValues.ROLE_TOC, DbValues.ROLE_TOC, DbValues.ROLE_BODY), roles)
+    }
+
+    // ---------------------------------------------------------------- P3a 字号证据链
+
+    private val chainStats = DocStats(bodySize = 10f, left = 50f, right = 545f, pitchThreshold = null)
+
+    /** 集成小链路：PLine → ParagraphAssembler → PageOut → assembleText(styleAware) */
+    private fun assembleAwareText(
+        lines: List<PLine>,
+        stats: DocStats = chainStats,
+        styleAware: Boolean = true,
+    ): String {
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        val page = PageOut(
+            1, tocLike = false, rawChars = 100, puaCount = 0,
+            lineCount = lines.size, shortLineCount = 0,
+            paras = paras, firstLine = lines.firstOrNull(), lastLine = lines.lastOrNull(),
+        )
+        return PdfExtractResult(listOf(page), stats, scanned = false).assembleText(styleAware)
+    }
+
+    @Test
+    fun p3a_prefixedTitle_strippedAndConfirmed() {
+        // 单测 1：前缀剥除 + big 证据确认 A 档（styleAware=true）。标题行自身被
+        // skipLine 排除不进段落，正文正常跟随
+        val chapters = BookParser.parse("〔标题〕第一章 私法绪论\n\n正文内容。", styleAware = true)
+        assertEquals(listOf("第一章 私法绪论"), chapters.map { it.title })
+        assertEquals("正文内容。", chapters[0].paras[0].text)
+    }
+
+    @Test
+    fun p3a_abGradeWithoutEvidence_demotedToBody() {
+        // 单测 2（集成链）：A 档命中、字号 ≈ 正文（10.4pt 真书假章）→ 无证据降为正文。
+        // 对照：styleAware=false 时同一文本成章——锁定拦截由字号门槛导致。
+        // （直构 paras 绕过组装器续接，保持假章行独立成段）
+        val page = PageOut(
+            1, tocLike = false, rawChars = 100, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(Para("第十二章权利的行使", size = 10.4f), Para("正文内容说完了。", size = 10f)),
+            firstLine = null, lastLine = null,
+        )
+        val aware = BookParser.parse(
+            PdfExtractResult(listOf(page), chainStats, scanned = false).assembleText(styleAware = true),
+            styleAware = true,
+        )
+        assertEquals("假章应被拦截为整书单章", "全文", aware.single().title)
+        val unaware = BookParser.parse(
+            PdfExtractResult(listOf(page), chainStats, scanned = false).assembleText(styleAware = false),
+            styleAware = false,
+        )
+        assertEquals("无字号门槛时成章（对照）", "第十二章权利的行使", unaware.single().title)
+    }
+
+    @Test
+    fun p3a_thresholdBoundary_geSemantics() {
+        // 单测 3：bodySize=10，size=11.5（=+1.5，二进制精确）→ 前缀；11.4 → 无前缀（>= 语义）
+        val big = PLine("第一章 边界", x0 = 50f, x1 = 540f, y0 = 100f, size = 11.5f)
+        val small = PLine("第一章 边界", x0 = 50f, x1 = 540f, y0 = 100f, size = 11.4f)
+        assertTrue(assembleAwareText(listOf(big)).startsWith("〔标题〕"))
+        assertTrue(!assembleAwareText(listOf(small)).startsWith("〔标题〕"))
+    }
+
+    @Test
+    fun p3a_cGrade_notGated() {
+        // 单测 4：C 档序号小标题与正文同字号，无门槛照常成章（真书小节场景）
+        val chapters = BookParser.parse("一、绪论\n\n正文内容。", styleAware = true)
+        assertEquals(listOf("一、绪论"), chapters.map { it.title })
+    }
+
+    @Test
+    fun p3a_styleAwareFalse_behavesAsP2() {
+        // 单测 5：TXT 路径（styleAware=false）A 档无前缀照常生效 + assembleText 不打前缀
+        val chapters = BookParser.parse("第一章 私法绪论\n\n正文内容。", styleAware = false)
+        assertEquals(listOf("第一章 私法绪论"), chapters.map { it.title })
+        val body = PLine("正文内容说完了。", x0 = 50f, x1 = 540f, y0 = 100f, size = 10f)
+        assertTrue(!assembleAwareText(listOf(body), styleAware = false).startsWith("〔标题〕"))
+    }
+
+    @Test
+    fun p3a_customRegex_notGated() {
+        // 单测 6：custom 手工重切优先，不受字号门槛拦截
+        val chapters = BookParser.parse(
+            "第十二章权利的行使\n\n正文内容。",
+            customTitleRegex = "^第十二章.*",
+            styleAware = true,
+        )
+        assertEquals(listOf("第十二章权利的行使"), chapters.map { it.title })
+    }
+
+    @Test
+    fun p3a_tocAnchor_withEvidence_fullChain() {
+        // 单测 7：锚点行「目录」16pt 带证据 → 目录成章 + ROLE_TOC 产出（目录区识别不回归）
+        val text = """
+            〔标题〕目录
+
+            第一章 概述…………1
+
+            第二章 发展…………5
+
+            〔标题〕第一章 概述
+
+            正文内容。
+        """.trimIndent()
+        val chapters = BookParser.parse(text, styleAware = true)
+        assertEquals(listOf("目录", "第一章 概述"), chapters.map { it.title })
+        assertTrue(chapters[0].paras.any { it.role == DbValues.ROLE_TOC })
+    }
+
+    @Test
+    fun p3a_smallAnchor_withoutEvidence_tocRegionStillDetected() {
+        // 单测 12（评审补充）：小字号锚点（9pt < 阈值）无前缀 → 锚点被拦（无「目录」章），
+        // 但 detectTocRegion 独立于字号证据 → 区内条目仍重组为 ROLE_TOC
+        val text = """
+            目录
+
+            第一章 概述…………1
+
+            第二章 发展…………5
+
+            〔标题〕第一章 概述
+
+            正文内容。
+        """.trimIndent()
+        val chapters = BookParser.parse(text, styleAware = true)
+        assertTrue("小字号锚点不应成章", chapters.none { it.title == "目录" })
+        assertTrue("目录区条目仍应重组为 TOC", chapters.any { c -> c.paras.any { it.role == DbValues.ROLE_TOC } })
+        assertEquals("正文章不受影响", "第一章 概述", chapters.last().title)
+    }
+
+    @Test
+    fun p3a_prefixStrippedMidBlock_tocEntriesClean() {
+        // 单测 8（parse 侧）：目录页 \n 连接多段成块 → 前缀可能在块中间行（预处理逐行
+        // 剥除的理由）；剥除后 TOC 条目重组干净、无前缀残留。
+        // （小字号锚点本身被门槛拦截，目录区重组靠 detectTocRegion 独立划区；正文章
+        // 带前缀命中保证主流程不走盲切）
+        val text = "目录\n〔标题〕第一章 概述…………1\n\n〔标题〕第一章 概述\n\n正文内容。"
+        val chapters = BookParser.parse(text, styleAware = true)
+        assertEquals("第一章 概述", chapters.last().title)
+        val toc = chapters.flatMap { it.paras }.filter { it.role == DbValues.ROLE_TOC }
+        assertTrue(toc.isNotEmpty())
+        assertTrue(toc.none { it.text.contains("〔标题〕") })
+    }
+
+    @Test
+    fun p3a_tocTailPage_suppressesTitleMark() {
+        // 单测 13（P3a-hotfix）：OCR 目录尾页点线条目常丢页码、不足 RE_TOC_LINE 的
+        // 3 条阈值 → 漏判 tocLike，残留条目「第十二章权利的行使」12pt ≥ 阈值拿到假
+        // 字号证据成假章（真书 mfzz p31 E2E 实录）——页内点线尾部条目 ≥2 → 本页不发
+        // 〔标题〕标 → A 档命中无证据被拦
+        val page = PageOut(
+            1, tocLike = false, rawChars = 200, puaCount = 0,
+            lineCount = 4, shortLineCount = 0,
+            paras = listOf(
+                Para("第十二章权利的行使", size = 12f),
+                Para("-—权利行使自由与限制·························", size = 5f),
+                Para("主要参考书目 .....................", size = 10f),
+                Para("索弓 ·•··•··•··•··•··•··•··•··•··•··", size = 9.9f),
+            ),
+            firstLine = null, lastLine = null,
+        )
+        val aware = BookParser.parse(
+            PdfExtractResult(listOf(page), chainStats, scanned = false).assembleText(styleAware = true),
+            styleAware = true,
+        )
+        assertEquals("目录残留假章应被拦截", "全文", aware.single().title)
+    }
+
+    @Test
+    fun p3a_tocTailSingleEntry_keepsMark() {
+        // 单测 14（P3a-hotfix 对照）：仅 1 条行尾点线（正文页省略号常态）→ 守卫不触发，
+        // 大字真章照常拿证据成章——锁死守卫的误伤边界
+        val page = PageOut(
+            1, tocLike = false, rawChars = 200, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(
+                Para("第一章 私法绪论", size = 19f),
+                Para("他说到此处………", size = 10f),
+            ),
+            firstLine = null, lastLine = null,
+        )
+        val aware = BookParser.parse(
+            PdfExtractResult(listOf(page), chainStats, scanned = false).assembleText(styleAware = true),
+            styleAware = true,
+        )
+        assertEquals("一章不受点线守卫误伤", "第一章 私法绪论", aware.single().title)
+    }
+
+    @Test
+    fun p3a_bodySizeNaN_safeDegradation() {
+        // 单测 15（质检建议）：bodySize=NaN → threshold=NaN → `size >= NaN` 恒 false
+        // （IEEE 754）→ 不打标 → A 档命中无证据被拦。锁死注释声明的安全退化方向，
+        // 防未来把 `>=` 重构成 `>`/`!=`/isNaN 分支后行为漂移而无报警
+        val stats = chainStats.copy(bodySize = Float.NaN)
+        val big = PLine("第一章 私法绪论", x0 = 50f, x1 = 540f, y0 = 100f, size = 19f)
+        assertTrue(!assembleAwareText(listOf(big), stats = stats).startsWith("〔标题〕"))
+        val chapters = BookParser.parse(
+            PdfExtractResult(
+                listOf(PageOut(1, tocLike = false, rawChars = 50, puaCount = 0, lineCount = 1,
+                    shortLineCount = 0, paras = listOf(Para("第一章 私法绪论", size = 19f)),
+                    firstLine = null, lastLine = null)),
+                stats, scanned = false,
+            ).assembleText(styleAware = true),
+            styleAware = true,
+        )
+        assertEquals("NaN 无信号 → 命中降正文（整书单章）", "全文", chapters.single().title)
+    }
+
+    @Test
+    fun p3a_mixedPage_tocTailGuardSuppressesRealTitleToo() {
+        // 单测 16（质检建议）：混合页（≥2 条点线 + 真章大字）——守卫按页粒度，
+        // 真章同样被抑制。锁定该设计取舍（真章首页无点线，此场景现实中=目录尾页
+        // 残留夹真章命中的罕见形态；宁可漏章交给用户补，不可放假章）
+        val page = PageOut(
+            1, tocLike = false, rawChars = 200, puaCount = 0,
+            lineCount = 3, shortLineCount = 0,
+            paras = listOf(
+                Para("第一章 私法绪论", size = 19f),
+                Para("主要参考书目 .....................", size = 10f),
+                Para("索弓 ·•··•··•··•··•··•··•··•··•··•··", size = 9.9f),
+            ),
+            firstLine = null, lastLine = null,
+        )
+        val aware = BookParser.parse(
+            PdfExtractResult(listOf(page), chainStats, scanned = false).assembleText(styleAware = true),
+            styleAware = true,
+        )
+        assertEquals("混合页按页抑制（设计取舍）", "全文", aware.single().title)
+    }
+
+    @Test
+    fun p3a_prefixLeak_throwsIllegalState() {
+        // 单测 11：post-condition 运行时强制（internal 直调——正常路径剥前缀在先，无法从
+        // 公开入口构造泄漏）
+        val bad = listOf(
+            com.studyfriend.app.data.importer.ParsedChapter(
+                "t",
+                listOf(ParsedPara("a\n〔标题〕b", DbValues.ROLE_BODY)),
+            ),
+        )
+        assertThrows(IllegalStateException::class.java) { BookParser.assertNoMarkLeak(bad) }
     }
 }

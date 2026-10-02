@@ -14,8 +14,13 @@ data class PLine(
     val size: Float,
 )
 
-/** 段落；footnote=true 为页脚小字区段落（视觉转写的注释也归此） */
-data class Para(val text: String, val footnote: Boolean = false)
+/**
+ * 段落；footnote=true 为页脚小字区段落（视觉转写的注释也归此）。
+ * size = 段内最大字号，单位 pt（磅），与 PLine.size 同源同单位；0f=字号未知
+ * （assembleText(styleAware=true) 不打〔标题〕前缀、不拦任何标题命中，安全方向）。
+ * 内存数据类：持久化经 ParsedPara→Room Entity 转换，size 不入库、无 migration 问题。
+ */
+data class Para(val text: String, val footnote: Boolean = false, val size: Float = 0f)
 
 /**
  * 单页清洗产物。paras 可变：视觉转写整页替换时由调用方改写。
@@ -46,7 +51,7 @@ class PageTranscription(
 
 /** 全书几何统计（PdfCleaner.docStats 产出，组装/跨页续接/段落判定共用） */
 data class DocStats(
-    /** 正文字号众数（pt）；未知字号行的兜底值 */
+    /** 正文字号众数（pt）；未知字号行的兜底值。NaN 视为无信号（下游 >= 比较安全退化） */
     val bodySize: Float,
     /** 正文左边距众数（pt） */
     val left: Float,

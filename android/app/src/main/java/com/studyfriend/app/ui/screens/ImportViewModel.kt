@@ -164,7 +164,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             allowScanned = vision != null,
                         )
                         applyVision(result, uri, vision)
-                        content = result.assembleText()
+                        // P3a 字号证据链：PDF 路径打〔标题〕前缀，parse 侧按 isPdf 同步认标
+                        content = result.assembleText(styleAware = true)
                     } else {
                         phase = "读取文件"
                         content = TextLoader.decode(
@@ -400,7 +401,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         phase = "解析章节结构"
         try {
             val result = withContext(Dispatchers.Default) {
-                BookParser.parse(text, currentRegex)
+                // styleAware 与 assembleText 打标同源（isPdf）：PDF=true 认〔标题〕前缀并
+                // 启用字号门槛，TXT=false 完全保持 P2 行为
+                BookParser.parse(text, currentRegex, styleAware = isPdf)
             }
             if (result.all { it.paras.isEmpty() }) {
                 error = "未能解析出任何内容，请检查文件"

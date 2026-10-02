@@ -29,7 +29,18 @@ class PdfExtractResult(
 ) {
     private var merged = false
 
-    fun assembleText(): String {
+    /**
+     * [styleAware]=true 时给大字段落打〔标题〕前缀（P3a 字号证据链，PDF 路径专用）：
+     * size ≥ bodySize+1.5pt 的非脚注段标为标题候选证据，BookParser 据此确认/拦截
+     * A/B 档标题命中。TXT 路径不经过本方法；false 时输出与 P2 逐字节一致。
+     * 页级守卫（tocish）：OCR 目录尾页点线条目不足 TOC_MIN_HITS 漏判 tocLike，
+     * 其残留条目（点线常丢页码）本身声明大字号（真书 E2E：目录条目「第十二章
+     * 权利的行使」12pt ≥ 阈值拿到假证据成假章）——页内点线尾部条目 ≥2 条时本页
+     * 不发〔标题〕标（字号证据只对纯正文页可信；真章首页无点线，不受影响）。
+     * 浮点策略：threshold 只计算一次（单次加法无双精度累加）；bodySize=NaN 时
+     * `size >= NaN` 恒 false（IEEE 754）=安全退化，比较运算符不得改为 `>`/`!=`。
+     */
+    fun assembleText(styleAware: Boolean = false): String {
         if (!merged) {
             PdfCleaner.crossPageMerge(pages, stats)
             merged = true
@@ -40,12 +51,28 @@ class PdfExtractResult(
         // BookParser 的目录区密度判定，无点线条目会漏成假章（真书探针实证）。
         // 脚注段打〔脚注〕前缀（BookParser.FOOTNOTE_MARK）：解析器剥掉后标
         // ROLE_FOOTNOTE，脚注不混进正文流（真书 E2E：脚注误混正文约 300 段）。
+        val threshold = stats.bodySize + 1.5f
         return pages.joinToString("\n\n") { page ->
             val sep = if (page.tocLike) "\n" else "\n\n"
+            val tocish = styleAware &&
+                page.paras.count { RE_TOC_TAIL.containsMatchIn(it.text) } >= TOC_TAIL_MIN
             page.paras.joinToString(sep) {
-                if (it.footnote) BookParser.FOOTNOTE_MARK + it.text else it.text
+                val marked = when {
+                    it.footnote -> BookParser.FOOTNOTE_MARK
+                    styleAware && !tocish && it.size >= threshold -> BookParser.TITLE_SIZE_MARK
+                    else -> ""
+                }
+                marked + it.text
             }
         }
+    }
+
+    companion object {
+        /** 目录尾部条目：行尾点线，页码可缺（OCR 目录尾页常丢页码）——PdfCleaner.RE_TOC_LINE 的放宽形态 */
+        private val RE_TOC_TAIL = Regex("[…⋯·•‧.]{3,}\\s*\\d{0,4}\\s*$")
+
+        /** 点线条目数达此值即视为目录残留页（≥1 会误伤含省略号的正文页） */
+        private const val TOC_TAIL_MIN = 2
     }
 }
 

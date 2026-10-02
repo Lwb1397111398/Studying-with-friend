@@ -318,4 +318,44 @@ class PdfCleanerTest {
         assertTrue(fn[0].text.contains("参见王泽鉴"))
         assertEquals(1, out[0].paras.count { !it.footnote })
     }
+
+    // ---------------------------------------------------------------- P3a 字号证据
+
+    @Test
+    fun p3a_clean_tocPassthroughCarriesSize() {
+        // 目录页直通段必须携带行字号：锚点行「目录」16pt ≥ bodySize+1.5 才能拿到
+        // 〔标题〕前缀、不被 styleAware 字号门槛误拦（P3a 计划案单测 10）
+        val page = listOf(
+            line("目录", y0 = 100f, x1 = 120f, size = 16f),
+            line("第一章 总论", y0 = 130f, x1 = 300f),
+            line("第二章 民法的法源………………5", y0 = 160f, x1 = 400f),
+            line("第三章 法律行为………………18", y0 = 190f, x1 = 400f),
+            line("第四章 代理………………32", y0 = 220f, x1 = 400f),
+            line("5", y0 = 250f, x0 = 290f, x1 = 305f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertTrue(out[0].tocLike)
+        val anchor = out[0].paras.first { it.text == "目录" }
+        assertEquals(16f, anchor.size, 0.01f)
+    }
+
+    @Test
+    fun p3a_clean_crossPageMerge_carriesMaxSize() {
+        // 跨页并段产物取两侧 max（防御：305 行标题守卫已拦大字首段，此处锁字号不丢；
+        // 两侧字号须 < bodySize×1.15=11.5 否则并段本身被守卫拦下）
+        val p1 = pageOut(
+            1,
+            listOf(Para("上一页末段话说了一半，还在继续说", size = 10f)),
+            lastLine = PLine("上一页末段话说了一半，还在继续说", 50f, 540f, 700f, 10f),
+        )
+        val p2 = pageOut(
+            2,
+            listOf(Para("下一页开头的接续内容。", size = 10.5f), Para("下一段另起。", size = 10f)),
+            lastLine = null,
+            firstLine = PLine("下一页开头的接续内容。", 50f, 400f, 100f, 10.5f),
+        )
+        PdfCleaner.crossPageMerge(listOf(p1, p2), stats)
+        assertEquals(1, p2.paras.size)
+        assertEquals(10.5f, p1.paras[0].size, 0.01f)
+    }
 }

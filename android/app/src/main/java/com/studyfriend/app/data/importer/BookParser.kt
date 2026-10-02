@@ -81,6 +81,16 @@ object BookParser {
     const val FOOTNOTE_MARK = "〔脚注〕"
 
     /**
+     * 标题候选前缀（P3a 字号证据链）：PdfLoader.assembleText(styleAware=true) 给
+     * size ≥ bodySize+1.5pt 的非脚注段打此前缀，本解析器剥掉并把该行记为 big 证据；
+     * A/B 档命中但无此证据（styleAware=true）→ 降为正文——拦真书版权页假章
+     * 「第十二章权利的行使」（HiddenHorzOCR 10.4pt ≈ 正文）。C 档序号小标题与
+     * 正文同字号，不设门槛；custom 手工重切优先；TXT 路径无前缀体系不受影响。
+     * styleAware=false 时不剥不拦，行为与 P2 逐字节一致。
+     */
+    const val TITLE_SIZE_MARK = "〔标题〕"
+
+    /**
      * TOC 连续区（块下标闭区间）。锚点路径记录锚点行坐标（区内唯一可产标题命中的行）；
      * anchorLine = -1 表示无锚点、按密度兜底划区。
      */
@@ -93,19 +103,44 @@ object BookParser {
     /**
      * 解析全书。[customTitleRegex] 非 null 时替换内置标题正则族（目录重切），
      * 非法正则抛 [java.util.regex.PatternSyntaxException] 由调用方转为友好提示。
+     * [styleAware]=true（PDF 路径）：剥〔标题〕前缀并把 A/B 档无字号证据的命中
+     * 降为正文；false（TXT）与 P2 行为逐字节一致。
      */
-    fun parse(raw: String, customTitleRegex: String? = null): List<ParsedChapter> {
+    fun parse(
+        raw: String,
+        customTitleRegex: String? = null,
+        styleAware: Boolean = false,
+    ): List<ParsedChapter> {
         val custom = customTitleRegex?.let { Regex(it) }
         val text = raw.replace("\r\n", "\n").replace('\r', '\n')
-        val blocks = splitBlocks(text)
+        val blocks0 = splitBlocks(text)
+        // P3a 预处理：剥〔标题〕前缀并记 big 行。逐行检查（目录页 \n 连接多段成块，
+        // 前缀可能在块中间行）；必须发生在 trim/正则/锚点匹配之前，否则「〔标题〕目 录」
+        // 匹配不上锚点、目录区识别失效。styleHints 与 blocks 同构（每块每行一一对应）。
+        var styleHints: List<BooleanArray>? = null
+        val blocks = if (!styleAware) blocks0 else {
+            val hints = List(blocks0.size) { BooleanArray(blocks0[it].size) }
+            styleHints = hints
+            blocks0.mapIndexed { bi, lines ->
+                lines.mapIndexed { li, line ->
+                    val s = line.trimStart()
+                    if (s.startsWith(TITLE_SIZE_MARK)) {
+                        hints[bi][li] = true
+                        s.removePrefix(TITLE_SIZE_MARK)
+                    } else {
+                        line
+                    }
+                }
+            }
+        }
         val tocRegion = detectTocRegion(blocks, custom)
-        val hits = findTitleHits(blocks, custom, tocRegion)
+        val hits = findTitleHits(blocks, custom, tocRegion, styleHints)
         if (hits.isEmpty()) {
             // §2.3：自定义规则零命中要明确报错，而不是静默滑进盲切兜底
             if (custom != null) {
                 throw CustomRegexNoMatchException("识别规则没有命中任何标题行，请检查正则")
             }
-            return blindChapters(blocks)
+            return blindChapters(blocks).also(::assertNoMarkLeak)
         }
 
         // 档位偏序 A≥B≥C：1 级 = 出现的最高档位；仅 C 时首个命中的 C 样式为 1 级
@@ -181,7 +216,24 @@ object BookParser {
             curParas.addAll(pendingToc)
         }
         flush()
-        return chapters
+        return chapters.also(::assertNoMarkLeak)
+    }
+
+    /**
+     * 前缀泄漏 post-condition（P3a）：任何输出段落文本的行首不得残留〔标题〕前缀——
+     * 泄漏到阅读文本比假章更严重，运行时强制抛错而非静默污染。不用 check()（它抛
+     * IllegalArgumentException，语义不符）。internal 供单测直调（正常路径剥前缀在先，
+     * 无法从公开入口构造出泄漏）。〔脚注〕不纳入：目录页单块多段场景下
+     * 块中行首〔脚注〕是既有已验收行为。
+     */
+    internal fun assertNoMarkLeak(chapters: List<ParsedChapter>) {
+        for (c in chapters) {
+            for (p in c.paras) {
+                if (p.text.lineSequence().any { it.trimStart().startsWith(TITLE_SIZE_MARK) }) {
+                    throw IllegalStateException("P3a 标题前缀泄漏: ${p.text.take(20)}")
+                }
+            }
+        }
     }
 
     // ---- TOC 区域识别（OPT-C C3） ----
@@ -257,7 +309,12 @@ object BookParser {
 
     // ---- 标题判定 ----
 
-    private fun findTitleHits(blocks: List<List<String>>, custom: Regex?, tocRegion: TocRegion?): List<TitleHit> {
+    private fun findTitleHits(
+        blocks: List<List<String>>,
+        custom: Regex?,
+        tocRegion: TocRegion?,
+        styleHints: List<BooleanArray>? = null,
+    ): List<TitleHit> {
         val hits = mutableListOf<TitleHit>()
         blocks.forEachIndexed { bi, lines ->
             for ((li, line) in lines.withIndex()) {
@@ -268,6 +325,15 @@ object BookParser {
                 val t = line.trim()
                 if (!isTitleCandidate(t)) continue
                 val hit = matchTitle(t, custom) ?: continue
+                // P3a 字号门槛（styleHints 非 null 即 styleAware=true）：A/B 档命中但
+                // 该行无〔标题〕证据 → 降为正文。custom 手工重切优先不拦；C 档与正文
+                // 同字号不拦；锚点行「目 录」由目录页直通带字号获得证据
+                if (styleHints != null && hit.first <= GRADE_B && hit.second != "CUSTOM" &&
+                    styleHints.getOrNull(bi)?.getOrNull(li) != true
+                ) {
+                    println("P3a styleGuard blocked: ${t.take(20)}")
+                    continue
+                }
                 // A_HAN_SUB：护栏拦下后破折号截断救回的副标题章名，标题取前半
                 val title = if (hit.second == "A_HAN_SUB") subtitleCut(t) ?: t else t
                 hits.add(TitleHit(bi, li, hit.first, hit.second, title))

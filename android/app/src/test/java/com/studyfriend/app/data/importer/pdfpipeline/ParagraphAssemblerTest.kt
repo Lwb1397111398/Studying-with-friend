@@ -318,4 +318,31 @@ class ParagraphAssemblerTest {
             line("3. 下一项内容", y0 = 114f, x1 = 200f)
         assertEquals(2, ParagraphAssembler.assemble(lines, stats).size)
     }
+
+    // ---------------------------------------------------------------- P3a 字号证据
+
+    @Test
+    fun p3a_multiTitleLines_foldKeepsMaxSize() {
+        // 两行大字标题折行合并成段：段 size = 标题字号（P3a 前缀打标依据）
+        val lines = bodyLines("正文收尾句。") +
+            line("第一章 私法绪论及", size = 19f, y0 = 130f) +
+            line("权利体系", size = 19f, y0 = 156f) // dy=26 ≤ 2.2×19=41.8 → 折行合并
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(2, paras.size)
+        assertEquals("第一章 私法绪论及权利体系", paras[1].text)
+        assertEquals(19f, paras[1].size, 0.01f)
+    }
+
+    @Test
+    fun p3a_titleFollowedByBody_sizesCarried() {
+        // 字号跳变断段：标题段与正文段各自携带真实字号（对抗误接丢证据的显式断言）
+        val lines = bodyLines("正文第一句讲完了。", "正文第二句也讲完了。") +
+            line("第二章 民法的法源", size = 19f, y0 = 200f) +
+            bodyLines("标题后的正文开始了。", startY = 230f)
+        val s = stats.copy(pitchThreshold = 20f)
+        val paras = ParagraphAssembler.assemble(lines, s)
+        assertEquals(3, paras.size)
+        assertEquals(19f, paras[1].size, 0.01f)
+        assertEquals(10f, paras[2].size, 0.01f)
+    }
 }
