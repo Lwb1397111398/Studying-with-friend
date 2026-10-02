@@ -205,7 +205,11 @@ object PdfCleaner {
         stats: DocStats,
     ): List<PageOut> {
         val out = mutableListOf<PageOut>()
-        pagesLines.forEachIndexed { idx, lines ->
+        // 组装规则命中计数（可观测性）：println 进 logcat，导入完成后输出一次
+        val hits = LinkedHashMap<String, Int>()
+        ParagraphAssembler.hitStats = hits
+        try {
+            pagesLines.forEachIndexed { idx, lines ->
             val pageHeight = dims.getOrNull(idx)?.second ?: 842f
             // 清洗前全文统计（rawChars/puaCount 的口径，含将被删除的页眉页码）
             val allText = joinTexts(lines.map { it.text })
@@ -269,7 +273,11 @@ object PdfCleaner {
                     firstLine = kept.firstOrNull(), lastLine = kept.lastOrNull(),
                 ),
             )
+            }
+        } finally {
+            ParagraphAssembler.hitStats = null
         }
+        println("ParaAssembler hits: $hits")
         return out
     }
 

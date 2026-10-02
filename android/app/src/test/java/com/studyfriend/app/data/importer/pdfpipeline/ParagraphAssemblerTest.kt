@@ -63,7 +63,8 @@ class ParagraphAssemblerTest {
 
     @Test
     fun lineGapBeyondPitch_breaksParagraph() {
-        val lines = bodyLines("上一段说完了。", startY = 100f) +
+        // 上一行用短行（真实段落末行几乎必然不满；满行会触发 P2 满行必接续接）
+        val lines = listOf(line("上一段说完了。", x1 = 200f, y0 = 100f)) +
             bodyLines("下一段开始。", startY = 140f) // dy=40 > 20
         val s = stats.copy(pitchThreshold = 20f)
         val paras = ParagraphAssembler.assemble(lines, s)
@@ -116,8 +117,10 @@ class ParagraphAssemblerTest {
 
     @Test
     fun noPitchSignal_sentenceEndAloneBreaksParagraph() {
-        // pitchThreshold=null：满宽续接行也必须在句末断（兜底臂）
-        val lines = bodyLines("上一段说完了。", "新一段紧接着排版。")
+        // pitchThreshold=null 兜底臂：中宽行（不满行、不近满、不短行：[530,535) 区间）句末即断
+        // 满行+句末+顶格续行已被 P2 满行必接接走（见 fullLine... 用例）
+        val lines = listOf(line("上一段说完了。", x1 = 532f, y0 = 100f)) +
+            bodyLines("新一段紧接着排版。", startY = 114f)
         val paras = ParagraphAssembler.assemble(lines, stats)
         assertEquals(2, paras.size)
     }
@@ -147,5 +150,172 @@ class ParagraphAssemblerTest {
     fun joinTexts_foldsListWithSoftJoin() {
         assertEquals("甲、乙、丙", joinTexts(listOf("甲、", "乙、", "丙")))
         assertEquals("a b", joinTexts(listOf("a", "b")))
+    }
+
+    // ===== OPT-G P2：满行必接 / 近满行接 / 深缩进标签块 =====
+    // 几何参数（bodySize=10, left=50, right=545）：满行线 540、近满线 535、短行线 530、
+    // 普通缩进线 58、深缩进线 66
+
+    @Test
+    fun p2_fullLine_sentenceEnd_topAlignedNextLine_joins() {
+        // 核心场景：段落中句号落在满行上 + 顶格续行 → 未完，续接（原兜底臂会误断）
+        val lines = bodyLines("正文在满行处讲完了一句。", "下文继续展开论述内容。")
+        val paras = ParagraphAssembler.assemble(lines, stats) // pitch null
+        assertEquals(1, paras.size)
+    }
+
+    @Test
+    fun p2_fullLine_sentenceEnd_indentedNextLine_breaks() {
+        // 守卫：本行缩进（x0=62 ∈ [58,66) 普通缩进、长行）= 新段意图 → 满行必接让位
+        val lines = bodyLines("上一段在满行处讲完了。") +
+            line("缩进的新段说。", x0 = 62f, y0 = 114f)
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(2, paras.size)
+    }
+
+    @Test
+    fun p2_fullLine_sentenceEnd_numberedShortLine_breaks() {
+        // 强新段短路守卫：句末+「2.」序号起头 → 满行必接让位，落短行断段臂
+        val lines = bodyLines("上一段在满行处讲完了。") +
+            line("2. 下一项内容", y0 = 114f, x1 = 200f)
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(2, paras.size)
+    }
+
+    @Test
+    fun p2_fullLine_sentenceEnd_cjkNumberedShortLine_breaks() {
+        // 强新段短路守卫：「一、」汉字序号形态，同上
+        val lines = bodyLines("第一章到此结束了。") +
+            line("一、总则概述", y0 = 114f, x1 = 200f)
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(2, paras.size)
+    }
+
+    @Test
+    fun p2_nearFullLine_sentenceEnd_topAligned_joins() {
+        // 近满行接：x1=538 ≥ 535 且句末+顶格续行 → 段中句号续接
+        val lines = listOf(line("近满行的句号说完了。", x1 = 538f, y0 = 100f)) +
+            bodyLines("下文继续展开论述内容。", startY = 114f)
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(1, paras.size)
+    }
+
+    @Test
+    fun p2_nearFullLine_sentenceEnd_indented_breaks() {
+        val lines = listOf(line("近满行的句号说完了。", x1 = 538f, y0 = 100f)) +
+            line("缩进的新段说。", x0 = 70f, y0 = 114f)
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(2, paras.size)
+    }
+
+    @Test
+    fun p2_deepIndentedShortLine_ownParagraph_evenWhenSentenceOpen() {
+        // 跨规则交互：上一行满行且**句中**（无断段信号）+ 本行深缩进短行 → 标签块臂独立断段
+        // （规则 6/7 都要求上句末；深缩进臂插在满行必接之前，不被续接臂吞掉）
+        ParagraphAssembler.deepIndentBlockEnabled = true
+        try {
+            val lines = bodyLines("一段话还没有说完，") +
+                line("（一）标签项内容", x0 = 80f, x1 = 200f, y0 = 114f)
+            val paras = ParagraphAssembler.assemble(lines, stats)
+            assertEquals(2, paras.size)
+        } finally {
+            ParagraphAssembler.deepIndentBlockEnabled = false
+        }
+    }
+
+    @Test
+    fun p2_normalIndentShortLine_notDeepIndentBlock_keepsMerging() {
+        // 深缩进边界：x0=62 < 66 不算标签块；上句未完+缩进 → 无断段臂触发 → 续接
+        // （若深缩进线误设 0.8×，本用例会误断 → 抓边界回归）
+        val lines = bodyLines("一段话还没有说完，") +
+            line("缩进的短行内容", x0 = 62f, x1 = 200f, y0 = 114f)
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(1, paras.size)
+    }
+
+    @Test
+    fun p2_fullLineBeforeTitle_stillIsolated() {
+        // 优先级不回归：满行+句末+下一行是标题 → 标题臂先命中，标题仍独立
+        val lines = bodyLines("正文内容说完了。") +
+            line("第二章 民法的法源", size = 13f, y0 = 114f)
+        val paras = ParagraphAssembler.assemble(lines, stats)
+        assertEquals(2, paras.size)
+        assertEquals("第二章 民法的法源", paras[1].text)
+    }
+
+    @Test
+    fun p2_twoDeepIndentedShortLines_separateParagraphs() {
+        // 连续深缩进短行各自独立成段（flush 语义覆盖，不合并）
+        ParagraphAssembler.deepIndentBlockEnabled = true
+        try {
+            val lines = bodyLines("正文收尾说完了。") +
+                line("一、第一项标签", x0 = 80f, x1 = 200f, y0 = 114f) +
+                line("二、第二项标签", x0 = 80f, x1 = 200f, y0 = 128f)
+            val paras = ParagraphAssembler.assemble(lines, stats)
+            assertEquals(3, paras.size)
+            assertEquals("一、第一项标签", paras[1].text)
+            assertEquals("二、第二项标签", paras[2].text)
+        } finally {
+            ParagraphAssembler.deepIndentBlockEnabled = false
+        }
+    }
+
+    // 注：fullLineJoinEnabled 回退开关不设单测——满行臂关闭后「满行+句末」场景由近满行接
+    // （条件仅多句末判定，x1≥540 必然 ≥535）兜住、「满行+句中」由默认续接臂兜住，
+    // 行为无可见差异；开关仅为部署期最后保险（真书验收不达标且调阈值无效时使用）。
+
+    @Test
+    fun p2_boundary_nearFullLine_atExactly535_joins() {
+        // 近满线下边界：x1=535 恰好命中（≥ 语义），续接
+        val lines = listOf(line("边界行恰好近满。", x1 = 535f, y0 = 100f)) +
+            bodyLines("下文继续展开论述内容。", startY = 114f)
+        assertEquals(1, ParagraphAssembler.assemble(lines, stats).size)
+    }
+
+    @Test
+    fun p2_boundary_belowNearFullLine_534_breaksAtFallback() {
+        // 近满线下界之下：x1=534 < 535 不续接，且不短行（≥530）→ 落兜底臂句末即断
+        val lines = listOf(line("边界行差一点近满。", x1 = 534f, y0 = 100f)) +
+            bodyLines("下一段从这里开始。", startY = 114f)
+        assertEquals(2, ParagraphAssembler.assemble(lines, stats).size)
+    }
+
+    @Test
+    fun p2_boundary_deepIndent_atExactly66_ownParagraph() {
+        // 深缩进线下边界：x0=66 恰好命中（≥ 语义），标签块独立
+        ParagraphAssembler.deepIndentBlockEnabled = true
+        try {
+            val lines = bodyLines("正文收尾说完了。") +
+                line("标签项内容", x0 = 66f, x1 = 200f, y0 = 114f)
+            assertEquals(2, ParagraphAssembler.assemble(lines, stats).size)
+        } finally {
+            ParagraphAssembler.deepIndentBlockEnabled = false
+        }
+    }
+
+    @Test
+    fun p2_deepIndent_disabledByDefault_keepsMerging() {
+        // 默认关闭：真书排版下深缩进+短行占 10% 行会拆出碎片段，默认不触发——
+        // 深缩进短行落入兜底臂（上句末 → 断），此处上句句中 → 续接
+        val lines = bodyLines("一段话还没有说完，") +
+            line("（一）标签项内容", x0 = 80f, x1 = 200f, y0 = 114f)
+        assertEquals(1, ParagraphAssembler.assemble(lines, stats).size)
+    }
+
+    @Test
+    fun p2_boundary_topAligned_atExactly58_breaksAtIndentArm() {
+        // topAligned 上边界：x0=58 恰好不算顶格（< 语义）→ 满行必接不命中，
+        // 走缩进断段臂（若误写成 ≤ 则被满行必接接走 → 1 段，本测试抓到）
+        val lines = bodyLines("上一段在满行处讲完了。") +
+            line("缩进新段说完了。", x0 = 58f, y0 = 114f)
+        assertEquals(2, ParagraphAssembler.assemble(lines, stats).size)
+    }
+
+    @Test
+    fun p2_nearFullLine_numberedShortLine_breaks() {
+        // 对称守卫：近满行（非满行）+句末+序号起头短行 → 近满行接让位，落短行断段臂
+        val lines = listOf(line("近满行的句号说完了。", x1 = 538f, y0 = 100f)) +
+            line("3. 下一项内容", y0 = 114f, x1 = 200f)
+        assertEquals(2, ParagraphAssembler.assemble(lines, stats).size)
     }
 }
