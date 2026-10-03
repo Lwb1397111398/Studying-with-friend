@@ -119,6 +119,7 @@ class PdfCleanerTest {
             line("第七节", y0 = 100f, x1 = 150f),
             line("消灭时效完成的效力．．．．．．．．．．．．．．．．．．", y0 = 110f, x1 = 400f),
             line("557", y0 = 120f, x0 = 290f, x1 = 305f),        // 条目页码独立行
+            line("第二节 代理的要件及法律效果...…...………………...… ...456", y0 = 135f, x1 = 400f),
             line("第十二章权利的行使", y0 = 150f, x1 = 300f),
             line("-—权利行使自由与限制····························", y0 = 160f, x1 = 400f),
             line("563", y0 = 170f, x0 = 290f, x1 = 305f),
@@ -129,6 +130,21 @@ class PdfCleanerTest {
         val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
         assertTrue("纯点线行 2 条 + 点线页码分离形态须判为目录页", out[0].tocLike)
         assertTrue(out[0].paras.any { it.text == "557" })
+    }
+
+    @Test
+    fun clean_bodyPageWithEllipsisLines_notTocLike() {
+        // 《民法总则》E2E 实证（p78/p333 正文例题页）：省略号行 ≥3 曾被纯点线判据
+        // 误判 tocLike，视觉把正文当目录幻觉出 38 条。收紧后须有「点线+尾页码」同行
+        // 命中兜底——正文省略号行尾不带页码，不误判
+        val page = listOf(
+            line("他说完便不再言语……", y0 = 100f, x1 = 400f),
+            line("如此循环往复，无有穷尽…………", y0 = 130f, x1 = 400f),
+            line("直至有一天大家都不再提起此事……", y0 = 160f, x1 = 400f),
+            line("正文继续讲述民法总则的内容与体系构成。", y0 = 190f, x1 = 400f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertFalse(out[0].tocLike)
     }
 
     @Test

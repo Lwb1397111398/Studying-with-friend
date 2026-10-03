@@ -222,9 +222,13 @@ object PdfCleaner {
             val puaCount = allText.count { isPua(it) }
 
             // 目录页先判（在页码删除之前——目录页的孤页码是条目触发器）。
-            // 双判据：点线+尾页码 ≥3，或纯点线行 ≥3（页码被行切分拆走的目录页，见 RE_TOC_DOTS）
-            val tocLike = lines.count { RE_TOC_LINE.containsMatchIn(it.text) } >= TOC_MIN_HITS ||
-                lines.count { RE_TOC_DOTS.containsMatchIn(it.text) } >= TOC_MIN_HITS
+            // 双判据：点线+尾页码 ≥3；或纯点线行 ≥3 且至少 1 行点线+尾页码同行
+            // （页码被行切分拆走的目录页见 RE_TOC_DOTS；须有同行命中兜底——《民法总则》
+            // E2E 实证正文例题页省略号行 ≥3 会被纯点线判据误判 tocLike，视觉幻觉条目
+            // 混入探针：目录页点线+页码同行 2-19 条恒 ≥1，正文页几乎为 0）
+            val tocLineHits = lines.count { RE_TOC_LINE.containsMatchIn(it.text) }
+            val tocLike = tocLineHits >= TOC_MIN_HITS ||
+                (lines.count { RE_TOC_DOTS.containsMatchIn(it.text) } >= TOC_MIN_HITS && tocLineHits >= 1)
             val headerBand = max(HEADER_BAND_PT, pageHeight * HEADER_BAND_FACTOR)
             val footerBandStart = pageHeight * (1f - FOOTER_BAND_FACTOR)
 
