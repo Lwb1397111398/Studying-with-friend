@@ -650,6 +650,24 @@ class TocChapterCalibratorTest {
         assertTrue(chapters.all { it.lowConfidence }) // 区段单锚 → lowConfidence
     }
 
+    @Test
+    fun cleanTitle_stripsMarkerPrefixAndTrailingDots() {
+        // bddl 实证：matchName 拿到的页面标题行原文带〔标题〕标记前缀或尾部点线串
+        // （「〔标题〕第四章 …」「第一章绪论......」直接入章名影响观感与 #8 比对）
+        val entries = listOf(entry("第一章绪论", 1), entry("第四章多人关系", 276))
+        val pages = mapOf(
+            22 to "第一章绪论......................\n第一节 不当得利的意义",
+            297 to "〔标题〕第四章 多人关系的不当得利\n第一节绪说",
+        )
+        val locals = listOf(ch("开篇", listOf(para("开。", 2))))
+        val out = calibrate(entries, locals, pages, bookPageCount = 400, tocLastPages = listOf(20))!!
+        val chapters = out.chapters.filter { it.level == 1 && !it.fromLocalOnly }
+        assertEquals(
+            listOf("第一章绪论", "第四章 多人关系的不当得利"),
+            chapters.map { it.title },
+        )
+    }
+
     // ---- 系统性偏移检测 ----
 
     @Test

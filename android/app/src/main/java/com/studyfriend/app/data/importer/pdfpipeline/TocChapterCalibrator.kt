@@ -399,11 +399,14 @@ object TocChapterCalibrator {
             }
         }
 
-        // 最终序列：level1 章按序，节行紧跟父章（阅读 idx 空间内；UI 查询过滤 level=1）
+        // 最终序列：level1 章按序，节行紧跟父章（阅读 idx 空间内；UI 查询过滤 level=1）。
+        // title 统一清洗：页面标题行原文可能带〔标题〕标记前缀或尾部点线串
+        // （真书 bddl 实证「〔标题〕第四章 …」「第一章绪论......」入章名，观感与
+        // 判据 #8 章名比对均受影响）
         val finalList = mutableListOf<CalibratedChapter>()
         out.forEachIndexed { i, ch ->
-            finalList += ch
-            finalList += sectionsByHost[i]
+            finalList += ch.copy(title = cleanTitle(ch.title))
+            finalList += sectionsByHost[i].map { it.copy(title = cleanTitle(it.title)) }
         }
 
         // ⑨ 位移量系统性偏移检测（判据 #4 强制普查标记）
@@ -564,6 +567,10 @@ object TocChapterCalibrator {
         }
         return null
     }
+
+    /** 章名清洗：剥〔标题〕标记前缀与尾部点线串及其后内容（页码/排印残留） */
+    private fun cleanTitle(raw: String): String =
+        raw.replace("〔标题〕", "").replace(Regex("[…·.•‧]{2,}.*$"), "").trim()
 
     /**
      * 区段划分：条目书内页码较前一条目下降 → 新册（多册书下册页码重排）。
