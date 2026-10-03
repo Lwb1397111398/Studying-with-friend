@@ -594,6 +594,62 @@ class TocChapterCalibratorTest {
         assertTrue(chapters.none { it.lowConfidence })
     }
 
+    // ---- 锚定假锚防护（真书 bddl 实证）----
+
+    @Test
+    fun anchor_windowSkipsTocPages_noFalseAnchorOnTocPage() {
+        // bddl 实证：绪论条目 page=1、目录尾页 20，窗口下界原为 assumed-3=18，扫进目录页
+        // p18「H 录第一章绪论…」拼接行（点线后无页码，RE_TOC_LINE 排不掉）→ 假锚 offset=-3。
+        // 修复：窗口下界 ≥ tocLast+1，绪论锚定命中正文 p22 → offset=+1
+        val entries = listOf(
+            entry("第一章绪论", 1),
+            entry("第二章不当得利", 53),
+            entry("第九章体系构造", 410),
+        )
+        val pages = mapOf(
+            // p18 目录页（若无窗口护栏，assumed=21、窗口 18..41，此页会假命中）
+            18 to "H 录第一章绪论......................\n第二节 台湾地区民法 22",
+            // p22 绪论正文起点
+            22 to "第一章 绪论\n第一节 不当得利的意义",
+            // p74 第二章正文起点（53+20+1）
+            74 to "第二章 不当得利\n第一节 给付型",
+            // p431 第九章正文起点（410+20+1）
+            431 to "第九章 体系构造\n第一节 请求权基础",
+        )
+        val locals = listOf(ch("开篇", listOf(para("开。", 2))))
+        val out = calibrate(
+            entries, locals, pages, bookPageCount = 520, tocLastPages = listOf(20),
+        )!!
+        val chapters = out.chapters.filter { it.level == 1 && !it.fromLocalOnly }
+        assertEquals(listOf(22, 74, 431), chapters.map { it.startPage })
+    }
+
+    @Test
+    fun anchor_headerLineMergedWithBody_excluded() {
+        // bddl 实证：p514 页眉「索引 493」与正文拼一行、行尾是正文 CJK，
+        // RE_TRAIL_PAGE 排不掉 →「索引」锚假命中 p514（offset=+3）与绪论 offset=+1
+        // 互差 2 → 区段弃用整书放弃。修复：标题后紧跟页码的拼接行排除 → 索引锚失败，
+        // 区段单锚 +1 采纳（lowConfidence）校准继续
+        val entries = listOf(
+            entry("第一章绪论", 1),
+            entry("索引", 491),
+        )
+        val pages = mapOf(
+            22 to "第一章 绪论\n正文。",
+            // 索引真实起点 p512 是烂 OCR「索 弓 l」匹配不上
+            512 to "索 弓 l\n不当得利 383",
+            // 页眉+正文拼行：标题后紧跟页码
+            514 to "索引 493 第三人利益契约 297 十三画第三人的返还义务 359 第三人",
+        )
+        val locals = listOf(ch("开篇", listOf(para("开。", 2))))
+        val out = calibrate(
+            entries, locals, pages, bookPageCount = 515, tocLastPages = listOf(20),
+        )!!
+        val chapters = out.chapters.filter { it.level == 1 && !it.fromLocalOnly }
+        assertEquals(listOf(22, 512), chapters.map { it.startPage })
+        assertTrue(chapters.all { it.lowConfidence }) // 区段单锚 → lowConfidence
+    }
+
     // ---- 系统性偏移检测 ----
 
     @Test

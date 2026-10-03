@@ -501,7 +501,9 @@ object TocChapterCalibrator {
         if (norm.isEmpty()) return null
         val prefix = norm.take(PREFIX_LEN)
         val assumed = tocLast + page
-        val from = maxOf(1, assumed - WINDOW_BACK)
+        // 下界不低于目录尾页+1：正文起点必在目录之后——否则窗口会扫进目录页本身，
+        // 页内「H 录第一章绪论…」类拼接行造成假锚（真书 bddl 实证：绪论锚 offset=-3）
+        val from = maxOf(1, assumed - WINDOW_BACK, tocLast + 1)
         val to = minOf(bookPageCount, assumed + WINDOW_FWD)
         if (from > to) return null
         var sawText = false
@@ -526,11 +528,21 @@ object TocChapterCalibrator {
         return null
     }
 
-    /** 锚定/章名共用行判定：含标题前缀、非目录点线条目、非页眉（CJK+页码结尾） */
-    private fun isAnchorLine(line: String, prefix: String): Boolean =
-        !BookParser.RE_TOC_LINE.containsMatchIn(line) &&
-            !BookParser.RE_TRAIL_PAGE.containsMatchIn(line) &&
-            TocJson.normalizeTitle(line).contains(prefix)
+    /** 锚定/章名共用行判定：含标题前缀、非目录点线条目、非页眉（CJK+页码结尾）。
+     *  另排除标题后紧跟页码的拼接行——真书 bddl 实证：页眉「索引 493」与正文拼成一行、
+     *  行尾是正文 CJK，RE_TRAIL_PAGE 排不掉；normalize 后「标题+数字」开头即页眉特征
+     *  （真章标题名后不会紧跟数字，误排代价=该条目锚定失败警告，好于错锚）。 */
+    private fun isAnchorLine(line: String, prefix: String): Boolean {
+        val norm = TocJson.normalizeTitle(line)
+        if (!norm.contains(prefix)) return false
+        if (BookParser.RE_TOC_LINE.containsMatchIn(line)) return false
+        if (BookParser.RE_TRAIL_PAGE.containsMatchIn(line)) return false
+        val at = norm.indexOf(prefix)
+        if (at >= 0 && at + prefix.length < norm.length && norm[at + prefix.length].isDigit()) {
+            return false
+        }
+        return true
+    }
 
     /**
      * 章名匹配：按给定候选页顺序找第一条 [isAnchorLine] 命中行，返回原始行文本
