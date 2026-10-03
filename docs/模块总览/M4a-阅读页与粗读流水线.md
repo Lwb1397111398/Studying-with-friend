@@ -1,14 +1,14 @@
 # M4a 阅读页与粗读流水线 · 模块总览
 
-> 状态：✅ 完成（计划 v1 82 分不通过 → v2 92 分通过 → 实现 → 质检第一轮 82 分 → 6 P1 全修复 → 复验 90 分通过 → 6 项 P2 收尾）
-> 验证：**102/102 单测全绿**（M4a 新增 38 例），assembleDebug + assembleRelease 双绿（debug 19.6MB / release 15.6MB）
+> 状态：✅ 完成（计划 v1 82 分不通过 → v2 92 分通过 → 实现 → 质检第一轮 82 分 → 6 P1 全修复 → 复验 90 分通过 → 6 项 P2 收尾 → **P5 章节树 UI（树形挂接/校准徽标/节行目录锚/highlight 滚动定位/FRONT-BACK 次级展示）**）
+> 验证：**477/477 单测全绿**（全模块），assembleDebug 构建通过；P5 E2E：mzzz 16 章树形+70 节挂接展示、节行点击跳父章+滚动定位到节标题段、校准徽标、sample_book 未校准扁平形态、删假章 9→8 章落库（J1-J9 判据全过）
 
 ## 功能清单
 
 | 功能 | 说明 |
 | --- | --- |
-| 章目录页 | 路由 `BOOK/{bookId}`；书架点书进入；每章行 = 序号/标题/一行摘要，行尾操作按数据推导：未粗读→"粗读"、中断或断点数据（READING+gist 空）→"继续"、已完成→"重读"、进行中→"进度 x/y+停止"；点行进阅读页 |
-| 阅读页 | 顶栏章标题+返回；本章要点卡（gist + key_terms，`byIdFlow` 收集，粗读完成即时刷新）；段落流按 aiAction 渲染：EXPLAIN/GROUP→"讲/合并讲"徽标+why 小字、SKIP→"已跳过"标签+全文半透明（alpha 0.55，仍可读）、NONE→正常文本；**role=TOC/FOOTNOTE 段小字次级样式**（M2 管线标记的目录条目/页面脚注），不参与标注计数，粗读规划两处过滤同跳过 FOOTNOTE（M2 第四轮 E2E 后新增） |
+| 章目录页 | 路由 `BOOK/{bookId}`；书架点书进入；**P5 章节树**：`byBookTreeFlow` 全行投影（章+节）→ `buildChapterTree` 按 parentOrder 挂接（防御：越界/null 挂前最近 level1、零 level1 扁平自成树）→ `flattenTree` 拍平渲染，章行尾「展开/收起小节」箭头（无节行不显示）；**校准徽标**「✓ 已按目录校准」（任一行 calibrated=true 即显示）；章行 = 序号/标题/一行摘要/在读·读完·未读徽标/本章包徽标，行尾操作按数据推导：未粗读→"粗读"、中断或断点数据（READING+gist 空）→"继续"、已完成→"重读"、进行中→"进度 x/y+停止"；**节行**（level=2）= 缩进小字次级样式，无粗读按钮，点击=目录锚跳父章+highlight 滚动定位（节行段落恒空，不作为导航目的地）；点行进阅读页 |
+| 阅读页 | 顶栏章标题+返回；本章要点卡（gist + key_terms，`byIdFlow` 收集，粗读完成即时刷新）；段落流按 aiAction 渲染：EXPLAIN/GROUP→"讲/合并讲"徽标+why 小字、SKIP→"已跳过"标签+全文半透明（alpha 0.55，仍可读）、NONE→正常文本；**role=TOC/FOOTNOTE/FRONT/BACK 段小字次级样式**（`ReadStyles.isSecondaryRole` 纯函数判定，P5-F 定案：FRONT/BACK 仅视觉降级，AI 规划/计数口径不变——展示与加工解耦），TOC/FOOTNOTE 不参与标注计数，粗读规划两处过滤同跳过 FOOTNOTE；**P5 highlight 定位**：Routes.READ 可选 `?highlight=` 参数（Uri.encode），`findHighlightIndex` 在正文段（排除 TOC/FOOTNOTE）里三级匹配（归一化精确 == → startsWith 多命中取最短 → null 静默不滚动），`listState.animateScrollToItem` 滚到节标题段 |
 | 操作条七态 | 进行中（进度条+停止）/ 中断（消息+从断点继续+全部重读）/ 成功（消息+标记读完；degraded 时加"重试归并"）/ 失败（重试；keyIssue 时加"去设置"）/ 待归并（全标注+无 gist→"完成归并"）/ 未开始（"开始粗读"）/ 部分标注（数据推导断点入口，进程重启后仍可用） |
 | force 二次确认 | 所有"重读/全部重读"先弹确认框（"覆盖现有标注"），确认后才 force=true——防误触覆盖 |
 | 确定性分块 | RoughReadChunks：8000 字 + 40 段双上限、段不跨块、超长段独立成块不丢弃；同输入同划分（断点续跑前提） |
@@ -31,15 +31,20 @@ data/study/KeyTermsCodec.kt     要点编解码（term+plain ListSerializer）
 data/ai/PromptLoader.kt         assets prompt 加载（内存缓存）
 assets/prompts/rough_read.txt   粗读 prompt（三占位符 + JSON 规格 + 宁少勿多）
 assets/prompts/rough_read_merge.txt  归并 prompt
-ui/screens/ChapterListScreen.kt 章目录页（行尾操作按数据推导）
-ui/screens/ReadScreen.kt        阅读页 + ActionBar 七态 + ParaRow/ParaTag + force 确认弹窗
-ui/nav/AppNav.kt                BOOK/READ 路由（READ 传 onOpenSettings）
+ui/screens/ChapterListScreen.kt 章目录页（P5 章节树：buildChapterTree 挂接+flattenTree 拍平+校准徽标+SectionRow 目录锚；行尾操作按数据推导）
+ui/screens/ChapterTree.kt       P5 树纯函数：ChapterNode/TreeItem、buildChapterTree（onFallback 注入日志）、flattenTree、normalizeHighlight、findHighlightIndex
+ui/screens/ReadStyles.kt        P5-F 次级角色判定 isSecondaryRole（TOC/FOOTNOTE/FRONT/BACK）
+ui/screens/ReadScreen.kt        阅读页 + ActionBar 七态 + ParaRow/ParaTag + force 确认弹窗 + highlight 滚动定位（LaunchedEffect+listState）
+ui/nav/AppNav.kt                BOOK/READ 路由（READ 传 onOpenSettings；READ 可选 highlight 参数 Uri.encode）
 StudyApp.kt                     database/appScope/roughReadRunner 三单例
 test/.../RoughReadChunksTest.kt    5 例
 test/.../PlanParserTest.kt         14 例（含 LenientInt null→-1 专测）
 test/.../RoughReadPlannerTest.kt   14 例（Robolectric+真内存库+FakeChat 按 deserializer 分流）
 test/.../RoughReadRunnerTest.kt    1 例（start A→start B 互斥，挂起门控）
 test/.../M4aUiSmokeTest.kt         4 例（Compose 冒烟）
+test/.../ChapterTreeTest.kt        12 例（P5：正常挂接/越界/null/前无章/零 level1/拍平/highlight 三级匹配+TOC 排除）
+test/.../P5TreeUiSmokeTest.kt      4 例（P5 Compose 冒烟：树渲染+徽标/节行点击回调/收起隐藏/未校准无徽标）
+test/.../ReadStylesTest.kt         3 例（P5-F 次级角色四值 true/BODY/未知值）
 ```
 
 ## 设计决策（与踩坑）
@@ -84,3 +89,7 @@ test/.../M4aUiSmokeTest.kt         4 例（Compose 冒烟）
 - **M4b 讲解单元枚举**：`aiAction == "EXPLAIN"` 的段 + `aiAction == "GROUP" && groupId == idx` 的组首（groupId=组首段 idx，章内唯一、可从标注重建）；ParaNoteEntity 将带 promptVersion 落库（M4a 标注不落版本号的取舍已在计划 §2.1 声明）
 - **M5 章末总结包**：chapter.gist/keyTermsJson 已就位；chapter_assets 表已建未写；ParaNote/讲解内容是总结包的输入
 - **Runner/Planner 模式复用**：ChatJsonFn 构造注入 + StudyApp 单例 + StateFlow 五态 + 全局互斥——M4b 批量讲解队列沿用同一互斥纪律（讲解与粗读互斥或排队由 M4b 计划定）
+
+## 最后更新
+
+- 2026-10-03 P5 章节树 UI：章目录页树形挂接（buildChapterTree/flattenTree+越界防御）、校准徽标、节行=目录锚（点击跳父章+findHighlightIndex 滚动定位）、FRONT/BACK 次级展示（ReadStyles.isSecondaryRole 展示与加工解耦）；新增 ChapterTree.kt/ReadStyles.kt，ChapterTreeTest 12 例+P5TreeUiSmokeTest 4 例+ReadStylesTest 3 例；E2E J1-J9 全过（详见 docs/plans/P5-章节树UI计划案.md）
