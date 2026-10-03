@@ -49,6 +49,8 @@ class CalibrateOutcome(
  * 流程（任一守卫不过 → 返回 null，调用方按现状落库零回归）：
  * ① pageNo 完整性前置校验（缺失 >5% → null）
  * ② 条目按书内页码下降分段（多册书下册页码重排），与探针区段的目录尾页配对
+ * ②.5 章行无页码继承：null 页章取同段内其后第一个带页码条目的页码（章起点≈名下
+ *    首条页码，偏差 0-1 页；mzzz 十二章/bddl 五六章实证），继承章标 low_confidence
  * ③ 每区段独立求 offset：首/中/尾 3 锚（恰 2 条降级双锚均值四舍五入、<2 弃区段），
  *    锚定窗口 [目录尾页+书内页码−3, 目录尾页+书内页码+20]，页内文本归一化含标题前 8 字
  *    即锚定；≥2 锚互差 ≤1 自洽否则弃区段；单锚 offset 采纳但区段标 low_confidence；
@@ -138,10 +140,39 @@ object TocChapterCalibrator {
         val segments = splitSegments(entries)
         val segTocLast = assignTocLastPages(segments.size, tocLastPages) ?: return null
 
-        // ③ 每区段独立 offset
+        // ②.5 章行无页码继承（v1.2）：目录排版常态——章行不带页码、名下首条（节/副标题
+        // 行）带页码，章起点≈首条页码（偏差 0-1 页，判据 #4 容差内）。真书实证：mzzz
+        // 十二章章行全无页码（不继承则锚定率 0/11 <60% 整书放弃）、bddl 五六章无页码。
+        // 继承源=同段内其后第一个带页码条目；跨段继承会把上册章错配下册页码，禁止；
+        // 段内其后无页码条目则保持 null（④/⑧ 照旧跳过）。继承条目标 inherited，
+        // 产出章带 lowConfidence（起点系推断而非页面实测）。
+        val effSegments = ArrayList<List<TocEntry>>(segments.size)
+        val effInherited = ArrayList<List<Boolean>>(segments.size)
+        for (seg in segments) {
+            val flags = MutableList(seg.size) { false }
+            val eff = ArrayList<TocEntry>(seg.size)
+            var next: Int? = null
+            for (i in seg.indices.reversed()) {
+                val p = seg[i].page
+                if (p != null) {
+                    next = p
+                    eff.add(seg[i])
+                } else if (next != null) {
+                    flags[i] = true
+                    eff.add(seg[i].copy(page = next))
+                } else {
+                    eff.add(seg[i])
+                }
+            }
+            eff.reverse()
+            effSegments += eff
+            effInherited += flags
+        }
+
+        // ③ 每区段独立 offset（用继承后的条目页码，null 章得以参与锚定）
         val segOffsets = arrayOfNulls<Int>(segments.size)
         val segLowConf = BooleanArray(segments.size)
-        segments.forEachIndexed { si, seg ->
+        effSegments.forEachIndexed { si, seg ->
             val segL1 = seg.filter { it.level == 1 }
             val r = resolveOffset(segL1, segTocLast[si], pageText, bookPageCount)
             segOffsets[si] = r.offset
@@ -156,9 +187,9 @@ object TocChapterCalibrator {
 
         // ④ 映射 level1 条目 → 候选章起点（TOC 序）；弃用区段/无页码/越界条目不计入分子
         val anchored = mutableListOf<AnchoredEntry>()
-        segments.forEachIndexed { si, seg ->
+        effSegments.forEachIndexed { si, seg ->
             val offset = segOffsets[si] ?: return@forEachIndexed
-            for (e in seg) {
+            for ((ei, e) in seg.withIndex()) {
                 if (e.level != 1) continue
                 val page = e.page
                 if (page == null) {
@@ -170,7 +201,7 @@ object TocChapterCalibrator {
                     Log.w(TAG, "calibrate: 条目「${e.title}」映射页 $mapped 越界，跳过")
                     continue
                 }
-                anchored += AnchoredEntry(e, mapped, si)
+                anchored += AnchoredEntry(e, mapped, si, effInherited[si][ei])
             }
         }
 
@@ -219,7 +250,8 @@ object TocChapterCalibrator {
             }
             // 偏差最小者，偏差同取起点页小者（*1000+start 的字典序技巧）
             val best = candidates.minByOrNull { abs(it.start - a.mapped) * 1000 + it.start }
-            val lowConf = segLowConf[a.segIdx]
+            // 区段级 low_confidence 或起点来自页码继承（推断非实测）→ 产出章标低置信
+            val lowConf = segLowConf[a.segIdx] || a.inherited
             if (best == null) {
                 // 三档③：±5 无本地章 → 插入新章，章名取该页标题行文本，兜底目录 title
                 val name = matchName(listOf(a.mapped), prefix, pageText, bookPageCount)
@@ -307,7 +339,10 @@ object TocChapterCalibrator {
                 val original = localChapters[ch.localIndex!!].paras
                 val prevTi = tocIdxs.indexOfLast { it < i }
                 val nextTi = tocIdxs.indexOfFirst { it > i }
-                val suspect = original.isNotEmpty() && listOfNotNull(prevTi, nextTi).any { t ->
+                // indexOfLast/First 找不到返回 -1（fromLocalOnly 章在最前/最后时），
+                // 必须滤掉——listOfNotNull 只滤 null，-1 下标会越界
+                val suspect = original.isNotEmpty() &&
+                    listOfNotNull(prevTi, nextTi).filter { it >= 0 }.any { t ->
                     val start = sorted[tocIdxs[t]].startPage
                     val end = if (t + 1 < tocIdxs.size) sorted[tocIdxs[t + 1]].startPage else bookPageCount + 1
                     val overlap = original.count { p ->
@@ -323,14 +358,15 @@ object TocChapterCalibrator {
             }
         }
 
-        // ⑧ 节挂接：level2 按区段 offset 映射后落哪章区间挂哪章，越界丢弃
+        // ⑧ 节挂接：level2 按区段 offset 映射后落哪章区间挂哪章，越界丢弃（条目用
+        // 继承后版本，null 页节行继承其后者页码，标记随行传递）
         val sectionsByHost = Array(out.size) { mutableListOf<CalibratedChapter>() }
         val level1IndexOf = mutableMapOf<Int, Int>() // 输出列表下标 → level1 序号（1-based）
         var l1Seq = 0
         out.forEachIndexed { i, ch -> if (ch.level == 1) level1IndexOf[i] = ++l1Seq }
-        segments.forEachIndexed { si, seg ->
+        effSegments.forEachIndexed { si, seg ->
             val offset = segOffsets[si] ?: return@forEachIndexed
-            for (e in seg) {
+            for ((ei, e) in seg.withIndex()) {
                 if (e.level != 2) continue
                 val page = e.page
                 if (page == null) {
@@ -357,7 +393,7 @@ object TocChapterCalibrator {
                     startPage = mapped,
                     level = 2,
                     parentOrder = level1IndexOf[host],
-                    lowConfidence = segLowConf[si],
+                    lowConfidence = segLowConf[si] || effInherited[si][ei],
                     titleFallback = name == null,
                 )
             }
@@ -393,8 +429,8 @@ object TocChapterCalibrator {
         return CalibrateOutcome(finalList, shiftSuspect)
     }
 
-    /** 锚定条目：目录条目 + 校准后映射页 + 所属区段下标 */
-    private class AnchoredEntry(val e: TocEntry, val mapped: Int, val segIdx: Int)
+    /** 锚定条目：目录条目 + 校准后映射页 + 所属区段下标 + 页码是否继承自其后条目 */
+    private class AnchoredEntry(val e: TocEntry, val mapped: Int, val segIdx: Int, val inherited: Boolean)
 
     private class LocalCh(val idx: Int, val start: Int, val parsed: ParsedChapter)
 

@@ -526,6 +526,74 @@ class TocChapterCalibratorTest {
         assertEquals(a.systematicShiftSuspect, b.systematicShiftSuspect)
     }
 
+    // ---- 章行无页码继承（v1.2：mzzz 十二章/bddl 五六章章行无页码实证） ----
+
+    @Test
+    fun inherit_chapterWithoutPage_takesFirstChildPage() {
+        // 章行 null + 名下首条带页码 → 章起点继承首条页码，照常锚定映射；
+        // 继承章标 lowConfidence（起点系推断非页面实测），章名仍取页面真实文本
+        val entries = listOf(
+            entry("第一章总论", null),
+            entry("第一节概说", 1, 2),
+            entry("第二章分则", 10),
+        )
+        val pages = mapOf(
+            5 to "第一章 总论\n正文甲。",
+            14 to "第二章 分则\n正文乙。",
+        )
+        val locals = listOf(ch("杂项", listOf(para("杂。", 100))))
+        val out = calibrate(entries, locals, pages)!!
+        val chapters = out.chapters.filter { it.level == 1 && !it.fromLocalOnly }
+        assertEquals(listOf(5, 14), chapters.map { it.startPage })
+        // 章1 继承标低置信；章2 原生页码 + 双锚自洽 → 不标
+        assertEquals(listOf(true, false), chapters.map { it.lowConfidence })
+        assertFalse(chapters.any { it.titleFallback })
+    }
+
+    @Test
+    fun inherit_consecutiveNullChapters_eachTakesOwnChild() {
+        // bddl 实况同构：第五、六章章行连续无页码，各自继承自己名下首条页码
+        // （五章→p318 副标题行、六章→p373），互不串台；未继承的章不标低置信
+        val entries = listOf(
+            entry("第四章多人关系", 276),
+            entry("第五章请求权效果", null),
+            entry("第五章效果内容与范围", 318, 2),
+            entry("第六章准用规定", null),
+            entry("第六章要件准用", 373, 2),
+            entry("第七章关系", 383),
+        )
+        val pages = mapOf(
+            280 to "第四章 多人关系\n正文。",
+            322 to "第五章 请求权效果\n正文。",
+            377 to "第六章 准用规定\n正文。",
+            387 to "第七章 关系\n正文。",
+        )
+        val locals = listOf(ch("开篇", listOf(para("开。", 2))))
+        val out = calibrate(entries, locals, pages, bookPageCount = 400)!!
+        val chapters = out.chapters.filter { it.level == 1 && !it.fromLocalOnly }
+        assertEquals(listOf(280, 322, 377, 387), chapters.map { it.startPage })
+        assertEquals(listOf(false, true, true, false), chapters.map { it.lowConfidence })
+    }
+
+    @Test
+    fun inherit_noFollowingEntry_staysSkipped() {
+        // 段尾 null 章（其后无带页码条目）保持跳过；其余章锚定率 2/3 ≥60% 校准继续
+        val entries = listOf(
+            entry("第一章总论", 1),
+            entry("第二章分则", 10),
+            entry("第三章附则", null),
+        )
+        val pages = mapOf(
+            5 to "第一章 总论\n正文甲。",
+            14 to "第二章 分则\n正文乙。",
+        )
+        val locals = listOf(ch("杂项", listOf(para("杂。", 100))))
+        val out = calibrate(entries, locals, pages)!!
+        val chapters = out.chapters.filter { it.level == 1 && !it.fromLocalOnly }
+        assertEquals(listOf(5, 14), chapters.map { it.startPage })
+        assertTrue(chapters.none { it.lowConfidence })
+    }
+
     // ---- 系统性偏移检测 ----
 
     @Test
