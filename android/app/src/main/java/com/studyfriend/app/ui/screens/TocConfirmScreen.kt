@@ -11,9 +11,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -28,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -40,6 +45,7 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
 
     var renameIndex by remember { mutableStateOf<Int?>(null) }
     var showRules by remember { mutableStateOf(false) }
+    var deleteIndex by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(imported) {
         if (imported) {
@@ -75,6 +81,15 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
+            // P5-C 删假章状态行
+            if (vm.deleted.isNotEmpty()) {
+                Text(
+                    "已删 ${vm.deleted.size} 章（点已删行可恢复），实际导入 ${chapters.size - vm.deleted.size} 章",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
             parseNote?.let {
                 Text(
                     it,
@@ -101,12 +116,18 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 itemsIndexed(chapters) { index, chapter ->
+                    val isDeleted = index in vm.deleted
                     ChapterRow(
                         index = index,
                         title = vm.chapterTitleAt(index),
                         paraCount = chapter.paras.size,
                         charCount = chapter.paras.sumOf { it.text.length },
-                        onClick = { renameIndex = index },
+                        deleted = isDeleted,
+                        canDelete = !isDeleted && chapters.size - vm.deleted.size > 1,
+                        onClick = {
+                            if (isDeleted) vm.restoreChapter(index) else renameIndex = index
+                        },
+                        onDelete = { deleteIndex = index },
                     )
                     HorizontalDivider()
                 }
@@ -148,6 +169,42 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
         )
     }
 
+    // P5-C 删除二次确认（不可逆感弱化：可恢复，但误触面小）
+    deleteIndex?.let { idx ->
+        val calibrated = vm.tocState is TocProbeState.Done
+        AlertDialog(
+            onDismissRequest = { deleteIndex = null },
+            title = { Text("删除这一章？") },
+            text = {
+                Column {
+                    Text("「${vm.chapterTitleAt(idx)}」不会导入。")
+                    if (calibrated) {
+                        // 目录校准下删的是假章：段不丢，按页码并回相邻章
+                        Text(
+                            "目录已校准：该章的段落会按页码归并入相邻章，内容不会丢失。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    Text(
+                        "点已删行可随时恢复。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteChapter(idx)
+                    deleteIndex = null
+                }) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { deleteIndex = null }) { Text("取消") } },
+        )
+    }
+
     if (showRules) {
         RulesDialog(
             initial = vm.currentRegex ?: "",
@@ -170,20 +227,56 @@ private fun ChapterRow(
     title: String,
     paraCount: Int,
     charCount: Int,
+    deleted: Boolean,
+    canDelete: Boolean,
     onClick: () -> Unit,
+    onDelete: () -> Unit,
 ) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("${index + 1}. $title", style = MaterialTheme.typography.bodyLarge)
-        Text(
-            "$paraCount 段 · $charCount 字",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                "${index + 1}. $title",
+                style = MaterialTheme.typography.bodyLarge,
+                textDecoration = if (deleted) TextDecoration.LineThrough else null,
+                color = if (deleted) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+            if (deleted) {
+                Text(
+                    "已删除 · 点击恢复",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            } else {
+                Text(
+                    "$paraCount 段 · $charCount 字",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (!deleted) {
+            IconButton(onClick = onDelete, enabled = canDelete) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "删除本章",
+                    tint = if (canDelete) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                    },
+                )
+            }
+        }
     }
 }
 

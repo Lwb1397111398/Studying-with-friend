@@ -120,11 +120,26 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     /** 改名按 index 记；换文件/重切会清空，避免错位串到别的章 */
     private val editedTitles = mutableStateMapOf<Int, String>()
 
+    /** P5-C 删假章：用户标记删除的原始下标集合（列表不物理删除，已删行整行点击恢复）。
+     *  与 editedTitles 同步清空（章列表重建处旧下标不可信）；确认导入时才过滤落库 */
+    var deleted by mutableStateOf(setOf<Int>())
+        private set
+
     fun chapterTitleAt(index: Int): String =
         editedTitles[index] ?: chapters.getOrNull(index)?.title.orEmpty()
 
     fun rename(index: Int, title: String) {
         if (title.isNotBlank()) editedTitles[index] = title.trim()
+    }
+
+    /** 删除一章；至少保留一章（删到只剩一章时静默拒绝，UI 按钮同态禁用） */
+    fun deleteChapter(index: Int) {
+        if (index !in chapters.indices || deleted.size >= chapters.size - 1) return
+        deleted = deleted + index
+    }
+
+    fun restoreChapter(index: Int) {
+        deleted = deleted - index
     }
 
     /** 粘贴文本导入（无文件，编码不参与） */
@@ -141,6 +156,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 isPdf = false
                 currentRegex = null
                 editedTitles.clear()
+                deleted = emptySet()
                 visionStatsNote = null
                 tocState = TocProbeState.Idle // 粘贴路径无探针；清掉上一本 PDF 可能残留的目录
                 probeSegments = null
@@ -211,6 +227,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 isPdf = pdf
                 currentRegex = null
                 editedTitles.clear()
+                deleted = emptySet()
                 if (bookTitle.isBlank()) {
                     bookTitle = name.substringBeforeLast('.').ifBlank { "未命名" }
                 }
@@ -241,6 +258,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         sourceText = null
         parseNote = null
         chapters = emptyList()
+        deleted = emptySet()
         isPdf = false
         tocState = TocProbeState.Idle
         probeSegments = null
@@ -380,6 +398,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 currentRegex = regex?.takeIf { it.isNotBlank() }
                 editedTitles.clear() // 章节列表即将重建，旧 index 改名不可信
+                deleted = emptySet()
                 parse()
             } catch (e: Exception) {
                 error = "重新识别失败：${e.message ?: "未知错误"}"
@@ -393,6 +412,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         if (busy) return // 防止双击重复落库
         val list = chapters
         if (list.isEmpty()) return
+        // P5-C 删假章：按确认页标记过滤幸存章（deleted 记原始下标）；UI 保证至少留一章，
+        // 这里空集兜底拒绝（不落库空书）
+        val kept = keptOriginalIndices(list.size, deleted)
+        if (kept.isEmpty()) return
         viewModelScope.launch {
             busy = true
             error = null
@@ -410,13 +433,22 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     updatedAt = now,
                 )
                 // P3b-2 目录驱动校准：探针 Done 时先校准（CPU 密集放 Default），成功用校准
-                // 产物落库（含节行/重排段落），失败走现状零回归；改名按 localIndex 映射回原章
-                val outcome = withContext(Dispatchers.Default) { runCalibrate(list) }
+                // 产物落库（含节行/重排段落），失败走现状零回归；改名查 editedTitles 须先经
+                // keptOriginalIndex 把剔除列表下标翻译回原始下标（P5-C 删假章）
+                val keptList = kept.map { list[it] }
+                val outcome = withContext(Dispatchers.Default) { runCalibrate(keptList) }
                 val (pairs, totalChapters) = when (outcome) {
-                    null -> list.mapIndexed { ci, ch -> chapterPair(ci, ch.title, ch) } to list.size
+                    null -> kept.map { oi -> chapterPair(oi, list[oi].title, list[oi]) } to kept.size
                     else -> {
                         val rows = outcome.chapters.map { ch ->
-                            val title = ch.localIndex?.let { editedTitles[it] } ?: ch.title
+                            val originalIndex = ch.localIndex?.let { keptOriginalIndex(kept, it) }
+                            if (ch.localIndex != null && originalIndex == null) {
+                                Log.w(
+                                    "P5Delete",
+                                    "calibrate localIndex ${ch.localIndex} 越界（kept=${kept.size}），「${ch.title}」章名走目录兜底",
+                                )
+                            }
+                            val title = originalIndex?.let { editedTitles[it] } ?: ch.title
                             ChapterEntity(
                                 bookId = 0, idx = 0, title = title,
                                 readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
@@ -479,6 +511,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         phase = null
         cancelFlag.set(false)
         editedTitles.clear()
+        deleted = emptySet()
         tocState = TocProbeState.Idle
         probeSegments = null
     }
