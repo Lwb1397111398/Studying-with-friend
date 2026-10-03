@@ -338,3 +338,23 @@ data class VisionProgress(
     val done: Int,
     val total: Int,
 )
+
+@Dao
+interface FigureDao {
+    @Insert
+    suspend fun insertAll(figures: List<FigureEntity>)
+
+    /** 阅读页混排：页号 → 页内锚 → 同锚 y 序；同页同锚同 y 时渲染端再以 id 兜底 */
+    @Query(
+        "SELECT * FROM figures WHERE chapterId = :chapterId " +
+            "ORDER BY pageNo ASC, ordAfterPara ASC, bboxY0 ASC",
+    )
+    fun byChapterFlow(chapterId: Long): Flow<List<FigureEntity>>
+
+    /** 重挂/清理对账用一次性全量读（§3-D：删章前读完整 Entity，重插时仅改 chapterId） */
+    @Query("SELECT * FROM figures WHERE bookId = :bookId ORDER BY pageNo ASC, seqNo ASC")
+    suspend fun byBookOnce(bookId: Long): List<FigureEntity>
+
+    @Query("DELETE FROM figures WHERE bookId = :bookId")
+    suspend fun deleteByBook(bookId: Long)
+}

@@ -98,4 +98,22 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
-val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // P4 示意图保留：figures 新表（全 NOT NULL，无旧数据回填问题）
+        // createSql 逐字段抄自 Entity 定义，漏抄会被迁移校验报红
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `figures` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                "`bookId` INTEGER NOT NULL, `chapterId` INTEGER NOT NULL, `pageNo` INTEGER NOT NULL, " +
+                "`ordAfterPara` INTEGER NOT NULL, `bboxY0` REAL NOT NULL, `seqNo` INTEGER NOT NULL, " +
+                "`file` TEXT NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, " +
+                "`format` TEXT NOT NULL, `md5` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , " +
+                "FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_figures_bookId` ON `figures` (`bookId`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_figures_chapterId` ON `figures` (`chapterId`)")
+    }
+}
+
+val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)

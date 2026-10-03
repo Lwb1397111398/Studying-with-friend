@@ -16,8 +16,9 @@ import androidx.room.RoomDatabase
         QuizAttemptEntity::class,
         ReviewItemEntity::class,
         VisionQueueEntity::class,
+        FigureEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class StudyDatabase : RoomDatabase() {
@@ -30,6 +31,7 @@ abstract class StudyDatabase : RoomDatabase() {
     abstract fun quizAttemptDao(): QuizAttemptDao
     abstract fun reviewItemDao(): ReviewItemDao
     abstract fun visionQueueDao(): VisionQueueDao
+    abstract fun figureDao(): FigureDao
 
     companion object {
         fun build(context: Context): StudyDatabase =

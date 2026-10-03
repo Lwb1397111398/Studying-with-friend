@@ -117,6 +117,52 @@ data class VisionQueueEntity(
     val updatedAt: Long,
 )
 
+/**
+ * 导入时提取的原生 PDF 示意图（P4）；与 chapter_assets（AI 产物）语义正交，不共享列。
+ * file 为相对 filesDir 路径 `figures/{bookId}/p{pageNo}_f{seqNo}.{format}`——seqNo 全书唯一，
+ * 根除同页同锚多图的文件名碰撞（计划案 r9-P0-1）。
+ */
+@Entity(
+    tableName = "figures",
+    foreignKeys = [
+        ForeignKey(
+            entity = BookEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["bookId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = ChapterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["chapterId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("bookId"), Index("chapterId")],
+)
+data class FigureEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val chapterId: Long,
+    /** 1-based PDF 页号（与 paragraphs.pageNo 同口径） */
+    val pageNo: Int,
+    /** 页内锚定：插在该页第 N 段之后，0-based（页内全量段口径）；-1=页首前 */
+    val ordAfterPara: Int,
+    /** 同页多图的次级排序键：折算后显示空间图顶 y（pt） */
+    val bboxY0: Float,
+    /** 全书图序号：提取时按 pageNo/ordAfterPara/bboxY0 排序 1 起赋号（file 命名依赖，先于落盘算定） */
+    val seqNo: Int,
+    val file: String,
+    /** 落盘文件的实际像素（aspectRatio 占位用） */
+    val width: Int,
+    val height: Int,
+    val format: String, // png / jpg
+    /** filesDir 最终落盘文件字节摘要（复制失败即不落库，无孤儿值） */
+    val md5: String,
+    /** 本期一次性写入，不预留 updatedAt（P6 caption 走独立表） */
+    val createdAt: Long,
+)
+
 /** 一条段落讲解（可覆盖 1~N 个段落，paraIds 为 JSON 数组） */
 @Entity(
     tableName = "para_notes",

@@ -130,4 +130,43 @@ class MigrationTest {
             }
         }
     }
+
+    @Test
+    fun migrate4To5_figuresTableUsable() {
+        val dbName = "migration-test-45.db"
+        helper.createDatabase(dbName, 4).use { v4 ->
+            v4.execSQL(
+                "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                    "overviewJson, createdAt, updatedAt) " +
+                    "VALUES ('民法物权', '王泽鉴', 'PDF', 'uri://x', 'READY', 1, NULL, 1, 1)",
+            )
+            v4.execSQL(
+                "INSERT INTO chapters (bookId, idx, title, readState, gist, keyTermsJson, " +
+                    "level, parentOrder, calibrated) VALUES (1, 0, '第一章', 'NOT_READ', NULL, NULL, 1, NULL, 0)",
+            )
+        }
+        // 跑 1→5 全链迁移 + schema 校验（figures 建表与 Entity 对齐，失败即抛）
+        helper.runMigrationsAndValidate(dbName, 5, true, *MIGRATIONS).use { v5 ->
+            // 双 FK 表写读回验（book/chapter 目标行存在）
+            v5.execSQL(
+                "INSERT INTO figures (bookId, chapterId, pageNo, ordAfterPara, bboxY0, seqNo, " +
+                    "file, width, height, format, md5, createdAt) " +
+                    "VALUES (1, 1, 86, 12, 210.5, 1, 'figures/1/p86_f1.png', 1180, 447, 'png', " +
+                    "'d41d8cd98f00b204e9800998ecf8427e', 1)",
+            )
+            v5.query("SELECT pageNo, seqNo, format FROM figures WHERE bookId = 1").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(86, cur.getInt(0))
+                assertEquals(1, cur.getInt(1))
+                assertEquals("png", cur.getString(2))
+            }
+            // 索引存在（index_figures_bookId / index_figures_chapterId）
+            v5.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'index_figures_%'",
+            ).use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(2, cur.getInt(0))
+            }
+        }
+    }
 }
