@@ -13,10 +13,9 @@ import kotlin.math.min
  * 5. 行→段落组装（委托 ParagraphAssembler）+ 跨页续接合并（crossPageMerge）
  *
  * 铁律（经验帖 §11 适配）：规则优先、不丢字——所有删除都有几何+字号双重证据；
- * 唯一的字符改写是彝文借码标点（有页级守卫防误伤真彝文）。
+ * 唯一的字符改写是彝文借码标点（有逐行守卫防误伤真彝文）。
  */
 object PdfCleaner {
-
     // ---- 目录页判定 ----
     /** 目录行：前导点线 + 尾页码（与 BookParser.RE_TOC_LINE 同源形态） */
     private val RE_TOC_LINE = Regex("[…·.•‧]{2,}\\s*\\d+\\s*$")
@@ -47,9 +46,6 @@ object PdfCleaner {
         'ꎮ' to '。',
         'ꎻ' to '；',
     )
-
-    /** 真彝文音节区（U+A000–U+A48C）；页内除借码标点外还有音节 → 是真彝文，不许整页替换 */
-    private val RE_YI_SYLLABLE = Regex("[\\uA000-\\uA48C]")
 
     /** PUA（私用区，字体 cmap 坏掉时出现）：E000–F8FF 与增补私用区 A 的高代理段 */
     private fun isPua(c: Char): Boolean = c.code in 0xE000..0xF8FF || c.code in 0xDB80..0xDBFF
@@ -211,11 +207,10 @@ object PdfCleaner {
         stats: DocStats,
     ): List<PageOut> {
         val out = mutableListOf<PageOut>()
-        // 组装规则命中计数（可观测性）：println 进 logcat，导入完成后输出一次
+        // 组装规则命中计数（可观测性）：println(stdout) 在 Android 进 logcat（tag=System.out），导入完成后输出一次；（不用 android.util.Log：PdfCleanerTest 为纯 JVM 单测，Log 未 mock）
+        // 以参数注入 assemble（非静态字段），并发 clean() 各持一份不交叉污染
         val hits = LinkedHashMap<String, Int>()
-        ParagraphAssembler.hitStats = hits
-        try {
-            pagesLines.forEachIndexed { idx, lines ->
+        pagesLines.forEachIndexed { idx, lines ->
             val pageHeight = dims.getOrNull(idx)?.second ?: 842f
             // 清洗前全文统计（rawChars/puaCount 的口径，含将被删除的页眉页码）
             val allText = joinTexts(lines.map { it.text })
@@ -273,7 +268,7 @@ object PdfCleaner {
 
             val lineCount = kept.size
             val shortLineCount = kept.count { it.x0 >= 0f && it.x1 < stats.right - 1.5f * stats.bodySize }
-            val paras = ParagraphAssembler.assemble(kept, stats).toMutableList()
+            val paras = ParagraphAssembler.assemble(kept, stats, hits).toMutableList()
             if (footnotes.isNotEmpty()) {
                 paras.add(Para(joinTexts(footnotes), footnote = true))
             }
@@ -285,9 +280,6 @@ object PdfCleaner {
                     firstLine = kept.firstOrNull(), lastLine = kept.lastOrNull(),
                 ),
             )
-            }
-        } finally {
-            ParagraphAssembler.hitStats = null
         }
         println("ParaAssembler hits: $hits")
         return out
@@ -332,8 +324,8 @@ object PdfCleaner {
     }
 
     /**
-     * 彝文借码标点还原（页级守卫）：页内出现借码标点、且剔除它们后再无
-     * 其他彝文音节 → 整页替换；否则是真彝文文本，原样保留。
+     * 彝文借码标点还原（逐行守卫）：行内出现借码标点、且剔除它们后再无
+     * 其他彝文音节 → 该行替换；否则是真彝文文本，原样保留。
      */
     private fun maybeYiNormalize(text: String): String {
         if (!text.any { it in YI_PUNCT.keys }) return text

@@ -42,12 +42,12 @@ class TocVisionParserTest {
     private val pageB =
         """{"entries":[{"title":"第二章 分则","page":10,"level":1},{"title":"第二节 乙","page":11,"level":2}]}"""
 
-    /** 默认 [listOf(1,2)] 与多数单段用例的 parse 页列表对应 */
+    /** 默认 [listOf(1,2)] 与多数单段用例的 parse 页列表对应；文件名页列表口径与 segCacheFile/segMarkerFile 一致 */
     private fun cacheFile(dir: File, hash: String, pages: List<Int> = listOf(1, 2)) =
-        File(dir, "toc_v${TocVisionParser.FORMAT_VERSION}_${hash}_s${pages.hashCode()}.json")
+        File(dir, "toc_v${TocVisionParser.FORMAT_VERSION}_${hash}_s${pages.joinToString("-")}.json")
 
     private fun markerFile(dir: File, hash: String, pages: List<Int> = listOf(1, 2)) =
-        File(dir, "toc_fail_v${TocVisionParser.FORMAT_VERSION}_${hash}_s${pages.hashCode()}.marker")
+        File(dir, "toc_fail_v${TocVisionParser.FORMAT_VERSION}_${hash}_s${pages.joinToString("-")}.marker")
 
     private fun makeParser(dir: File, clock: FakeClock, chatFn: suspend (ChatRequest) -> String) =
         TocVisionParser(

@@ -45,14 +45,6 @@ object ParagraphAssembler {
     @JvmField
     internal var deepIndentBlockEnabled = false
 
-    /**
-     * 规则命中计数器（可观测性）：非 null 时 assemble 累计各臂命中次数（跨页累计，
-     * 重置由调用方负责），供 E2E 验收归因（如满行必接在低满行率排版下命中率稀少）。
-     * 生产路径置 null 零开销。
-     */
-    @JvmField
-    internal var hitStats: MutableMap<String, Int>? = null
-
     private fun MutableMap<String, Int>?.hit(key: String) {
         this?.let { it[key] = (it[key] ?: 0) + 1 }
     }
@@ -63,7 +55,17 @@ object ParagraphAssembler {
     /** 强新段起头：序号形态（一、/1./（一）/(2)/①）——上一行句末+本行序号起头 = 明确新段信号 */
     private val RE_STRONG_NEW_SEG = Regex("^[（(]?([一二三四五六七八九十]+|\\d{1,3})[、.．)）]|^[\\u2460-\\u2473]")
 
-    fun assemble(lines: List<PLine>, stats: DocStats): List<Para> {
+    /**
+     * [hitStats] 规则命中计数器（可观测性）：非 null 时累计各臂命中次数（跨页累计，
+     * 由调用方持有生命周期），供 E2E 验收归因（如满行必接在低满行率排版下命中率稀少）。
+     * 以参数注入而非静态字段——并发 clean() 各自持 map，无交叉污染。
+     * 生产路径传 null 零开销。
+     */
+    fun assemble(
+        lines: List<PLine>,
+        stats: DocStats,
+        hitStats: MutableMap<String, Int>? = null,
+    ): List<Para> {
         val paras = mutableListOf<Para>()
         val cur = StringBuilder()
         var prev: PLine? = null

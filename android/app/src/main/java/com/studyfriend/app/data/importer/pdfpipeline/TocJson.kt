@@ -24,9 +24,6 @@ object TocJson {
     private const val MIN_ENTRIES = 3
     private const val MIN_LEVEL1 = 1
 
-    /** 相邻页码对中非降序（含相等）占比下限；v7.0 由 80% 收紧：20% 逆序属系统性错误 */
-    private const val MIN_NON_DESCENDING_RATIO = 0.9
-
     /**
      * title 长度上限 80。BookParser 的 TITLE_MAX_LEN=40 是「正文行误判为标题」的
      * 护栏，不适用于目录条目：真书实测含法条引注的条目达 41 字，40 上限会静默丢弃。
@@ -105,6 +102,9 @@ object TocJson {
         if (pages.size < 2) return true
         val pairs = pages.zipWithNext()
         val nonDescending = pairs.count { (a, b) -> a <= b }
-        return nonDescending >= pairs.size * MIN_NON_DESCENDING_RATIO
+        // 相邻页码对中非降序（含相等）占比下限 90%（v7.0 由 80% 收紧：20% 逆序属
+        // 系统性错误）。整数比较（0.9 展开为 ×10/×9）：浮点乘在非 10 倍数长度上
+        // 有表示误差边界风险
+        return nonDescending * 10 >= pairs.size * 9
     }
 }

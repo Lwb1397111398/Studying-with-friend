@@ -8,6 +8,11 @@ import com.studyfriend.app.data.ai.ChatRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.File
 import java.io.IOException
 import java.time.Duration
@@ -26,11 +31,13 @@ import java.time.Instant
  * 重新评估接入。
  *
  * 缓存（cacheDir 由构造器传入）：按区段全有全无——区段成功才写
- * `toc_v{N}_{uriHash}_s{i}.json`（原子写 temp+rename）；区段内容性失败
- * （unparseable JSON）写 `toc_fail_v{N}_{uriHash}_s{i}.marker`（30 天 TTL 内同书
+ * `toc_v{N}_{uriHash}_s{页列表}.json`（原子写 temp+rename）；区段内容性失败
+ * （unparseable JSON）写 `toc_fail_v{N}_{uriHash}_s{页列表}.marker`（30 天 TTL 内同书
  * 该区段跳过探针，防坏目录页每导必烧；临时性失败如网络/渲染错不写 marker）。
- * 拼接全集过整体守卫：守卫失败写全部区段 marker（整书熔断），已成功区段缓存
- * 不写（坏目录不落缓存）。多区段书一册失败不再拖垮另一册（P3b-2 §6 按区段熔断）；
+ * 拼接全集过整体守卫：守卫失败写全部区段 marker（第二层整书熔断——守卫作用于
+ * 拼接全集无法定位坏区段，防坏目录页每导必烧 30 天；真书从未触发，纯防御路径），
+ * 已成功区段缓存不写（坏目录不落缓存）。区段级 Fail 与守卫失败是两层独立熔断：
+ * 前者只影响单区段（一册失败不拖垮另一册，P3b-2 §6），后者整书兜底；
  * 单区段书（[parse] 入口）行为与 P3b-1 一致。TocJson.kt 顶部记录格式版本历史；
  * Prompt/解析规则/模型/入口变更时递增 [FORMAT_VERSION]（旧版本缓存与 marker 因
  * 文件名不同自然失效；v3→v4 过渡期 v3 文件磁盘留存但被忽略，已有缓存的书首次
@@ -70,6 +77,7 @@ class TocVisionParser(
             }
             val start = clock()
             val elapsed: () -> Long = { clock() - start }
+            cleanOrphanTmp()
 
             // (区段下标, 条目)；缓存命中的区段直接计入（其内容在写入前已过守卫）
             val ok = mutableListOf<Pair<Int, List<TocEntry>>>()
@@ -218,20 +226,26 @@ class TocVisionParser(
         try {
             cacheDir.mkdirs()
             val tmp = File(cacheDir, f.name + ".tmp")
+            // kotlinx 构建：字符串转义交给库（手写 jsonQuote 易随字段变更漏转义），
+            // 格式与 readCache→TocJson.parse 的 {"entries":[...]} 口径对称
             tmp.writeText(
-                buildString {
-                    append("{\"entries\":[")
-                    entries.joinTo(this, separator = ",") { e ->
-                        val page = e.page?.toString() ?: "null"
-                        "{\"title\":${jsonQuote(e.title)},\"page\":$page,\"level\":${e.level}}"
-                    }
-                    append("]}")
-                },
+                buildJsonObject {
+                    put("entries", buildJsonArray {
+                        entries.forEach { e ->
+                            add(buildJsonObject {
+                                put("title", JsonPrimitive(e.title))
+                                put("page", e.page?.let { JsonPrimitive(it) } ?: JsonNull)
+                                put("level", JsonPrimitive(e.level))
+                            })
+                        }
+                    })
+                }.toString(),
             )
             // Linux（Android 真机）renameTo 原子覆盖已存在目标，无 TOCTOU 窗口；
             // 桌面 JVM（单测）renameTo 不覆盖，失败时退回先删再 rename——此时窗口内
             // 读方最多 miss 重建，无害。rename 成功则 tmp 已不存在，两次失败路径
-            // 均有 tmp.delete() 兜底，无孤儿文件
+            // 均有 tmp.delete() 兜底；仅「写途中进程崩溃」会留 .tmp 孤儿，
+            // 由 cleanOrphanTmp 在下次探针入口统一清理
             if (!tmp.renameTo(f)) {
                 f.delete()
                 if (!tmp.renameTo(f)) tmp.delete()
@@ -261,38 +275,43 @@ class TocVisionParser(
         false
     }
 
-    // 段 key=uriHash+段页列表签名（v1.2 修正）：只含段序号的旧 key 会在取样策略
-    // 变化（如段 [18,19]→[18,19,20]）后命中毒化旧缓存；页列表签名使段定义一变即 miss
+    // 段 key=uriHash+段页列表（v1.2 修正）：只含段序号的旧 key 会在取样策略
+    // 变化（如段 [18,19]→[18,19,20]）后命中毒化旧缓存；页列表直接入文件名
+    // （区段=连续目录页列表，通常 ≤10 页，文件名长度可控）——段定义一变即 miss
+    // 且无 hashCode 碰撞可能
     private fun segCacheFile(uriHash: String, segPages: List<Int>) =
-        File(cacheDir, "toc_v${FORMAT_VERSION}_${uriHash}_s${segPages.hashCode()}.json")
+        File(cacheDir, "toc_v${FORMAT_VERSION}_${uriHash}_s${segPages.joinToString("-")}.json")
 
     private fun segMarkerFile(uriHash: String, segPages: List<Int>) =
-        File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}_s${segPages.hashCode()}.marker")
+        File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}_s${segPages.joinToString("-")}.marker")
 
-    private fun jsonQuote(s: String): String = buildString {
-        append('"')
-        s.forEach { c ->
-            when (c) {
-                '"' -> append("\\\"")
-                '\\' -> append("\\\\")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
-                '\t' -> append("\\t")
-                else -> if (c < ' ') append("\\u%04x".format(c.code)) else append(c)
+
+    /** 清理崩溃残留的 .tmp 孤儿（writeText 与 rename 之间进程死亡）：mtime 超 10 分钟即删 */
+    private fun cleanOrphanTmp() {
+        try {
+            cacheDir.mkdirs()
+            val now = clock()
+            cacheDir.listFiles { f -> f.name.startsWith("toc_v") && f.name.endsWith(".tmp") }?.forEach { tmp ->
+                try {
+                    if (now - tmp.lastModified() > ORPHAN_TMP_TTL_MS) tmp.delete()
+                } catch (_: Exception) {
+                }
             }
+        } catch (_: Exception) {
         }
-        append('"')
     }
 
     companion object {
         private const val TAG = "P3b"
         /** 缓存/marker 格式版本：Prompt、解析规则、模型或入口（区段化）变更时递增（历史见 TocJson.kt 头） */
-        const val FORMAT_VERSION = 4
+        internal const val FORMAT_VERSION = 4
         private const val TRANSCRIBE_ATTEMPTS = 2
         private const val READ_TIMEOUT_MS = 60_000L
         /** 总预算：8 页区段采样 × 60s readTimeout（P3b-2 §3.4；页面渲染开销计入同一预算口径） */
         private const val TOTAL_TIMEOUT_MS = 480_000L
         private const val MARKER_TTL_MS = 30L * 24 * 60 * 60 * 1000
+        /** .tmp 孤儿清理阈值：写入途中崩溃才会留下（正常路径 rename/delete 兜底），10 分钟足够区分 */
+        private const val ORPHAN_TMP_TTL_MS = 10L * 60 * 1000
         private const val MIN_QUALITY_ENTRIES = 10
 
         /** 缓存文件大小上限：正常目录 JSON 仅数 KB（真书实测 <5KB），超限视为损坏走重建 */
