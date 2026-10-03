@@ -20,6 +20,12 @@ object PdfCleaner {
     // ---- 目录页判定 ----
     /** 目录行：前导点线 + 尾页码（与 BookParser.RE_TOC_LINE 同源形态） */
     private val RE_TOC_LINE = Regex("[…·.•‧]{2,}\\s*\\d+\\s*$")
+
+    /** 目录行形态二：纯点线串（不要求行尾页码）。真书《民法总则》实证：pdfbox 行
+     *  切分把点线与页码拆成两行（「消灭时效完成的效力．．．」「557」各自成行），
+     *  RE_TOC_LINE 整页 0-1 命中 → no tocLike 探针空转；点线行 ≥[TOC_MIN_HITS] 兜住。
+     *  字符集含全角句点「．」——《民法总则》目录大量使用全角点线。 */
+    private val RE_TOC_DOTS = Regex("[…·.•‧．]{2,}")
     private const val TOC_MIN_HITS = 3
 
     // ---- 页码形态 ----
@@ -215,8 +221,10 @@ object PdfCleaner {
             val allText = joinTexts(lines.map { it.text })
             val puaCount = allText.count { isPua(it) }
 
-            // 目录页先判（在页码删除之前——目录页的孤页码是条目触发器）
-            val tocLike = lines.count { RE_TOC_LINE.containsMatchIn(it.text) } >= TOC_MIN_HITS
+            // 目录页先判（在页码删除之前——目录页的孤页码是条目触发器）。
+            // 双判据：点线+尾页码 ≥3，或纯点线行 ≥3（页码被行切分拆走的目录页，见 RE_TOC_DOTS）
+            val tocLike = lines.count { RE_TOC_LINE.containsMatchIn(it.text) } >= TOC_MIN_HITS ||
+                lines.count { RE_TOC_DOTS.containsMatchIn(it.text) } >= TOC_MIN_HITS
             val headerBand = max(HEADER_BAND_PT, pageHeight * HEADER_BAND_FACTOR)
             val footerBandStart = pageHeight * (1f - FOOTER_BAND_FACTOR)
 

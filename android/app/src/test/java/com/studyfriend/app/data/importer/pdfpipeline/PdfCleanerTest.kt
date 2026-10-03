@@ -109,6 +109,29 @@ class PdfCleanerTest {
     }
 
     @Test
+    fun clean_tocPage_dotsAndPageNumSplitByPdfBox_stillTocLike() {
+        // 真书《民法总则》实证：pdfbox 行切分把点线与页码拆成两行（标题行点线结尾、
+        // 页码独立成行），RE_TOC_LINE 整页 0 命中 → 原判定 no tocLike 探针空转；
+        // 纯点线行 ≥3 判据兜住。行形态照抄 p31 实拍
+        val page = listOf(
+            line("4", y0 = 60f, x0 = 290f, x1 = 305f),          // 页眉孤页码
+            line("民法总则", y0 = 70f, x1 = 320f),               // 页眉书名
+            line("第七节", y0 = 100f, x1 = 150f),
+            line("消灭时效完成的效力．．．．．．．．．．．．．．．．．．", y0 = 110f, x1 = 400f),
+            line("557", y0 = 120f, x0 = 290f, x1 = 305f),        // 条目页码独立行
+            line("第十二章权利的行使", y0 = 150f, x1 = 300f),
+            line("-—权利行使自由与限制····························", y0 = 160f, x1 = 400f),
+            line("563", y0 = 170f, x0 = 290f, x1 = 305f),
+            line("索 引", y0 = 200f, x1 = 250f),
+            line("..................................................", y0 = 210f, x1 = 400f),
+            line("595", y0 = 220f, x0 = 290f, x1 = 305f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertTrue("纯点线行 2 条 + 点线页码分离形态须判为目录页", out[0].tocLike)
+        assertTrue(out[0].paras.any { it.text == "557" })
+    }
+
+    @Test
     fun clean_footerSmallLines_collectedAsFootnotePara() {
         val page = listOf(
             line("正文大段内容讲完了。", y0 = 300f, x1 = 520f),
