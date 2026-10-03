@@ -79,6 +79,8 @@ data class ChapterWithAsset(
 
 @Dao
 interface ChapterDao {
+    // level=1 过滤：P3b-2 目录校准后表内有 level=2 节行（P5 章节树 UI 消费），阅读侧只看章；
+    // 未校准书/旧数据 level 全 1（NOT NULL DEFAULT 1），过滤后与原结果逐条一致
     @Query(
         """SELECT c.id AS id, c.idx AS idx, c.title AS title, c.readState AS readState,
                c.gist AS gist, c.keyTermsJson AS keyTermsJson,
@@ -86,7 +88,7 @@ interface ChapterDao {
                a.promptVersion AS assetPromptVersion,
                (a.summaryMd IS NOT NULL AND a.summaryMd != '') AS assetSummaryPresent
         FROM chapters c LEFT JOIN chapter_assets a ON a.chapterId = c.id
-        WHERE c.bookId = :bookId ORDER BY c.idx""",
+        WHERE c.bookId = :bookId AND c.level = 1 ORDER BY c.idx""",
     )
     fun byBookFlow(bookId: Long): Flow<List<ChapterWithAsset>>
 

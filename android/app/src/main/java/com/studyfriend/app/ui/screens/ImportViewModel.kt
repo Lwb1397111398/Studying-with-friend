@@ -31,6 +31,8 @@ import com.studyfriend.app.data.importer.TextLoader
 import com.studyfriend.app.data.importer.pdfpipeline.PageSelector
 import com.studyfriend.app.data.importer.pdfpipeline.PageTranscription
 import com.studyfriend.app.data.importer.pdfpipeline.Para
+import com.studyfriend.app.data.importer.pdfpipeline.CalibrateOutcome
+import com.studyfriend.app.data.importer.pdfpipeline.TocChapterCalibrator
 import com.studyfriend.app.data.importer.pdfpipeline.TocEntry
 import com.studyfriend.app.data.importer.pdfpipeline.TocPageGrouper
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
@@ -107,7 +109,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      *  同步读一次当前值，Done 供消费、其余等价原 null；响应式能力用不上，P3b-3 若需
      *  再升级 StateFlow）。 */
     var tocState: TocProbeState = TocProbeState.Idle
-        private set    /**
+        private set
+
+    /** 探针区段（每册 tocLike 页分组，P3b-2 §3.4）：confirmImport 校准时取各区段目录尾页 */
+    private var probeSegments: List<List<Int>>? = null    /**
      * 超单次上限的可疑页暂存（OPT-F）：页号 to 清洗后字数。导入不再拒绝，
      * 文字层先行；确认落库后写 vision_queue 交 WorkManager 后台逐页转写。
      */
@@ -137,6 +142,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 currentRegex = null
                 editedTitles.clear()
                 visionStatsNote = null
+                tocState = TocProbeState.Idle // 粘贴路径无探针；清掉上一本 PDF 可能残留的目录
+                probeSegments = null
                 if (bookTitle.isBlank()) bookTitle = "粘贴笔记"
                 parse()
             } catch (e: Exception) {
@@ -165,6 +172,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 // 先记住本次文件：解码失败（如编码不对）后改下拉，onEncodingChanged 据此重读
                 lastUri = uri
                 visionStatsNote = null // 新文件读取开始，旧书的视觉统计作废
+                // 新文件开始先清上一本的探针态（PDF 路径 runTocProbe 会重跑；TXT 保持 Idle）
+                tocState = TocProbeState.Idle
+                probeSegments = null
                 // IO：文件名/mime 查询 + 解码/PDF 提取都在 IO 线程，结果回主线程赋值
                 val (name, pdf, text) = withContext(Dispatchers.IO) {
                     val displayName = queryDisplayName(uri) ?: uri.lastPathSegment.orEmpty()
@@ -232,6 +242,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         parseNote = null
         chapters = emptyList()
         isPdf = false
+        tocState = TocProbeState.Idle
+        probeSegments = null
     }
 
     /**
@@ -301,6 +313,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runTocProbe(result: PdfExtractResult, uri: Uri) {
         // 连续导入时先清掉上一本的目录：无 tocLike/视觉未配置/异常三条早退路径都不得残留旧数据
         tocState = TocProbeState.Idle
+        probeSegments = null
         try {
             val tocSegments = TocPageGrouper.group(result.pages.filter { it.tocLike }.map { it.pageNum })
             if (tocSegments.isEmpty()) {
@@ -308,6 +321,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 tocState = TocProbeState.Failed
                 return
             }
+            probeSegments = tocSegments
             Log.i("P3b", "toc probe segments=$tocSegments")
             tocState = TocProbeState.Running
             PdfPageRenderer(getApplication(), uri).use { renderer ->
@@ -395,18 +409,29 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     createdAt = now,
                     updatedAt = now,
                 )
-                val pairs = list.mapIndexed { ci, ch ->
-                    ChapterEntity(
-                        bookId = 0, idx = 0, title = editedTitles[ci] ?: ch.title,
-                        readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
-                    ) to ch.paras.map { p ->
-                        ParagraphEntity(
-                            chapterId = 0, idx = 0, text = p.text, role = p.role,
-                            pageNo = p.pageNo, // P3b-2 pageNo 链路终点（TXT 恒 null）
-                        )
+                // P3b-2 目录驱动校准：探针 Done 时先校准（CPU 密集放 Default），成功用校准
+                // 产物落库（含节行/重排段落），失败走现状零回归；改名按 localIndex 映射回原章
+                val outcome = withContext(Dispatchers.Default) { runCalibrate(list) }
+                val (pairs, totalChapters) = when (outcome) {
+                    null -> list.mapIndexed { ci, ch -> chapterPair(ci, ch.title, ch) } to list.size
+                    else -> {
+                        val rows = outcome.chapters.map { ch ->
+                            val title = ch.localIndex?.let { editedTitles[it] } ?: ch.title
+                            ChapterEntity(
+                                bookId = 0, idx = 0, title = title,
+                                readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
+                                level = ch.level, parentOrder = ch.parentOrder, calibrated = true,
+                            ) to ch.paras.map { p ->
+                                ParagraphEntity(
+                                    chapterId = 0, idx = 0, text = p.text, role = p.role,
+                                    pageNo = p.pageNo,
+                                )
+                            }
+                        }
+                        rows to outcome.chapters.count { it.level == 1 }
                     }
                 }
-                val newBookId = repo.importBook(book, pairs)
+                val newBookId = repo.importBook(book, pairs, totalChapters)
                 // OPT-F：后台视觉队列——超上限页已文字层入库，这里落队列并交 WorkManager
                 pendingVisionItems?.takeIf { it.isNotEmpty() }?.let { items ->
                     repo.addVisionQueue(
@@ -454,6 +479,58 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         phase = null
         cancelFlag.set(false)
         editedTitles.clear()
+        tocState = TocProbeState.Idle
+        probeSegments = null
+    }
+
+    /** 现状路径的一章落库对（校准不可用时与 P3b-2 之前行为逐字段一致） */
+    private fun chapterPair(
+        localIndex: Int,
+        title: String,
+        ch: ParsedChapter,
+    ): Pair<ChapterEntity, List<ParagraphEntity>> =
+        ChapterEntity(
+            bookId = 0, idx = 0, title = editedTitles[localIndex] ?: title,
+            readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
+        ) to ch.paras.map { p ->
+            ParagraphEntity(
+                chapterId = 0, idx = 0, text = p.text, role = p.role,
+                pageNo = p.pageNo, // P3b-2 pageNo 链路终点（TXT 恒 null）
+            )
+        }
+
+    /**
+     * 目录驱动校准（P3b-2 方案 Z，confirmImport 时同步读一次状态）：
+     * 探针 Done 且 PDF 路径才尝试，页内文本源由 sourceText 的〔页N〕独立行标记切分
+     * （与 BookParser 剥标同协议，视觉替换后的内容天然包含在内）；任何前置不满足
+     * 返回 null 走现状零回归。校准失败（守卫不过）同样 null。
+     */
+    private fun runCalibrate(list: List<ParsedChapter>): CalibrateOutcome? {
+        val st = tocState as? TocProbeState.Done ?: return null
+        val src = sourceText
+        val segs = probeSegments
+        if (!isPdf || src == null || segs == null) return null
+        val re = Regex("^〔页(\\d+)〕$")
+        val texts = HashMap<Int, StringBuilder>()
+        var cur: Int? = null
+        for (line in src.lineSequence()) {
+            val m = re.matchEntire(line.trim())
+            if (m != null) {
+                cur = m.groupValues[1].toInt()
+                texts.getOrPut(cur) { StringBuilder() }
+            } else {
+                cur?.let { texts.getValue(it).appendLine(line) }
+            }
+        }
+        val pageMap = texts.mapValues { it.value.toString() }
+        val maxPage = pageMap.keys.maxOrNull() ?: return null
+        return TocChapterCalibrator.calibrate(
+            entries = st.entries,
+            localChapters = list,
+            pageText = { p -> pageMap[p] },
+            bookPageCount = maxPage,
+            tocLastPages = segs.map { s -> s.max() },
+        )
     }
 
     /** 解析 + 兜底提示；CPU 密集放 Default 线程。失败时保留既有 chapters */

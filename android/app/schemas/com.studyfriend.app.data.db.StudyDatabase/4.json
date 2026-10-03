@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 4,
-    "identityHash": "393cb85af25b753b14bb6e0f2b67a9fe",
+    "identityHash": "d02e35be1fa28ab19ddd1f476004e4f5",
     "entities": [
       {
         "tableName": "settings",
@@ -106,7 +106,7 @@
       },
       {
         "tableName": "chapters",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `bookId` INTEGER NOT NULL, `idx` INTEGER NOT NULL, `title` TEXT NOT NULL, `readState` TEXT NOT NULL, `gist` TEXT, `keyTermsJson` TEXT, `level` INTEGER, `parentOrder` INTEGER, `calibrated` INTEGER NOT NULL, FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `bookId` INTEGER NOT NULL, `idx` INTEGER NOT NULL, `title` TEXT NOT NULL, `readState` TEXT NOT NULL, `gist` TEXT, `keyTermsJson` TEXT, `level` INTEGER NOT NULL, `parentOrder` INTEGER, `calibrated` INTEGER NOT NULL, FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "id",
@@ -154,7 +154,7 @@
             "fieldPath": "level",
             "columnName": "level",
             "affinity": "INTEGER",
-            "notNull": false
+            "notNull": true
           },
           {
             "fieldPath": "parentOrder",
@@ -779,7 +779,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '393cb85af25b753b14bb6e0f2b67a9fe')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd02e35be1fa28ab19ddd1f476004e4f5')"
     ]
   }
 }

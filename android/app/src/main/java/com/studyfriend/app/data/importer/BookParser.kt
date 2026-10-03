@@ -42,11 +42,13 @@ object BookParser {
 
     // 目录条目形态：点线/省略号 + 页码结尾（"第一章 导论……1"），不是标题。
     // 点线字符族含 … · . 以及 PDF 提取常见的实心圆点 •(U+2022)/‧(U+2027)（OPT-C C2）
-    private val RE_TOC_LINE = Regex("[…·.•‧]{2,}\\s*\\d+\\s*$")
+    // internal：TocChapterCalibrator 锚点/章名匹配同样要排除目录页点线条目（P3b-2）
+    internal val RE_TOC_LINE = Regex("[…·.•‧]{2,}\\s*\\d+\\s*$")
 
     // 页眉护栏（OPT-C C2）：行尾"CJK 字 + 页码"（如页眉"第一章 私法绪论 3"）不是标题。
     // 只拦内置 A/B 档命中（C 档样式数字内嵌不受影响；custom 路径 = 用户手工重切，不拦）
-    private val RE_TRAIL_PAGE = Regex("[\\u4e00-\\u9FFF]\\s*\\d{1,4}\\s*$")
+    // internal：TocChapterCalibrator 锚点/章名匹配同样排除页眉行（P3b-2）
+    internal val RE_TRAIL_PAGE = Regex("[\\u4e00-\\u9FFF]\\s*\\d{1,4}\\s*$")
 
     // A 档实书回归护栏（OPT-D，E2E 真书《民法总则》630 页实测发现）：
     // 正文里引用章节结构的行（"第二章婚姻规定，未使……" / "第四章：法律行为 第一节：权利能力"）

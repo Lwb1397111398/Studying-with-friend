@@ -15,12 +15,17 @@ import com.studyfriend.app.data.db.StudyDatabase
 class BookRepository(private val db: StudyDatabase) {
 
     /** 导入落库：事务内 书→章→段，返回 bookId。status 一律 READY（目录已在确认页过目）；
-     *  章节与段落的 idx 由本方法按列表序回填（确认页传入顺序即最终顺序） */
+     *  章节与段落的 idx 由本方法按列表序回填（确认页传入顺序即最终顺序）。
+     *  totalChapters 缺省=章节行数；P3b-2 目录校准传 level1 章数（节行混入列表不虚报章数） */
     suspend fun importBook(
         book: BookEntity,
         chapters: List<Pair<ChapterEntity, List<ParagraphEntity>>>,
+        totalChapters: Int? = null,
     ): Long = db.withTransaction {
-        val ready = book.copy(status = DbValues.BOOK_READY, totalChapters = chapters.size)
+        val ready = book.copy(
+            status = DbValues.BOOK_READY,
+            totalChapters = totalChapters ?: chapters.size,
+        )
         val bookId = db.bookDao().insert(ready)
         chapters.forEachIndexed { ci, (chapter, paras) ->
             val chapterId = db.chapterDao().insertAll(

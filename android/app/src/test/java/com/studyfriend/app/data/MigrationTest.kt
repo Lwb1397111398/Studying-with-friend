@@ -104,14 +104,14 @@ class MigrationTest {
         }
         // 跑 1→4 全链迁移 + schema 校验（4 列加列与 Entity 对齐，失败即抛）
         helper.runMigrationsAndValidate(dbName, 4, true, *MIGRATIONS).use { v4 ->
-            // 旧行新列取默认值：pageNo/level/parentOrder=NULL，calibrated=0
+            // 旧行新列取默认值：pageNo/parentOrder=NULL，level=1（NOT NULL DEFAULT，未校准书同构），calibrated=0
             v4.query("SELECT pageNo FROM paragraphs").use { cur ->
                 assertTrue(cur.moveToFirst())
                 assertTrue("旧段落 pageNo 应为 NULL", cur.isNull(0))
             }
             v4.query("SELECT level, parentOrder, calibrated FROM chapters").use { cur ->
                 assertTrue(cur.moveToFirst())
-                assertTrue(cur.isNull(0))
+                assertEquals("旧章 level 默认 1", 1, cur.getInt(0))
                 assertTrue(cur.isNull(1))
                 assertEquals("旧章 calibrated 默认 0", 0, cur.getInt(2))
             }

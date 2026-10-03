@@ -92,7 +92,7 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
         // paragraphs.pageNo=段首页码（P2 pageNo 链路）；chapters.level/parentOrder=节挂接产物；
         // chapters.calibrated=目录校准标志（本期不消费，语义定义权归 P5）
         db.execSQL("ALTER TABLE `paragraphs` ADD COLUMN `pageNo` INTEGER")
-        db.execSQL("ALTER TABLE `chapters` ADD COLUMN `level` INTEGER")
+        db.execSQL("ALTER TABLE `chapters` ADD COLUMN `level` INTEGER NOT NULL DEFAULT 1")
         db.execSQL("ALTER TABLE `chapters` ADD COLUMN `parentOrder` INTEGER")
         db.execSQL("ALTER TABLE `chapters` ADD COLUMN `calibrated` INTEGER NOT NULL DEFAULT 0")
     }
