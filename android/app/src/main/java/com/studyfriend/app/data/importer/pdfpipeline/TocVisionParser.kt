@@ -76,14 +76,14 @@ class TocVisionParser(
             var budgetOut = false
             for ((idx, segPages) in segments.withIndex()) {
                 if (segPages.isEmpty()) continue
-                val cacheFile = segCacheFile(uriHash, idx)
+                val cacheFile = segCacheFile(uriHash, segPages)
                 val cached = readCache(cacheFile)
                 if (cached != null) {
                     Log.i(TAG, "segment $idx cache hit ($uriHash, ${cached.size} entries)")
                     ok += idx to cached
                     continue
                 }
-                val marker = segMarkerFile(uriHash, idx)
+                val marker = segMarkerFile(uriHash, segPages)
                 if (markerFresh(marker)) {
                     Log.i(TAG, "segment $idx fail marker fresh, skip ($uriHash)")
                     continue
@@ -108,11 +108,11 @@ class TocVisionParser(
                 Log.w(TAG, "TOC pages may be misidentified: ${segments.size} segments, ${merged.size} entries failed guards")
                 // 整书熔断（全部区段含未处理区段写 marker，防坏目录页每导必烧 30 天）；
                 // 坏目录不落缓存——区段缓存在守卫通过后才写，此处无缓存写入
-                for (idx in segments.indices) writeMarker(segMarkerFile(uriHash, idx))
+                for (segPages in segments) if (segPages.isNotEmpty()) writeMarker(segMarkerFile(uriHash, segPages))
                 return@withContext null
             }
             // 守卫通过：各区段写缓存（失败区段 marker 保留，30 天 TTL 后自然重试）
-            for ((idx, entries) in ok) writeCache(segCacheFile(uriHash, idx), entries)
+            for ((idx, entries) in ok) writeCache(segCacheFile(uriHash, segments[idx]), entries)
             val level1 = merged.count { it.level == 1 }
             Log.i(
                 TAG,
@@ -261,11 +261,13 @@ class TocVisionParser(
         false
     }
 
-    private fun segCacheFile(uriHash: String, segIdx: Int) =
-        File(cacheDir, "toc_v${FORMAT_VERSION}_${uriHash}_s$segIdx.json")
+    // 段 key=uriHash+段页列表签名（v1.2 修正）：只含段序号的旧 key 会在取样策略
+    // 变化（如段 [18,19]→[18,19,20]）后命中毒化旧缓存；页列表签名使段定义一变即 miss
+    private fun segCacheFile(uriHash: String, segPages: List<Int>) =
+        File(cacheDir, "toc_v${FORMAT_VERSION}_${uriHash}_s${segPages.hashCode()}.json")
 
-    private fun segMarkerFile(uriHash: String, segIdx: Int) =
-        File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}_s$segIdx.marker")
+    private fun segMarkerFile(uriHash: String, segPages: List<Int>) =
+        File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}_s${segPages.hashCode()}.marker")
 
     private fun jsonQuote(s: String): String = buildString {
         append('"')

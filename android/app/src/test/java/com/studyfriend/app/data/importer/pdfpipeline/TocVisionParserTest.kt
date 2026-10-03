@@ -19,7 +19,8 @@ import java.time.Instant
  * 目录探针（P3b-1/P3b-2）：区段缓存读写与版本、按区段熔断 marker、超时预算守卫、
  * 区段级全有全无语义。Robolectric（android.util.Log）；网络用 chatFn 注入假实现，
  * 零真实调用。每页返回 2 条：页级不守卫（applyGuards=false 由探针约定），守卫作用
- * 于拼接全集。单区段文件名后缀 _s0（[parse] 委托 [TocVisionParser.parseSegments]）。
+ * 于拼接全集。段缓存文件名含段页列表签名（[TocVisionParser.segCacheFile] v1.2：
+ * 段定义变化即 miss，防旧段缓存毒化新取样）。
  */
 @RunWith(RobolectricTestRunner::class)
 class TocVisionParserTest {
@@ -41,11 +42,12 @@ class TocVisionParserTest {
     private val pageB =
         """{"entries":[{"title":"第二章 分则","page":10,"level":1},{"title":"第二节 乙","page":11,"level":2}]}"""
 
-    private fun cacheFile(dir: File, hash: String, segIdx: Int = 0) =
-        File(dir, "toc_v${TocVisionParser.FORMAT_VERSION}_${hash}_s$segIdx.json")
+    /** 默认 [listOf(1,2)] 与多数单段用例的 parse 页列表对应 */
+    private fun cacheFile(dir: File, hash: String, pages: List<Int> = listOf(1, 2)) =
+        File(dir, "toc_v${TocVisionParser.FORMAT_VERSION}_${hash}_s${pages.hashCode()}.json")
 
-    private fun markerFile(dir: File, hash: String, segIdx: Int = 0) =
-        File(dir, "toc_fail_v${TocVisionParser.FORMAT_VERSION}_${hash}_s$segIdx.marker")
+    private fun markerFile(dir: File, hash: String, pages: List<Int> = listOf(1, 2)) =
+        File(dir, "toc_fail_v${TocVisionParser.FORMAT_VERSION}_${hash}_s${pages.hashCode()}.marker")
 
     private fun makeParser(dir: File, clock: FakeClock, chatFn: suspend (ChatRequest) -> String) =
         TocVisionParser(
@@ -214,10 +216,10 @@ class TocVisionParserTest {
         val r = p.parseSegments(listOf(listOf(28, 29), listOf(557, 558)), "h1")
         assertEquals("成功区段照常返回，一册失败不拖垮另一册", 4, r!!.size)
         assertEquals("只处理到失败页为止（段 0 两页 + 段 1 首页）", 3, calls.size)
-        assertTrue("失败区段写 marker 熔断", markerFile(dir, "h1", segIdx = 1).exists())
-        assertFalse("成功区段不写 marker", markerFile(dir, "h1", segIdx = 0).exists())
-        assertTrue("守卫通过后成功区段写缓存", cacheFile(dir, "h1", segIdx = 0).exists())
-        assertFalse("失败区段无缓存", cacheFile(dir, "h1", segIdx = 1).exists())
+        assertTrue("失败区段写 marker 熔断", markerFile(dir, "h1", listOf(557, 558)).exists())
+        assertFalse("成功区段不写 marker", markerFile(dir, "h1", listOf(28, 29)).exists())
+        assertTrue("守卫通过后成功区段写缓存", cacheFile(dir, "h1", listOf(28, 29)).exists())
+        assertFalse("失败区段无缓存", cacheFile(dir, "h1", listOf(557, 558)).exists())
     }
 
     @Test
@@ -226,12 +228,27 @@ class TocVisionParserTest {
         val calls = mutableListOf<Int>()
         val dir = tmp.newFolder()
         val entries = """{"entries":[{"title":"第一章 甲","page":1,"level":1},{"title":"第一节 a","page":2,"level":2},{"title":"第二章 乙","page":10,"level":1},{"title":"第二节 b","page":11,"level":2}]}"""
-        cacheFile(dir, "h1", segIdx = 0).writeText(entries)
-        markerFile(dir, "h1", segIdx = 1).writeText(Instant.now().toString())
+        cacheFile(dir, "h1", listOf(28, 29)).writeText(entries)
+        markerFile(dir, "h1", listOf(557, 558)).writeText(Instant.now().toString())
         val p = makeParser(dir, clock, twoPageChat(clock, calls))
         val r = p.parseSegments(listOf(listOf(28, 29), listOf(557, 558)), "h1")
         assertEquals(4, r!!.size)
         assertEquals("缓存命中区段 + 熔断区段均零网络调用", 0, calls.size)
+    }
+
+    @Test
+    fun parseSegments_segmentPagesChange_oldCacheNotHit() = runBlocking {
+        // v1.2 回归：段缓存 key 含页列表签名——取样策略从 [18] 变 [18,19] 后，
+        // 旧段缓存不得命中（真书事故：旧 key 只含段序号，2 页取样缓存毒化 3 页新取样，
+        // 尾页条目永远进不来）
+        val clock = FakeClock()
+        val calls = mutableListOf<Int>()
+        val dir = tmp.newFolder()
+        cacheFile(dir, "h1", listOf(18)).writeText(pageA)
+        val p = makeParser(dir, clock, twoPageChat(clock, calls))
+        val r = p.parseSegments(listOf(listOf(18, 19)), "h1")
+        assertEquals(4, r!!.size)
+        assertEquals("段定义变化必须重新调用（旧缓存不毒化新探针）", 2, calls.size)
     }
 
     @Test
@@ -248,10 +265,10 @@ class TocVisionParserTest {
             badPage
         }
         assertNull(p.parseSegments(listOf(listOf(28, 29), listOf(557, 558)), "h1"))
-        assertTrue("守卫失败整书熔断：段 0 写 marker", markerFile(dir, "h1", segIdx = 0).exists())
-        assertTrue("守卫失败整书熔断：段 1 写 marker", markerFile(dir, "h1", segIdx = 1).exists())
-        assertFalse("坏目录不落缓存（缓存延后到守卫通过才写）", cacheFile(dir, "h1", segIdx = 0).exists())
-        assertFalse(cacheFile(dir, "h1", segIdx = 1).exists())
+        assertTrue("守卫失败整书熔断：段 0 写 marker", markerFile(dir, "h1", listOf(28, 29)).exists())
+        assertTrue("守卫失败整书熔断：段 1 写 marker", markerFile(dir, "h1", listOf(557, 558)).exists())
+        assertFalse("坏目录不落缓存（缓存延后到守卫通过才写）", cacheFile(dir, "h1", listOf(28, 29)).exists())
+        assertFalse(cacheFile(dir, "h1", listOf(557, 558)).exists())
     }
 
     @Test
@@ -270,9 +287,9 @@ class TocVisionParserTest {
         val r = p.parseSegments(listOf(listOf(28), listOf(557, 558)), "h1")
         assertEquals("已处理区段照常走守卫返回", 4, r!!.size)
         assertEquals("预算耗尽后后续页零调用", 1, calls.size)
-        assertFalse("预算停止非失败，不写任何 marker", markerFile(dir, "h1", segIdx = 0).exists())
-        assertFalse(markerFile(dir, "h1", segIdx = 1).exists())
-        assertTrue("成功区段照常写缓存", cacheFile(dir, "h1", segIdx = 0).exists())
-        assertFalse(cacheFile(dir, "h1", segIdx = 1).exists())
+        assertFalse("预算停止非失败，不写任何 marker", markerFile(dir, "h1", listOf(28)).exists())
+        assertFalse(markerFile(dir, "h1", listOf(557, 558)).exists())
+        assertTrue("成功区段照常写缓存", cacheFile(dir, "h1", listOf(28)).exists())
+        assertFalse(cacheFile(dir, "h1", listOf(557, 558)).exists())
     }
 }
