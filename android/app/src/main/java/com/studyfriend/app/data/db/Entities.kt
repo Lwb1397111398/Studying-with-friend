@@ -51,7 +51,9 @@ data class ChapterEntity(
     /** P3b-2 节挂接产物：1=章 2=节（TocEntry.level 口径）。NOT NULL DEFAULT 1=未校准书
      *  自动同构（计划案 §3.3「level 全 1、旧查询零改动」），P3b-3/P5 消费 */
     val level: Int = 1,
-    /** P3b-2 节挂接产物：同级内的排序序号。本期加列不消费，P3b-3/P5 消费 */
+    /** P3b-2 节挂接产物：父章在 level1 章序列中的 1-based 序号（TocChapterCalibrator 节挂接
+     *  `parentOrder = level1IndexOf[host]`，以代码为准；本列旧注释「同级内的排序序号」系笔误已修正）。
+     *  P5 章节树 UI 按此把节行挂到父章下 */
     val parentOrder: Int? = null,
     /** P3b-2 目录校准标志（false=未校准/目录不可用）。本期加列不消费，语义定义权归 P5 */
     val calibrated: Boolean = false,

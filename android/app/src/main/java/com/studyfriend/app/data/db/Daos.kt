@@ -77,6 +77,26 @@ data class ChapterWithAsset(
     val assetSummaryPresent: Boolean,
 )
 
+/**
+ * 章树行投影（P5）：chapters 全行（不过滤 level）+ 资产徽标列，供章节树 UI 展示
+ * （byBookTreeFlow）。level/parentOrder/calibrated 三列均在 chapters 表
+ * （Entities.kt ChapterEntity，P3b-2 Migration 3→4 落地）。
+ */
+data class ChapterTreeRow(
+    val id: Long,
+    val idx: Int,
+    val title: String,
+    val readState: String,
+    val gist: String?,
+    val keyTermsJson: String?,
+    val level: Int,
+    val parentOrder: Int?,
+    val calibrated: Boolean,
+    val hasAsset: Boolean,
+    val assetPromptVersion: String?,
+    val assetSummaryPresent: Boolean,
+)
+
 @Dao
 interface ChapterDao {
     // level=1 过滤：P3b-2 目录校准后表内有 level=2 节行（P5 章节树 UI 消费），阅读侧只看章；
@@ -94,6 +114,20 @@ interface ChapterDao {
 
     @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY idx")
     suspend fun byBook(bookId: Long): List<ChapterEntity>
+
+    // P5 章节树：不过滤 level，节行随章行返回（树形挂接在 UI 层 buildChapterTree 做，
+    // 查询保持纯投影）；byBookFlow（level=1 过滤）不动，M6 门控等旧消费方零回归
+    @Query(
+        """SELECT c.id AS id, c.idx AS idx, c.title AS title, c.readState AS readState,
+               c.gist AS gist, c.keyTermsJson AS keyTermsJson,
+               c.level AS level, c.parentOrder AS parentOrder, c.calibrated AS calibrated,
+               (a.chapterId IS NOT NULL) AS hasAsset,
+               a.promptVersion AS assetPromptVersion,
+               (a.summaryMd IS NOT NULL AND a.summaryMd != '') AS assetSummaryPresent
+        FROM chapters c LEFT JOIN chapter_assets a ON a.chapterId = c.id
+        WHERE c.bookId = :bookId ORDER BY c.idx""",
+    )
+    fun byBookTreeFlow(bookId: Long): Flow<List<ChapterTreeRow>>
 
     @Query("SELECT * FROM chapters WHERE id = :chapterId")
     suspend fun byIdOnce(chapterId: Long): ChapterEntity?
