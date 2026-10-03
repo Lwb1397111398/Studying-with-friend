@@ -32,6 +32,7 @@ import com.studyfriend.app.data.importer.pdfpipeline.PageSelector
 import com.studyfriend.app.data.importer.pdfpipeline.PageTranscription
 import com.studyfriend.app.data.importer.pdfpipeline.Para
 import com.studyfriend.app.data.importer.pdfpipeline.TocEntry
+import com.studyfriend.app.data.importer.pdfpipeline.TocPageGrouper
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import com.studyfriend.app.data.importer.pdfpipeline.joinTexts
 import com.studyfriend.app.data.db.VisionQueueEntity
@@ -283,23 +284,22 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * P3b-1 目录探针（纯产数据）：前 200 页内 tocLike 页升序取前 4，视觉识别为
-     * 结构化目录存入 [tocResult] 并记 logcat。任何失败只让 tocResult 保持 null，
-     * 导入行为（正文/章节）完全不变；P3b-2 目录驱动切章起才消费该数据。
+     * 目录探针（纯产数据）：tocLike 页经 [TocPageGrouper] 区段化取样（按册聚类，
+     * 每段取前 2 页、全组 ≤8 页；P3b-2 §3.4）后交视觉识别，结构化目录存入
+     * [tocResult] 并记 logcat。不再限制前 200 页——mzzz 下册目录在 p557，200 上限
+     * 会滤掉；调用量护栏由区段化上限 8 页承担。任何失败只让 tocResult 保持 null，
+     * 导入行为（正文/章节）完全不变；P3b-2 calibrate 消费该数据。
      */
     private suspend fun runTocProbe(result: PdfExtractResult, uri: Uri) {
         // 连续导入时先清掉上一本的目录：无 tocLike/视觉未配置/异常三条早退路径都不得残留旧数据
         tocResult = null
         try {
-            val tocPages = result.pages
-                .filter { it.tocLike && it.pageNum <= 200 }
-                .map { it.pageNum }
-                .take(4)
-            if (tocPages.isEmpty()) {
+            val tocSegments = TocPageGrouper.group(result.pages.filter { it.tocLike }.map { it.pageNum })
+            if (tocSegments.isEmpty()) {
                 Log.i("P3b", "no tocLike pages")
                 return
             }
-            Log.i("P3b", "toc probe pages=$tocPages")
+            Log.i("P3b", "toc probe segments=$tocSegments")
             PdfPageRenderer(getApplication(), uri).use { renderer ->
                 val parser = settings.buildTocVisionParser(
                     File(getApplication<Application>().cacheDir, "vision_cache/toc"),
@@ -308,7 +308,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     Log.i("P3b", "vision unavailable, toc probe skipped")
                     return
                 }
-                tocResult = parser.parse(tocPages, VisionCache.uriHash(uri.toString()))
+                tocResult = parser.parseSegments(tocSegments, VisionCache.uriHash(uri.toString()))
                 if (tocResult == null) {
                     Log.i("P3b", "toc probe: no entries (failed, budget exhausted or cached failure)")
                 }

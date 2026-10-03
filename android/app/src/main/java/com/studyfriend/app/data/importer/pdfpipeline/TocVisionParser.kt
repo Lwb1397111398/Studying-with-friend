@@ -20,15 +20,21 @@ import java.time.Instant
  * 探针定位：只产数据（调用方记 logcat + 内存暂存），不参与分章（P3b-2 消费）；
  * 任何环节失败 → null，导入行为与不挂探针时逐字节一致。
  *
- * 重试策略独立于 VisionTranscriber（仅网络错/超时重试 1 次；4 次调用场景不值得
+ * 重试策略独立于 VisionTranscriber（仅网络错/超时重试 1 次；≤8 次调用场景不值得
  * 抽共享接口）：若 VisionTranscriber 重试策略变更（如加指数退避），此处需手动
- * 评估同步。不经 VisionScheduler——单书 ≤4 次轻量调用；调用量 >10 次/书、或
- * 总目录页数 >4 页且处理耗时 >3 页预算时重新评估接入。
+ * 评估同步。不经 VisionScheduler——单书 ≤8 次轻量调用；调用量持续 >10 次/书时
+ * 重新评估接入。
  *
- * 缓存（cacheDir 由构造器传入）：全有全无——整体成功才写 `toc_v{N}_{uriHash}.json`
- * （原子写 temp+rename）；失败写 `toc_fail_v{N}_{uriHash}.marker`（30 天 TTL 内同书
- * 跳过探针，防坏目录页每导必烧）。TocJson.kt 顶部记录格式版本历史；Prompt/解析
- * 规则/模型变更时递增 [FORMAT_VERSION]（旧版本缓存与 marker 因文件名不同自然失效）。
+ * 缓存（cacheDir 由构造器传入）：按区段全有全无——区段成功才写
+ * `toc_v{N}_{uriHash}_s{i}.json`（原子写 temp+rename）；区段内容性失败
+ * （unparseable JSON）写 `toc_fail_v{N}_{uriHash}_s{i}.marker`（30 天 TTL 内同书
+ * 该区段跳过探针，防坏目录页每导必烧；临时性失败如网络/渲染错不写 marker）。
+ * 拼接全集过整体守卫：守卫失败写全部区段 marker（整书熔断），已成功区段缓存
+ * 不写（坏目录不落缓存）。多区段书一册失败不再拖垮另一册（P3b-2 §6 按区段熔断）；
+ * 单区段书（[parse] 入口）行为与 P3b-1 一致。TocJson.kt 顶部记录格式版本历史；
+ * Prompt/解析规则/模型/入口变更时递增 [FORMAT_VERSION]（旧版本缓存与 marker 因
+ * 文件名不同自然失效；v3→v4 过渡期 v3 文件磁盘留存但被忽略，已有缓存的书首次
+ * 重导多付一次探针成本）。
  */
 class TocVisionParser(
     private val baseUrl: String,
@@ -42,81 +48,126 @@ class TocVisionParser(
 ) {
 
     /**
-     * 逐页识别目录。入参=调用方选好的 tocLike 物理页号（1-based，升序）+ 文件
-     * uriHash（缓存/marker 文件名用）。内部逐页「渲染→调用→释放」不预加载全部页，
-     * 内存峰值 ≤1 页图。任一环节失败整体返 null（半份目录不采纳），已成功页丢弃。
+     * 逐页识别目录（单区段便捷入口，行为与 P3b-1 一致）。入参=调用方选好的
+     * tocLike 物理页号（1-based，升序）+ 文件 uriHash（缓存/marker 文件名用）。
+     * 内部逐页「渲染→调用→释放」不预加载全部页，内存峰值 ≤1 页图。任一环节失败
+     * 整体返 null（半份目录不采纳），已成功页丢弃。
      */
     suspend fun parse(pageNumbers: List<Int>, uriHash: String): List<TocEntry>? =
+        parseSegments(listOf(pageNumbers), uriHash)
+
+    /**
+     * 按区段识别目录（P3b-2 §3.4/§6）：区段间独立——成功区段写区段缓存保留，
+     * 失败区段按失败类型处置（内容性失败写区段 marker 单独熔断；临时性失败
+     * 不写，下次重试）；全部成功区段条目合并后过整体守卫（守卫作用于拼接全集，
+     * 与 P3b-1 同判据）。预算耗尽停止处理后续区段，已成功区段照常走守卫返回
+     * （区段级全有全无：一册失败不再拖垮另一册，单区段书退化为 P3b-1 行为）。
+     */
+    suspend fun parseSegments(segments: List<List<Int>>, uriHash: String): List<TocEntry>? =
         withContext(Dispatchers.IO) {
-            if (!enabled || pageNumbers.isEmpty()) return@withContext null
+            if (!enabled || segments.isEmpty() || segments.all { it.isEmpty() }) {
+                return@withContext null
+            }
             val start = clock()
-            fun elapsed() = clock() - start
+            val elapsed: () -> Long = { clock() - start }
 
-            val cacheFile = File(cacheDir, "toc_v${FORMAT_VERSION}_${uriHash}.json")
-            readCache(cacheFile)?.let {
-                Log.i(TAG, "cache hit ($uriHash, ${it.size} entries)")
-                return@withContext it
+            // (区段下标, 条目)；缓存命中的区段直接计入（其内容在写入前已过守卫）
+            val ok = mutableListOf<Pair<Int, List<TocEntry>>>()
+            var budgetOut = false
+            for ((idx, segPages) in segments.withIndex()) {
+                if (segPages.isEmpty()) continue
+                val cacheFile = segCacheFile(uriHash, idx)
+                val cached = readCache(cacheFile)
+                if (cached != null) {
+                    Log.i(TAG, "segment $idx cache hit ($uriHash, ${cached.size} entries)")
+                    ok += idx to cached
+                    continue
+                }
+                val marker = segMarkerFile(uriHash, idx)
+                if (markerFresh(marker)) {
+                    Log.i(TAG, "segment $idx fail marker fresh, skip ($uriHash)")
+                    continue
+                }
+                when (val r = probeSegment(segPages, elapsed)) {
+                    is SegResult.Ok -> ok += idx to r.entries // 缓存延后到守卫通过统一写（坏目录不落缓存）
+                    is SegResult.Fail -> {
+                        Log.w(TAG, "segment $idx failed (mark=${r.mark})")
+                        if (r.mark) writeMarker(marker)
+                    }
+                    SegResult.BudgetOut -> {
+                        budgetOut = true
+                        break // 已成功区段照常使用，不再处理后续区段（无 marker 无缓存）
+                    }
+                }
             }
 
-            val marker = File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}.marker")
-            if (markerFresh(marker)) {
-                Log.i(TAG, "fail marker fresh, skip probe ($uriHash)")
+            val merged = ok.flatMap { it.second }
+            if (merged.isEmpty()) return@withContext null
+
+            if (!TocJson.passesGuards(merged)) {
+                Log.w(TAG, "TOC pages may be misidentified: ${segments.size} segments, ${merged.size} entries failed guards")
+                // 整书熔断（全部区段含未处理区段写 marker，防坏目录页每导必烧 30 天）；
+                // 坏目录不落缓存——区段缓存在守卫通过后才写，此处无缓存写入
+                for (idx in segments.indices) writeMarker(segMarkerFile(uriHash, idx))
                 return@withContext null
             }
-
-            val all = mutableListOf<TocEntry>()
-            for (pageNo in pageNumbers) {
-                // 统一前置检查（首次与重试同判据）：容量算术 (300−12)/60≈4.8 → 4 页整
-                if (elapsed() + READ_TIMEOUT_MS > TOTAL_TIMEOUT_MS) {
-                    Log.w(TAG, "toc budget exhausted after ${all.size} entries, page $pageNo dropped")
-                    return@withContext null
-                }
-                val pageStart = clock()
-                val pngBase64 = try {
-                    renderFn(pageNo)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "page render failed: $pageNo", e)
-                    return@withContext null
-                }
-                val raw = callWithRetry(pngBase64, ::elapsed)
-                    ?: return@withContext null
-                // 单页只解析不守卫（目录尾页可能条目很少，页级守卫会误杀）；
-                // 守卫作用于拼接全集：条目数/level=1/非降序跨页连续性一次判足
-                val pageEntries = TocJson.parse(raw, applyGuards = false)
-                if (pageEntries != null && pageEntries.isEmpty()) {
-                    Log.w(TAG, "page $pageNo: all entries filtered out")
-                }
-                if (pageEntries == null) {
-                    Log.w(TAG, "page $pageNo returned unparseable JSON")
-                    writeMarker(marker)
-                    return@withContext null
-                }
-                // 单页耗时=渲染+调用+解析（E2E 敏感性报告口径，P3b-2 调参依据）
-                Log.i(TAG, "page $pageNo: ${pageEntries.size} entries, ${clock() - pageStart}ms")
-                all += pageEntries
-            }
-
-            if (!TocJson.passesGuards(all)) {
-                Log.w(TAG, "TOC pages may be misidentified: ${pageNumbers.size} pages, ${all.size} entries failed guards")
-                writeMarker(marker)
-                return@withContext null
-            }
-
-            marker.delete()
-            writeCache(cacheFile, all)
-            val level1 = all.count { it.level == 1 }
+            // 守卫通过：各区段写缓存（失败区段 marker 保留，30 天 TTL 后自然重试）
+            for ((idx, entries) in ok) writeCache(segCacheFile(uriHash, idx), entries)
+            val level1 = merged.count { it.level == 1 }
             Log.i(
                 TAG,
-                "toc entries=${all.size} (level1=$level1, level2=${all.size - level1}, " +
-                    "pageRange=${all.mapNotNull { it.page }.minOrNull()}..${all.mapNotNull { it.page }.maxOrNull()})",
+                "toc entries=${merged.size} (level1=$level1, level2=${merged.size - level1}, " +
+                    "segments=${ok.size}/${segments.size}, budgetOut=$budgetOut)",
             )
-            if (all.size < MIN_QUALITY_ENTRIES) {
-                Log.w(TAG, "toc quality warning: ${all.size} entries, below minimum $MIN_QUALITY_ENTRIES")
+            if (merged.size < MIN_QUALITY_ENTRIES) {
+                Log.w(TAG, "toc quality warning: ${merged.size} entries, below minimum $MIN_QUALITY_ENTRIES")
             }
-            all
+            merged
         }
+
+    /** 单区段逐页处理；渲染/网络失败=临时性（不熔断），unparseable=内容性（熔断） */
+    private suspend fun probeSegment(segPages: List<Int>, elapsed: () -> Long): SegResult {
+        val collected = mutableListOf<TocEntry>()
+        for (pageNo in segPages) {
+            // 统一前置检查（首次与重试同判据）：容量算术 (480−12)/60≈7.8 → 8 页整
+            if (elapsed() + READ_TIMEOUT_MS > TOTAL_TIMEOUT_MS) {
+                Log.w(TAG, "toc budget exhausted after ${collected.size} entries, page $pageNo dropped")
+                return SegResult.BudgetOut
+            }
+            val pageStart = clock()
+            val pngBase64 = try {
+                renderFn(pageNo)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "page render failed: $pageNo", e)
+                return SegResult.Fail(mark = false)
+            }
+            val raw = callWithRetry(pngBase64, elapsed) ?: return SegResult.Fail(mark = false)
+            // 单页只解析不守卫（目录尾页可能条目很少，页级守卫会误杀）；
+            // 守卫作用于拼接全集：条目数/level=1/非降序跨页连续性一次判足
+            val pageEntries = TocJson.parse(raw, applyGuards = false)
+            if (pageEntries != null && pageEntries.isEmpty()) {
+                Log.w(TAG, "page $pageNo: all entries filtered out")
+            }
+            if (pageEntries == null) {
+                Log.w(TAG, "page $pageNo returned unparseable JSON")
+                return SegResult.Fail(mark = true)
+            }
+            // 单页耗时=渲染+调用+解析（E2E 敏感性报告口径，P3b-2 调参依据）
+            Log.i(TAG, "page $pageNo: ${pageEntries.size} entries, ${clock() - pageStart}ms")
+            collected += pageEntries
+        }
+        return SegResult.Ok(collected)
+    }
+
+    private sealed class SegResult {
+        class Ok(val entries: List<TocEntry>) : SegResult()
+
+        /** 区段失败；mark=true 写区段熔断 marker（内容性失败），false 不写（临时性失败） */
+        class Fail(val mark: Boolean) : SegResult()
+        data object BudgetOut : SegResult()
+    }
 
     /** 网络错/超时重试 1 次（重试前再查预算）；其余异常与 JSON 解析失败同罚：不重试 */
     private suspend fun callWithRetry(pngBase64: String, elapsed: () -> Long): String? {
@@ -210,6 +261,12 @@ class TocVisionParser(
         false
     }
 
+    private fun segCacheFile(uriHash: String, segIdx: Int) =
+        File(cacheDir, "toc_v${FORMAT_VERSION}_${uriHash}_s$segIdx.json")
+
+    private fun segMarkerFile(uriHash: String, segIdx: Int) =
+        File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}_s$segIdx.marker")
+
     private fun jsonQuote(s: String): String = buildString {
         append('"')
         s.forEach { c ->
@@ -227,11 +284,12 @@ class TocVisionParser(
 
     companion object {
         private const val TAG = "P3b"
-        /** 缓存/marker 格式版本：Prompt、解析规则或模型变更时递增（历史见 TocJson.kt 头） */
-        const val FORMAT_VERSION = 3
+        /** 缓存/marker 格式版本：Prompt、解析规则、模型或入口（区段化）变更时递增（历史见 TocJson.kt 头） */
+        const val FORMAT_VERSION = 4
         private const val TRANSCRIBE_ATTEMPTS = 2
         private const val READ_TIMEOUT_MS = 60_000L
-        private const val TOTAL_TIMEOUT_MS = 300_000L
+        /** 总预算：8 页区段采样 × 60s readTimeout（P3b-2 §3.4；页面渲染开销计入同一预算口径） */
+        private const val TOTAL_TIMEOUT_MS = 480_000L
         private const val MARKER_TTL_MS = 30L * 24 * 60 * 60 * 1000
         private const val MIN_QUALITY_ENTRIES = 10
 
