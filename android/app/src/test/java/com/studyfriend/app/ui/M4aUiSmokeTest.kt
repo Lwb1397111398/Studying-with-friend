@@ -91,7 +91,7 @@ class M4aUiSmokeTest {
     fun chapterList_showsRowAndStartCta() {
         compose.setContent {
             StudyFriendTheme {
-                ChapterListScreen(bookId = bookId, onBack = {}, onOpenChapter = {})
+                ChapterListScreen(bookId = bookId, onBack = {}, onOpenChapter = { _, _ -> })
             }
         }
         awaitText("第一章 民法概说")

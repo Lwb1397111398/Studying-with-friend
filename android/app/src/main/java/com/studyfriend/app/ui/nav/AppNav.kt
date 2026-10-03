@@ -43,12 +43,15 @@ object Routes {
     const val IMPORT = "import"
     const val TOC = "toc"
     const val BOOK = "book/{bookId}"
-    const val READ = "read/{chapterId}"
+    // highlight 为可选参数（P5 章节树）：节行点击带节标题，ReadScreen 滚动定位到该段
+    const val READ = "read/{chapterId}?highlight={highlight}"
     const val SUMMARY = "summary/{chapterId}"
     const val OVERVIEW = "overview/{bookId}"
 
     fun book(bookId: Long) = "book/$bookId"
-    fun read(chapterId: Long) = "read/$chapterId"
+    fun read(chapterId: Long, highlight: String? = null) =
+        if (highlight.isNullOrBlank()) "read/$chapterId"
+        else "read/$chapterId?highlight=${android.net.Uri.encode(highlight)}"
     fun summary(chapterId: Long) = "summary/$chapterId"
     fun overview(bookId: Long) = "overview/$bookId"
 }
@@ -134,17 +137,29 @@ fun AppNav() {
                 ChapterListScreen(
                     bookId = bookId,
                     onBack = { navController.popBackStack() },
-                    onOpenChapter = { chapterId -> navController.navigate(Routes.read(chapterId)) },
+                    // P5 章节树：节行点击带节标题（highlight），跳父章并滚动定位
+                    onOpenChapter = { chapterId, highlight ->
+                        navController.navigate(Routes.read(chapterId, highlight))
+                    },
                     onOpenOverview = { navController.navigate(Routes.overview(bookId)) },
                 )
             }
             composable(
                 Routes.READ,
-                arguments = listOf(navArgument("chapterId") { type = NavType.LongType }),
+                arguments = listOf(
+                    navArgument("chapterId") { type = NavType.LongType },
+                    navArgument("highlight") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                ),
             ) { entry ->
                 val chapterId = entry.arguments?.getLong("chapterId") ?: 0L
+                val highlight = entry.arguments?.getString("highlight")
                 ReadScreen(
                     chapterId = chapterId,
+                    highlight = highlight,
                     onBack = { navController.popBackStack() },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                     onOpenSummary = { navController.navigate(Routes.summary(chapterId)) },

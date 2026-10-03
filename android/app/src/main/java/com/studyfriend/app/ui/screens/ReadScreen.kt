@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -36,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -78,6 +80,8 @@ fun ReadScreen(
     onOpenSettings: () -> Unit = {},
     onOpenSummary: () -> Unit = {},
     onOpenChapter: (Long) -> Unit = {},
+    /** P5 章节树节行锚：非空时滚动定位到节标题段（匹配失败静默不滚动，见 findHighlightIndex） */
+    highlight: String? = null,
 ) {
     val app = LocalContext.current.applicationContext as StudyApp
     val chapter by app.database.chapterDao().byIdFlow(chapterId)
@@ -224,7 +228,14 @@ fun ReadScreen(
         val anchorById = remember(units) { units.associateBy { it.anchor.id } }
         val notesByParaIds = remember(notes) { notes.associateBy { it.paraIds } }
         val noteRunningThis = noteStateV is NoteRunState.Running && noteStateV.chapterId == chapterId
-        LazyColumn(Modifier.fillMaxSize()) {
+        val listState = rememberLazyListState()
+        // P5 highlight 定位：段落异步到达后滚到节标题段（v1 只滚动不做高亮底色）
+        LaunchedEffect(highlight, paragraphs) {
+            if (highlight != null && paragraphs.isNotEmpty()) {
+                findHighlightIndex(paragraphs, highlight)?.let { listState.animateScrollToItem(it) }
+            }
+        }
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
             items(paragraphs, key = { it.id }) { p ->
                 ParaRow(p)
                 val unit = anchorById[p.id]

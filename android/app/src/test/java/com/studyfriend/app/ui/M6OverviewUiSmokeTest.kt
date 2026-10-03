@@ -142,7 +142,7 @@ class M6OverviewUiSmokeTest {
         seedSummarizedChapter(1)
         compose.setContent {
             StudyFriendTheme {
-                ChapterListScreen(bookId = bookId, onBack = {}, onOpenChapter = {}, onOpenOverview = {})
+                ChapterListScreen(bookId = bookId, onBack = {}, onOpenChapter = { _, _ -> }, onOpenOverview = {})
             }
         }
         awaitText("总览第1 章") // Flow 首发射，列表已渲染
