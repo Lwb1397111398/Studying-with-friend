@@ -125,6 +125,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      * 文字层先行；确认落库后写 vision_queue 交 WorkManager 后台逐页转写。
      */
     private var pendingVisionItems: List<Pair<Int, Int>>? = null
+    /** P5-E（F3 修复）：同步视觉转写失败的页（t==null / 异常中断时未处理页），页号 to 文字层字数。
+     *  与 [pendingVisionItems] 合并去重后随导入落 vision_queue，避免失败页永久滞留文字层 */
+    private var failedVisionItems: List<Pair<Int, Int>>? = null
     /** 改名按 index 记；换文件/重切会清空，避免错位串到别的章 */
     private val editedTitles = mutableStateMapOf<Int, String>()
 
@@ -197,6 +200,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 // 先记住本次文件：解码失败（如编码不对）后改下拉，onEncodingChanged 据此重读
                 lastUri = uri
                 visionStatsNote = null // 新文件读取开始，旧书的视觉统计作废
+                pendingVisionItems = null // 旧书的队列暂存同步作废（否则换书确认会错入队）
+                failedVisionItems = null
                 // 新文件开始先清上一本的探针态（PDF 路径 runTocProbe 会重跑；TXT 保持 Idle）
                 tocState = TocProbeState.Idle
                 probeSegments = null
@@ -304,6 +309,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (selected.isEmpty() || vision == null) return
         var replaced = 0
+        // P5-E F3：同步转写失败页暂存（t==null 记单页；异常中断记剩余页），导入后落后台队列
+        val failed = mutableListOf<Pair<Int, Int>>()
+        var doneCount = 0 // 已收尾页数（成功或已记失败）；异常时 selected.drop(doneCount) 即未完成页
         phase = "视觉转写（每页约 1 分钟，请耐心等待）"
         try {
             PdfPageRenderer(getApplication(), uri).use { renderer ->
@@ -320,16 +328,32 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             page.paras.add(Para(joinTexts(t.footnotes), footnote = true))
                         }
                         replaced++
+                    } else {
+                        failed += pageNo to originChars
                     }
+                    doneCount++
                 }
             }
-            visionStatsNote = "视觉转写替换了 $replaced/${selected.size} 页"
+            failedVisionItems = failed
+            visionStatsNote = if (failed.isEmpty()) {
+                "视觉转写替换了 $replaced/${selected.size} 页"
+            } else {
+                "视觉转写替换了 $replaced/${selected.size} 页，${failed.size} 页转写失败将在导入后后台增强"
+            }
         } catch (e: CancelledImportException) {
             throw e
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            visionStatsNote = "视觉转写未完成，已保留文字层内容：${e.message ?: "未知错误"}"
+            // 用户取消不走这里（Cancelled/Cancellation 上抛，导入中止不入队）；此处为网络等真实失败
+            val rest = selected.drop(doneCount).map { pageNo ->
+                val page = result.pages.first { it.pageNum == pageNo }
+                pageNo to page.paras.sumOf { it.text.length }
+            }
+            failedVisionItems = failed + rest
+            visionStatsNote =
+                "视觉转写未完成，已保留文字层内容：${e.message ?: "未知错误"}；" +
+                    "${(failed + rest).size} 页将在导入后后台视觉增强"
         }
     }
 
@@ -477,22 +501,25 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 val newBookId = repo.importBook(book, pairs, totalChapters)
-                // OPT-F：后台视觉队列——超上限页已文字层入库，这里落队列并交 WorkManager
-                pendingVisionItems?.takeIf { it.isNotEmpty() }?.let { items ->
-                    repo.addVisionQueue(
-                        items.map { (pageNo, originChars) ->
-                            VisionQueueEntity(
-                                bookId = newBookId,
-                                uri = sourceUri,
-                                pageNo = pageNo,
-                                originChars = originChars,
-                                status = DbValues.VQ_PENDING,
-                                updatedAt = now,
-                            )
-                        },
-                    )
-                    VisionScheduler.enqueue(getApplication(), newBookId)
-                }
+                // OPT-F 后台视觉队列；P5-E F3：超上限暂存页 + 同步转写失败页合并去重入队
+                (pendingVisionItems.orEmpty() + failedVisionItems.orEmpty())
+                    .distinctBy { it.first }
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { items ->
+                        repo.addVisionQueue(
+                            items.map { (pageNo, originChars) ->
+                                VisionQueueEntity(
+                                    bookId = newBookId,
+                                    uri = sourceUri,
+                                    pageNo = pageNo,
+                                    originChars = originChars,
+                                    status = DbValues.VQ_PENDING,
+                                    updatedAt = now,
+                                )
+                            },
+                        )
+                        VisionScheduler.enqueue(getApplication(), newBookId)
+                    }
                 imported = true
                 Log.i("P5Nav", "① confirm 成功 → imported=true + 事件入队")
                 if (!importDone.trySend(Unit).isSuccess) {
@@ -526,6 +553,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         parseNote = null
         visionStatsNote = null
         pendingVisionItems = null
+        failedVisionItems = null
         chapters = emptyList()
         imported = false
         isPdf = false

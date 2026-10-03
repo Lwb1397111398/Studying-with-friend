@@ -430,8 +430,9 @@ private val BodyStyle = TextStyle(fontSize = 16.sp, lineHeight = 26.sp)
 @Composable
 private fun ParaRow(p: ParagraphEntity) {
     // OPT-C C4：目录条目特殊展示——小字次级色，无重点竖条/无 AI 徽标（TOC 段也不参与 AI 标注）
-    // OPT-E：脚注段同款次级展示（真书 E2E 后新增 ROLE_FOOTNOTE，AI 全链路跳过）
-    if (p.role == DbValues.ROLE_TOC || p.role == DbValues.ROLE_FOOTNOTE) {
+    // OPT-E：脚注段同款次级展示；P5-F：FRONT/BACK（前/后置版权页）纳入次级展示，
+    // 但仅视觉降级，AI 加工口径不变（ReadStyles.isSecondaryRole 展示与加工解耦）
+    if (ReadStyles.isSecondaryRole(p.role)) {
         Text(
             p.text,
             style = MaterialTheme.typography.bodySmall,
