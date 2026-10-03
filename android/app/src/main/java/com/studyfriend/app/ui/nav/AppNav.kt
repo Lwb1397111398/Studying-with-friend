@@ -126,7 +126,10 @@ fun AppNav() {
             composable(Routes.TOC) {
                 TocConfirmScreen(
                     vm = importVm,
-                    onDone = { navController.popBackStack(Routes.SHELF, inclusive = false) },
+                    onDone = {
+                        android.util.Log.i("P5Nav", "④ onDone → popBackStack 回书架")
+                        navController.popBackStack(Routes.SHELF, inclusive = false)
+                    },
                 )
             }
             composable(

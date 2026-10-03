@@ -79,6 +79,14 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var imported by mutableStateOf(false)
         private set
+
+    /**
+     * 导入成功一次性事件（P5 防御加固）：替代「TocConfirmScreen 轮询 imported 布尔 +
+     * effect 体内先 reset 再导航」——reset() 把 key 改回 false 存在协程取消窗口，
+     * onDone 可能被取消导致断网导入后卡确认页（3/3 复现未触发，UNMEASURED，事件化消除竞态结构）。
+     * 事件顺序：先置 imported=true 再 trySend；消费方在事件循环内 reset+导航。
+     */
+    val importDone = kotlinx.coroutines.channels.Channel<Unit>(1) // 单缓冲：最新一次成功事件
     var isPdf by mutableStateOf(false)
         private set
 
@@ -157,6 +165,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 currentRegex = null
                 editedTitles.clear()
                 deleted = emptySet()
+                drainImportDone()
                 visionStatsNote = null
                 tocState = TocProbeState.Idle // 粘贴路径无探针；清掉上一本 PDF 可能残留的目录
                 probeSegments = null
@@ -228,6 +237,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 currentRegex = null
                 editedTitles.clear()
                 deleted = emptySet()
+                drainImportDone()
                 if (bookTitle.isBlank()) {
                     bookTitle = name.substringBeforeLast('.').ifBlank { "未命名" }
                 }
@@ -259,6 +269,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         parseNote = null
         chapters = emptyList()
         deleted = emptySet()
+        imported = false // 防御：残留 true 会让守卫误放行旧事件
+        drainImportDone()
         isPdf = false
         tocState = TocProbeState.Idle
         probeSegments = null
@@ -399,6 +411,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 currentRegex = regex?.takeIf { it.isNotBlank() }
                 editedTitles.clear() // 章节列表即将重建，旧 index 改名不可信
                 deleted = emptySet()
+                drainImportDone()
                 parse()
             } catch (e: Exception) {
                 error = "重新识别失败：${e.message ?: "未知错误"}"
@@ -481,6 +494,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     VisionScheduler.enqueue(getApplication(), newBookId)
                 }
                 imported = true
+                Log.i("P5Nav", "① confirm 成功 → imported=true + 事件入队")
+                if (!importDone.trySend(Unit).isSuccess) {
+                    Log.e("P5Nav", "importDone 事件投递失败（单缓冲满且被占）")
+                }
             } catch (e: Exception) {
                 error = "保存失败：${e.message ?: "未知错误"}"
             } finally {
@@ -489,8 +506,14 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 排空残留导入事件（防跨文件串导航：上一次事件未消费时重新解析不应触发旧导航） */
+    private fun drainImportDone() {
+        while (importDone.tryReceive().isSuccess) { /* 排空即弃 */ }
+    }
+
     /** 回书架后清空流程状态 */
     fun reset() {
+        drainImportDone()
         sourceText = null
         sourceType = DbValues.SRC_PASTE
         sourceUri = ""

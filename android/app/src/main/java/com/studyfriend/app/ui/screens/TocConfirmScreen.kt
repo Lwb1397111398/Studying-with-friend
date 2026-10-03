@@ -41,15 +41,20 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
     val busy = vm.busy
     val error = vm.error
     val parseNote = vm.parseNote
-    val imported = vm.imported
 
     var renameIndex by remember { mutableStateOf<Int?>(null) }
     var showRules by remember { mutableStateOf(false) }
     var deleteIndex by remember { mutableStateOf<Int?>(null) }
 
-    LaunchedEffect(imported) {
-        if (imported) {
+    // P5 防御加固：轮询 imported 布尔改为消费一次性事件。旧写法 effect 体内先 reset
+    // （把 key 改回 false）再 onDone，存在协程取消窗口致断网导入卡确认页；
+    // 事件循环内 reset+导航，首行守卫挡住残留事件误导航。
+    LaunchedEffect(Unit) {
+        for (event in vm.importDone) {
+            if (!vm.imported) continue
+            android.util.Log.i("P5Nav", "③ 事件循环：reset 前")
             vm.reset()
+            android.util.Log.i("P5Nav", "③ 事件循环：reset 完成，调 onDone")
             onDone()
         }
     }
