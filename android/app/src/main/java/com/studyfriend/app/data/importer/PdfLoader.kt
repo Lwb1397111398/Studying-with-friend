@@ -56,7 +56,7 @@ class PdfExtractResult(
             val sep = if (page.tocLike) "\n" else "\n\n"
             val tocish = styleAware &&
                 page.paras.count { RE_TOC_TAIL.containsMatchIn(it.text) } >= TOC_TAIL_MIN
-            page.paras.joinToString(sep) {
+            val body = page.paras.joinToString(sep) {
                 val marked = when {
                     it.footnote -> BookParser.FOOTNOTE_MARK
                     styleAware && !tocish && it.size >= threshold -> BookParser.TITLE_SIZE_MARK
@@ -64,6 +64,11 @@ class PdfExtractResult(
                 }
                 marked + it.text
             }
+            // P3b-2 pageNo 链路：有段落的页在正文前插独立行「〔页N〕」（N=1-based 页号，
+            // BookParser.PAGE_MARK_PREFIX 协议）。BookParser 预处理剥标并把 N 记为随后
+            // 段落的 pageNo（段首页码）。目录页也插（剥标发生在目录识别之前，不干扰
+            // isTocBlock）；空页不插（无段落可归属，标记孤块反而成噪声）。
+            if (body.isEmpty()) body else "${BookParser.PAGE_MARK_PREFIX}${page.pageNum}〕\n$body"
         }
     }
 

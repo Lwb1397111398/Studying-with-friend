@@ -235,4 +235,23 @@ class PdfLoaderTest {
         val leftovers = context.cacheDir.listFiles { f -> f.name.startsWith("import_") } ?: emptyArray()
         assertTrue("不应残留临时文件：${leftovers.toList()}", leftovers.isEmpty())
     }
+
+    @Test
+    fun p3b2_assembleText_emitsPageMarks_andParserAssignsPageNo() {
+        val bytes = pdfBytes(
+            listOf(
+                fillerLines("Chapter 1 First Steps", 4),
+                fillerLines("Chapter 2 Going Deeper", 4),
+            ),
+        )
+        val text = PdfLoader.extract(context, toUri(bytes)).assembleText()
+        // P3b-2 pageNo 链路：每页正文前独立行〔页N〕
+        assertTrue(text.startsWith("〔页1〕\n"))
+        assertTrue(text.contains("\n〔页2〕\n"))
+        val chapters = BookParser.parse(text)
+        assertEquals(2, chapters.size)
+        assertEquals("标记不残留在段落文本里", 0, chapters.sumOf { ch -> ch.paras.count { it.text.contains("〔页") } })
+        assertEquals(1, chapters[0].paras.first().pageNo)
+        assertEquals(2, chapters[1].paras.first().pageNo)
+    }
 }

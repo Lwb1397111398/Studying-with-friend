@@ -48,6 +48,12 @@ data class ChapterEntity(
     val readState: String, // NOT_READ / READING / DONE
     val gist: String?,
     val keyTermsJson: String?,
+    /** P3b-2 节挂接产物：1=章 2=节（TocEntry.level 口径）。本期加列不消费，P3b-3/P5 消费 */
+    val level: Int? = null,
+    /** P3b-2 节挂接产物：同级内的排序序号。本期加列不消费，P3b-3/P5 消费 */
+    val parentOrder: Int? = null,
+    /** P3b-2 目录校准标志（false=未校准/目录不可用）。本期加列不消费，语义定义权归 P5 */
+    val calibrated: Boolean = false,
 )
 
 /** 一个自然段；aiAction 是粗读规划的三态决定（NONE 仅占位） */
@@ -75,6 +81,8 @@ data class ParagraphEntity(
     val aiAction: String = "NONE", // NONE / SKIP / EXPLAIN / GROUP
     val groupId: Long? = null, // GROUP 时同组合并号
     val why: String? = null, // AI 决定理由，界面"为什么讲这段"
+    /** P3b-2：段首页码（1-based PDF 页，跨页并段取首页；TXT/粘贴=null）——目录驱动切章的锚定与段落重排依据 */
+    val pageNo: Int? = null,
 )
 
 /**

@@ -7,6 +7,7 @@ import com.studyfriend.app.data.importer.pdfpipeline.PLine
 import com.studyfriend.app.data.importer.pdfpipeline.Para
 import com.studyfriend.app.data.importer.pdfpipeline.ParagraphAssembler
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -575,8 +576,9 @@ class BookParserTest {
         // 单测 3：bodySize=10，size=11.5（=+1.5，二进制精确）→ 前缀；11.4 → 无前缀（>= 语义）
         val big = PLine("第一章 边界", x0 = 50f, x1 = 540f, y0 = 100f, size = 11.5f)
         val small = PLine("第一章 边界", x0 = 50f, x1 = 540f, y0 = 100f, size = 11.4f)
-        assertTrue(assembleAwareText(listOf(big)).startsWith("〔标题〕"))
-        assertTrue(!assembleAwareText(listOf(small)).startsWith("〔标题〕"))
+        // P3b-2 起文本以〔页N〕标记行开头，前缀断言针对标题行本身（第二行）
+        assertTrue(assembleAwareText(listOf(big)).lineSequence().drop(1).first().startsWith("〔标题〕"))
+        assertTrue(assembleAwareText(listOf(small)).lineSequence().none { it.startsWith("〔标题〕") })
     }
 
     @Test
@@ -592,7 +594,7 @@ class BookParserTest {
         val chapters = BookParser.parse("第一章 私法绪论\n\n正文内容。", styleAware = false)
         assertEquals(listOf("第一章 私法绪论"), chapters.map { it.title })
         val body = PLine("正文内容说完了。", x0 = 50f, x1 = 540f, y0 = 100f, size = 10f)
-        assertTrue(!assembleAwareText(listOf(body), styleAware = false).startsWith("〔标题〕"))
+        assertTrue(assembleAwareText(listOf(body), styleAware = false).lineSequence().none { it.startsWith("〔标题〕") })
     }
 
     @Test
@@ -757,5 +759,73 @@ class BookParserTest {
             ),
         )
         assertThrows(IllegalStateException::class.java) { BookParser.assertNoMarkLeak(bad) }
+    }
+
+    // ---- P3b-2 pageNo 链路（〔页N〕页边界标记） ----
+
+    @Test
+    fun p3b2_pageMarks_strippedAndPageNoAssigned() {
+        // assembleText 真实形态：标记独立行 + 与本页首段同块；同页后续段落无标记顺延继承
+        val text = listOf(
+            "〔页3〕", "第一章 总则", "",
+            "正文甲。", "",
+            "〔页7〕", "第二章 分则", "",
+            "正文乙一。", "",
+            "正文乙二。",
+        ).joinToString("\n")
+        val chapters = BookParser.parse(text)
+        assertEquals(2, chapters.size)
+        assertEquals("第一章 总则", chapters[0].title)
+        assertEquals("正文甲。", chapters[0].paras[0].text)
+        assertEquals(3, chapters[0].paras[0].pageNo)
+        assertEquals(7, chapters[1].paras[0].pageNo)
+        assertEquals("无标记块顺延继承最近页号", 7, chapters[1].paras[1].pageNo)
+    }
+
+    @Test
+    fun p3b2_noMarks_txtPath_pageNoNull() {
+        val chapters = BookParser.parse("第一章 甲\n\n正文。")
+        assertNull("TXT 路径无标记，pageNo 恒 null", chapters[0].paras[0].pageNo)
+    }
+
+    @Test
+    fun p3b2_pageMark_onTocPage_entriesCarryPageNo() {
+        // 目录页也插标记（剥标先于目录识别，不干扰 isTocBlock/锚点）
+        val text = "〔页2〕\n目录\n条目甲……1\n条目乙……5\n\n〔页5〕\n第一章 总则\n\n正文。"
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("目录", "第一章 总则"), chapters.map { it.title })
+        val toc = chapters[0].paras
+        assertTrue(toc.all { it.role == DbValues.ROLE_TOC })
+        assertEquals(2, toc[0].pageNo)
+        assertEquals("目录页条目重组仍按触发行分段", listOf("条目甲……1", "条目乙……5"), toc.map { it.text })
+        assertEquals(5, chapters[1].paras[0].pageNo)
+    }
+
+    @Test
+    fun p3b2_pageMark_beforeFootnote_footnoteStillDetected() {
+        // 回归护栏：页首段是脚注时，剥标后 firstLine 仍以〔脚注〕开头（不被标记挡住）
+        val text = "〔页4〕\n〔脚注〕参见前注。\n\n〔页5〕\n第一章 甲\n\n正文。"
+        val chapters = BookParser.parse(text)
+        val all = chapters.flatMap { it.paras }
+        assertEquals(DbValues.ROLE_FOOTNOTE, all[0].role)
+        assertEquals("参见前注。", all[0].text)
+        assertEquals(4, all[0].pageNo)
+    }
+
+    @Test
+    fun p3b2_pageMark_customRegex_stillMatches() {
+        // 目录重切（custom）路径：剥标先于 custom 匹配
+        val text = "〔页2〕\n第一单元 民法\n\n正文。"
+        val chapters = BookParser.parse(text, customTitleRegex = "^第一单元")
+        assertEquals("第一单元 民法", chapters[0].title)
+        assertEquals(2, chapters[0].paras[0].pageNo)
+    }
+
+    @Test
+    fun p3b2_pageMark_blindCut_parasCarryPageNo() {
+        val text = "〔页1〕\n段落甲。\n\n〔页9〕\n段落乙。"
+        val chapters = BookParser.parse(text)
+        assertEquals("全文", chapters[0].title)
+        assertEquals(listOf(1, 9), chapters[0].paras.map { it.pageNo })
     }
 }

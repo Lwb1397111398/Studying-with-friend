@@ -45,6 +45,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** 目录探针状态机（P3b-2 §3.5）：Idle=未开始/已清空，Running=视觉识别中，Done=过守卫的
+ *  目录条目全集（等价原非 null），Failed=无 tocLike/视觉未配置/识别失败/异常（等价原 null）。 */
+sealed class TocProbeState {
+    data object Idle : TocProbeState()
+    data object Running : TocProbeState()
+    data class Done(val entries: List<TocEntry>) : TocProbeState()
+    data object Failed : TocProbeState()
+}
+
 /** 导入流程状态：全文/解析结果活在这里，ImportScreen→TocConfirmScreen 共享，旋转不重读文件 */
 class ImportViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -94,12 +103,11 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     /** 视觉转写统计备注（OPT-E）；解析兜底提示不存在时在 parseNote 里展示 */
     private var visionStatsNote: String? = null
 
-    /** P3b-1 目录探针产物（过整体守卫的目录条目全集）；null=未识别/失败/跳过。
-     *  P3b-1 只产不消费（logcat 诊断），P3b-2 目录驱动切章起才消费。 */
-    var tocResult: List<TocEntry>? = null
-        private set
-
-    /**
+    /** 目录探针状态（P3b-2 §3.5）：裸 List<TocEntry>? → sealed class + var（calibrate 只
+     *  同步读一次当前值，Done 供消费、其余等价原 null；响应式能力用不上，P3b-3 若需
+     *  再升级 StateFlow）。 */
+    var tocState: TocProbeState = TocProbeState.Idle
+        private set    /**
      * 超单次上限的可疑页暂存（OPT-F）：页号 to 清洗后字数。导入不再拒绝，
      * 文字层先行；确认落库后写 vision_queue 交 WorkManager 后台逐页转写。
      */
@@ -292,31 +300,38 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun runTocProbe(result: PdfExtractResult, uri: Uri) {
         // 连续导入时先清掉上一本的目录：无 tocLike/视觉未配置/异常三条早退路径都不得残留旧数据
-        tocResult = null
+        tocState = TocProbeState.Idle
         try {
             val tocSegments = TocPageGrouper.group(result.pages.filter { it.tocLike }.map { it.pageNum })
             if (tocSegments.isEmpty()) {
                 Log.i("P3b", "no tocLike pages")
+                tocState = TocProbeState.Failed
                 return
             }
             Log.i("P3b", "toc probe segments=$tocSegments")
+            tocState = TocProbeState.Running
             PdfPageRenderer(getApplication(), uri).use { renderer ->
                 val parser = settings.buildTocVisionParser(
                     File(getApplication<Application>().cacheDir, "vision_cache/toc"),
                 ) { pageNo -> renderer.renderPageBase64(pageNo - 1) }
                 if (parser == null) {
                     Log.i("P3b", "vision unavailable, toc probe skipped")
+                    tocState = TocProbeState.Failed
                     return
                 }
-                tocResult = parser.parseSegments(tocSegments, VisionCache.uriHash(uri.toString()))
-                if (tocResult == null) {
+                val entries = parser.parseSegments(tocSegments, VisionCache.uriHash(uri.toString()))
+                if (entries == null) {
                     Log.i("P3b", "toc probe: no entries (failed, budget exhausted or cached failure)")
+                    tocState = TocProbeState.Failed
+                } else {
+                    tocState = TocProbeState.Done(entries)
                 }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w("P3b", "toc probe failed", e)
+            tocState = TocProbeState.Failed
         }
     }
 
@@ -387,6 +402,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     ) to ch.paras.map { p ->
                         ParagraphEntity(
                             chapterId = 0, idx = 0, text = p.text, role = p.role,
+                            pageNo = p.pageNo, // P3b-2 pageNo 链路终点（TXT 恒 null）
                         )
                     }
                 }

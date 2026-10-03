@@ -11,6 +11,7 @@ import com.studyfriend.app.data.importer.BookParser
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -77,5 +78,48 @@ class ImportRepositoryTest {
         } finally {
             db.close()
         }
+    }
+
+    @Test
+    fun p3b2_pageNoRoundTrip_viaImportBook() = runBlocking {
+        val db = db()
+        val repo = BookRepository(db)
+        try {
+            // assembleText 真实产物形态：〔页N〕标记 + 同块首段
+            val parsed = BookParser.parse(
+                "〔页3〕\n第一章 总则\n\n民事主体包括自然人。\n\n〔页9〕\n第二章 分则\n\n正文乙。",
+            )
+            val now = 1_000L
+            val book = BookEntity(
+                title = "页号书", author = "", sourceType = DbValues.SRC_PASTE,
+                filePath = "", status = DbValues.BOOK_IMPORTED, totalChapters = 0,
+                overviewJson = null, createdAt = now, updatedAt = now,
+            )
+            val chapters = parsed.map { ch ->
+                ChapterEntity(
+                    bookId = 0, idx = 0, title = ch.title,
+                    readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
+                ) to ch.paras.map { p ->
+                    ParagraphEntity(chapterId = 0, idx = 0, text = p.text, role = p.role, pageNo = p.pageNo)
+                }
+            }
+            val bookId = repo.importBook(book, chapters)
+            val savedChapters = db.chapterDao().byBook(bookId)
+            val paras0 = db.paragraphDao().byChapter(savedChapters[0].id)
+            val paras1 = db.paragraphDao().byChapter(savedChapters[1].id)
+            assertEquals(listOf(3), paras0.map { it.pageNo })
+            assertEquals(listOf(9), paras1.map { it.pageNo })
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun p3b2_calibrateExistingBook_skeletonReturnsNotImplemented() = runBlocking {
+        val repo = BookRepository(db())
+        // 方案 Z 预留骨架：P5 接口先行稳定，调用恒失败 NotImplementedError（不触碰库）
+        val r = repo.calibrateExistingBook(1L)
+        assertTrue(r.isFailure)
+        assertTrue(r.exceptionOrNull() is NotImplementedError)
     }
 }

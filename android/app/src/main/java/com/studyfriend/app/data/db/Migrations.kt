@@ -86,4 +86,16 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
-val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // P3b-2 数据前置：4 列全部为加列，默认值保证旧行/旧查询零改动（「加列无人消费」安全态）
+        // paragraphs.pageNo=段首页码（P2 pageNo 链路）；chapters.level/parentOrder=节挂接产物；
+        // chapters.calibrated=目录校准标志（本期不消费，语义定义权归 P5）
+        db.execSQL("ALTER TABLE `paragraphs` ADD COLUMN `pageNo` INTEGER")
+        db.execSQL("ALTER TABLE `chapters` ADD COLUMN `level` INTEGER")
+        db.execSQL("ALTER TABLE `chapters` ADD COLUMN `parentOrder` INTEGER")
+        db.execSQL("ALTER TABLE `chapters` ADD COLUMN `calibrated` INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)

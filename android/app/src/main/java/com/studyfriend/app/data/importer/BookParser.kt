@@ -2,8 +2,9 @@ package com.studyfriend.app.data.importer
 
 import com.studyfriend.app.data.db.DbValues
 
-/** 解析产物：段落带角色（BODY/FRONT/BACK/TOC），映射到 ParagraphEntity 在 VM 侧完成 */
-data class ParsedPara(val text: String, val role: String)
+/** 解析产物：段落带角色（BODY/FRONT/BACK/TOC），映射到 ParagraphEntity 在 VM 侧完成。
+ *  pageNo=段首页码（P3b-2 pageNo 链路；TXT/粘贴路径恒 null），目录驱动切章的锚定与段落重排依据 */
+data class ParsedPara(val text: String, val role: String, val pageNo: Int? = null)
 
 data class ParsedChapter(
     val title: String,
@@ -91,6 +92,17 @@ object BookParser {
     const val TITLE_SIZE_MARK = "〔标题〕"
 
     /**
+     * 页边界标记（P3b-2 pageNo 链路）：PdfExtractResult.assembleText 在每个有段落的
+     * PDF 页正文前插入独立行「〔页N〕」（N=1-based 页号，来源 PageOut.pageNum），本解析器
+     * 预处理时剥掉，并把该页号记为随后段落的 pageNo（段首页码；跨页并段文本挂在前一页
+     * 段落上，天然取首页）。TXT/粘贴路径不经过 assembleText，pageNo 一律 null。与
+     * 〔脚注〕/〔标题〕同属管线协议前缀族；正文独立成行命中「〔页N〕」的几率可忽略，
+     * 万一命中也只是被当作页边界剥掉，无内容损失。
+     */
+    const val PAGE_MARK_PREFIX = "〔页"
+    private val RE_PAGE_MARK = Regex("^〔页(\\d+)〕$")
+
+    /**
      * TOC 连续区（块下标闭区间）。锚点路径记录锚点行坐标（区内唯一可产标题命中的行）；
      * anchorLine = -1 表示无锚点、按密度兜底划区。
      */
@@ -114,14 +126,18 @@ object BookParser {
         val custom = customTitleRegex?.let { Regex(it) }
         val text = raw.replace("\r\n", "\n").replace('\r', '\n')
         val blocks0 = splitBlocks(text)
+        // P3b-2 预处理：剥〔页N〕页边界标记并记每块页号（须在 trim/正则/目录识别之前，
+        // 理由同〔标题〕前缀——标记行不得参与 isTocBlock 强行占比与标题候选判定）。
+        // 无标记的块顺延继承最近一次标记的页号（同页后续段落各自成块、无标记）。
+        val (blocksMarked, blockPages) = stripPageMarks(blocks0)
         // P3a 预处理：剥〔标题〕前缀并记 big 行。逐行检查（目录页 \n 连接多段成块，
         // 前缀可能在块中间行）；必须发生在 trim/正则/锚点匹配之前，否则「〔标题〕目 录」
         // 匹配不上锚点、目录区识别失效。styleHints 与 blocks 同构（每块每行一一对应）。
         var styleHints: List<BooleanArray>? = null
-        val blocks = if (!styleAware) blocks0 else {
-            val hints = List(blocks0.size) { BooleanArray(blocks0[it].size) }
+        val blocks = if (!styleAware) blocksMarked else {
+            val hints = List(blocksMarked.size) { BooleanArray(blocksMarked[it].size) }
             styleHints = hints
-            blocks0.mapIndexed { bi, lines ->
+            blocksMarked.mapIndexed { bi, lines ->
                 lines.mapIndexed { li, line ->
                     val s = line.trimStart()
                     if (s.startsWith(TITLE_SIZE_MARK)) {
@@ -140,7 +156,7 @@ object BookParser {
             if (custom != null) {
                 throw CustomRegexNoMatchException("识别规则没有命中任何标题行，请检查正则")
             }
-            return blindChapters(blocks).also(::assertNoMarkLeak)
+            return blindChapters(blocks, blockPages).also(::assertNoMarkLeak)
         }
 
         // 档位偏序 A≥B≥C：1 级 = 出现的最高档位；仅 C 时首个命中的 C 样式为 1 级
@@ -168,6 +184,7 @@ object BookParser {
         val pendingToc = mutableListOf<ParsedPara>()
 
         for ((bi, lines) in blocks.withIndex()) {
+            val blockPage = blockPages[bi]
             val hit = hitByBlock[bi]
             when {
                 hit != null -> {
@@ -180,18 +197,18 @@ object BookParser {
                     }
                     if (tocRegion != null && bi in tocRegion) {
                         // 锚点章（"目录"）：区内条目重组为 ROLE_TOC 段，锚点行本身已作为章标题
-                        curParas.addAll(tocEntries(lines, skipLine = hit.lineIdx))
+                        curParas.addAll(tocEntries(lines, hit.lineIdx, blockPage))
                     } else {
-                        for (para in parasOf(lines.filterIndexed { li, _ -> li != hit.lineIdx }, curRole)) {
+                        for (para in parasOf(lines.filterIndexed { li, _ -> li != hit.lineIdx }, curRole, blockPage)) {
                             curParas.add(para)
                         }
                     }
                 }
                 tocRegion != null && bi in tocRegion -> {
                     if (tocRegion.anchorLine >= 0) {
-                        curParas.addAll(tocEntries(lines))
+                        curParas.addAll(tocEntries(lines, -1, blockPage))
                     } else {
-                        pendingToc.addAll(tocEntries(lines))
+                        pendingToc.addAll(tocEntries(lines, -1, blockPage))
                     }
                 }
                 else -> {
@@ -199,14 +216,14 @@ object BookParser {
                     val firstLine = lines.firstOrNull()?.trim().orEmpty()
                     if (firstLine.startsWith(FOOTNOTE_MARK)) {
                         curParas.add(
-                            ParsedPara(firstLine.removePrefix(FOOTNOTE_MARK), DbValues.ROLE_FOOTNOTE),
+                            ParsedPara(firstLine.removePrefix(FOOTNOTE_MARK), DbValues.ROLE_FOOTNOTE, blockPage),
                         )
                     } else if (isTocBlock(lines)) {
                         // 目录区外的散条目块（目录尾页没盖进 tocRegion，E2E 实证漏进
                         // 第一章开头）：仍按条目重组标 ROLE_TOC，不混进正文
-                        curParas.addAll(tocEntries(lines))
+                        curParas.addAll(tocEntries(lines, -1, blockPage))
                     } else {
-                        for (para in parasOf(lines, curRole)) curParas.add(para)
+                        for (para in parasOf(lines, curRole, blockPage)) curParas.add(para)
                     }
                 }
             }
@@ -229,11 +246,41 @@ object BookParser {
     internal fun assertNoMarkLeak(chapters: List<ParsedChapter>) {
         for (c in chapters) {
             for (p in c.paras) {
-                if (p.text.lineSequence().any { it.trimStart().startsWith(TITLE_SIZE_MARK) }) {
-                    throw IllegalStateException("P3a 标题前缀泄漏: ${p.text.take(20)}")
+                if (p.text.lineSequence().any {
+                        it.trimStart().startsWith(TITLE_SIZE_MARK) || RE_PAGE_MARK.containsMatchIn(it.trim())
+                    }
+                ) {
+                    throw IllegalStateException("P3a/P3b 标记泄漏: ${p.text.take(20)}")
                 }
             }
         }
+    }
+
+    /**
+     * 剥〔页N〕页边界标记（P3b-2 pageNo 链路）：返回剥标后的块列表与每块页号。
+     * 块页号=块内首个标记的页号；块内无标记则顺延继承最近一次标记（同页后续段落
+     * 各自成块、无标记）。只剩标记的块（空页）丢弃；任何块产生前无标记（TXT 开头）
+     * 页号为 null。标记永远在各页正文首行之前（assembleText 保证），块中标记即页界。
+     */
+    private fun stripPageMarks(blocks: List<List<String>>): Pair<List<List<String>>, List<Int?>> {
+        val outBlocks = mutableListOf<List<String>>()
+        val outPages = mutableListOf<Int?>()
+        var last: Int? = null
+        for (block in blocks) {
+            var page: Int? = null
+            val lines = mutableListOf<String>()
+            for (line in block) {
+                val m = RE_PAGE_MARK.matchEntire(line.trim())
+                if (m == null) lines.add(line) else {
+                    if (page == null) page = m.groupValues[1].toInt()
+                    last = page
+                }
+            }
+            if (lines.isEmpty()) continue // 原生空块不会出现（splitBlocks 已滤），此处防标记孤块
+            outBlocks.add(lines)
+            outPages.add(page ?: last)
+        }
+        return outBlocks to outPages
     }
 
     // ---- TOC 区域识别（OPT-C C3） ----
@@ -286,13 +333,13 @@ object BookParser {
      * 区内条目重组：累积行直到点线/孤页码触发行，触发行并入当前累积后成段
      * （跨行条目如"第一节\n请求权……107"并回一段），一律 ROLE_TOC。
      */
-    private fun tocEntries(lines: List<String>, skipLine: Int = -1): List<ParsedPara> {
+    private fun tocEntries(lines: List<String>, skipLine: Int = -1, pageNo: Int? = null): List<ParsedPara> {
         val out = mutableListOf<ParsedPara>()
         val acc = mutableListOf<String>()
         fun flushAcc() {
             if (acc.isNotEmpty()) {
                 val merged = softMerge(acc)
-                if (merged.isNotBlank()) out.add(ParsedPara(merged, DbValues.ROLE_TOC))
+                if (merged.isNotBlank()) out.add(ParsedPara(merged, DbValues.ROLE_TOC, pageNo))
                 acc.clear()
             }
         }
@@ -421,9 +468,9 @@ object BookParser {
     }
 
     /** 块内行软合并成段（标题判定已先行完成，此处不再产生标题） */
-    private fun parasOf(lines: List<String>, role: String): List<ParsedPara> {
+    private fun parasOf(lines: List<String>, role: String, pageNo: Int? = null): List<ParsedPara> {
         val merged = softMerge(lines)
-        return if (merged.isBlank()) emptyList() else listOf(ParsedPara(merged, role))
+        return if (merged.isBlank()) emptyList() else listOf(ParsedPara(merged, role, pageNo))
     }
 
     /** 中文直接拼接；两侧都非 CJK 时补空格（英文单词边界） */
@@ -446,21 +493,26 @@ object BookParser {
 
     // ---- 兜底：无标题整书 / 超长盲切 ----
 
-    private fun blindChapters(blocks: List<List<String>>): List<ParsedChapter> {
-        val paras = blocks.map { softMerge(it) }.filter { it.isNotBlank() }
-        val total = paras.sumOf { it.length }
+    private fun blindChapters(blocks: List<List<String>>, blockPages: List<Int?>): List<ParsedChapter> {
+        // 与页号同步过滤（防 filter 后索引错位）：splitBlocks 产出的块必非空，过滤只是防御
+        val paras = blocks.mapIndexed { i, b -> softMerge(b) to blockPages[i] }.filter { it.first.isNotBlank() }
+        val total = paras.sumOf { it.first.length }
         if (total <= BLIND_CUT_THRESHOLD) {
             return listOf(
-                ParsedChapter(WHOLE_BOOK_TITLE, paras.map { ParsedPara(it, DbValues.ROLE_BODY) }, blindCut = true),
+                ParsedChapter(
+                    WHOLE_BOOK_TITLE,
+                    paras.map { (text, page) -> ParsedPara(text, DbValues.ROLE_BODY, page) },
+                    blindCut = true,
+                ),
             )
         }
         val chapters = mutableListOf<ParsedChapter>()
         var acc = mutableListOf<ParsedPara>()
         var accLen = 0
         var n = 0
-        for (p in paras) {
-            acc.add(ParsedPara(p, DbValues.ROLE_BODY))
-            accLen += p.length
+        for ((text, page) in paras) {
+            acc.add(ParsedPara(text, DbValues.ROLE_BODY, page))
+            accLen += text.length
             if (accLen >= BLIND_CUT_CHAPTER_CHARS) {
                 n++
                 chapters.add(ParsedChapter("第 $n 部分", acc.toList(), blindCut = true))

@@ -86,4 +86,48 @@ class MigrationTest {
             }
         }
     }
+
+    @Test
+    fun migrate3To4_p3b2ColumnsUsable() {
+        val dbName = "migration-test-34.db"
+        helper.createDatabase(dbName, 3).use { v3 ->
+            v3.execSQL(
+                "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                    "overviewJson, createdAt, updatedAt) " +
+                    "VALUES ('民法总则', '', 'PDF', 'uri://x', 'READY', 1, NULL, 1, 1)",
+            )
+            v3.execSQL(
+                "INSERT INTO chapters (bookId, idx, title, readState, gist, keyTermsJson) " +
+                    "VALUES (1, 0, '第一章', 'NOT_READ', NULL, NULL)",
+            )
+            v3.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (1, 0, '段落', 'BODY', 'NONE')")
+        }
+        // 跑 1→4 全链迁移 + schema 校验（4 列加列与 Entity 对齐，失败即抛）
+        helper.runMigrationsAndValidate(dbName, 4, true, *MIGRATIONS).use { v4 ->
+            // 旧行新列取默认值：pageNo/level/parentOrder=NULL，calibrated=0
+            v4.query("SELECT pageNo FROM paragraphs").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertTrue("旧段落 pageNo 应为 NULL", cur.isNull(0))
+            }
+            v4.query("SELECT level, parentOrder, calibrated FROM chapters").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertTrue(cur.isNull(0))
+                assertTrue(cur.isNull(1))
+                assertEquals("旧章 calibrated 默认 0", 0, cur.getInt(2))
+            }
+            // 新列可写读回
+            v4.execSQL("UPDATE paragraphs SET pageNo = 42")
+            v4.execSQL("UPDATE chapters SET level = 1, parentOrder = 0, calibrated = 1")
+            v4.query("SELECT pageNo FROM paragraphs").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(42, cur.getInt(0))
+            }
+            v4.query("SELECT level, parentOrder, calibrated FROM chapters").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(1, cur.getInt(0))
+                assertEquals(0, cur.getInt(1))
+                assertEquals(1, cur.getInt(2))
+            }
+        }
+    }
 }
