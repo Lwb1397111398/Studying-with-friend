@@ -279,5 +279,7 @@ class PdfLoaderTest {
             assertTrue(e.message!!.contains("取消"))
         }
         assertTempFilesCleaned()
+        // 取消即无 staging 残留（r12-QC5-P2：阶段 2 break 路径不清，由 throw 前补清兜底）
+        assertFalse("staging 目录应已清理", File(context.cacheDir, "figures_staging").exists())
     }
 }

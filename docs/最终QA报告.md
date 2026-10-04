@@ -96,6 +96,6 @@
 | P3b-1 目录视觉探针 | v13.1 = 94（13 轮） | 见 .e2e/review_p3b1_code.py | 两本真书三门全 PASS |
 | P3b-2 目录驱动切章 | — | 84→90 | 八条 E2E 判据全 PASS |
 | P5 章节树 UI | 四轮 84→87→87→92 | 随 P3b-2 管线 | E2E J1-J9 全过 |
-| P4 示意图保留 | v1.11 = 91（11 轮） | 三轮 81→85→见下 | 六跑 630 页真书 E2E |
+| P4 示意图保留 | v1.11 = 91（11 轮） | 五轮 81→85→84→87→**93** | 六跑 630 页真书 E2E，588 用例全绿（质量闭环见下） |
 
-P4 补充（2026-10-04）：代码质检第三轮前发现 **P0 级运行时缺陷**——630 页真书导入在 192MB Java heap 上限贴线飞行，第五跑真机 OOM 崩溃（crash 缓冲区 `OutOfMemoryError thrown while trying to throw an exception` 铁证）。修复 `android:largeHeap="true"`（192→576MB，r12-P0-4），六跑全程无崩，meminfo 曲线 MEASURED（峰值 PSS 1252MB 瞬时 / 稳态 118MB）；代价：大书文本提取 ~170s→~9.5 分钟（大堆 GC 变懒），换导入稳定性。详见 docs/plans/P4-示意图保留计划案.md、.e2e/review_p4_code_reply.txt。
+P4 补充（2026-10-04）：代码质检第三轮前发现 **P0 级运行时缺陷**——630 页真书导入在 192MB Java heap 上限贴线飞行，第五跑真机 OOM 崩溃（crash 缓冲区 `OutOfMemoryError thrown while trying to throw an exception` 铁证）。修复 `android:largeHeap="true"`（192→576MB，r12-P0-4），六跑全程无崩，meminfo 曲线 MEASURED（峰值 PSS 1252MB 瞬时 / 稳态 118MB）；代价：大书文本提取 ~170s→~9.5 分钟（大堆 GC 变懒），换导入稳定性。质检五轮逐轮修复（QC1 7 项 / QC2 9 条 / QC3 P0×1+P1×3+P2×4 / QC4 含 insertFigures 故障注入 3 场景与两处实证反驳 / 终轮 93 达标后顺手落地评审两个 P2：byChapterFlow `id ASC` 定序、取消路径 staging 补清），单测 584→589 全绿。详见 docs/plans/P4-示意图保留计划案.md、.e2e/review_p4_code_reply.txt。

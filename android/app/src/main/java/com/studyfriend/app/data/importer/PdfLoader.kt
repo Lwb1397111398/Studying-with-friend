@@ -266,7 +266,12 @@ object PdfLoader {
                     // 图片阶段取消转导入取消信号（r12-QC4-P1）：放在图片 try-catch 之后——
                     // extractor 取消=空结果+清 staging 不抛异常；若放 try 内会被
                     // catch(Exception) 吞掉转 fatalError，取消被伪装成图片失败
-                    if (isCancelled()) throw CancelledImportException()
+                    if (isCancelled()) {
+                        // 阶段 2 取消路径 extractor 以 break 返回部分结果、staging 不清
+                        // （r12-QC5-P2）：throw 前统一补清，取消即无残留，不依赖下次导入开头兜底
+                        File(context.cacheDir, FIGURES_STAGING_DIR).deleteRecursively()
+                        throw CancelledImportException()
+                    }
                     val landscapeRatio = if (dims.isEmpty()) 0f
                     else dims.count { it.second > it.first }.toFloat() / dims.size
                     PdfExtractResult(

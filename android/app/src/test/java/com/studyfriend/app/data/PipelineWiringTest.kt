@@ -9,6 +9,7 @@ import com.studyfriend.app.data.db.StudyDatabase
 import com.studyfriend.app.data.importer.pdfpipeline.ExtractedFigure
 import java.io.File
 import java.security.MessageDigest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -289,6 +290,24 @@ class PipelineWiringTest {
         )
         assertEquals(setOf(5, 9), db.figureDao().pageNosByBook(bookId).toSet())
         assertTrue(db.figureDao().pageNosByBook(bookId + 1).isEmpty())
+    }
+
+    @Test
+    fun byChapterFlow_tiesOrderByIdAsc() = runBlocking {
+        // r12-QC5：同页同锚同 y 并列图以 id ASC 末位定序（查询级确定性，不依赖渲染端兜底）
+        fun tieFigure(seqNo: Int) = ExtractedFigure(
+            pageNo = 3, ordAfterPara = 0, bboxY0 = 100f, seqNo = seqNo,
+            widthPx = 100, heightPx = 80, format = "png",
+            stagingFile = File(stagingDir, "p3_f$seqNo.png").apply { writeBytes("t$seqNo".toByteArray()) },
+            finalName = "p3_f$seqNo.png", md5 = md5Hex("t$seqNo".toByteArray()),
+        )
+        val bookId = repo.importBook(
+            book(), chaptersWithFigures(),
+            figures = listOf(tieFigure(1), tieFigure(2)),
+        )
+        val ties = db.figureDao().byChapterFlow(bookId).first().filter { it.pageNo == 3 }
+        assertEquals(2, ties.size)
+        assertEquals(listOf(1, 2), ties.map { it.seqNo }) // 先插 id 小在前
     }
 
     // ---- r12-QC4-P2-4：insertFigures 文件系统故障注入（单图挪移失败剔除，J2 口径）----

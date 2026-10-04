@@ -348,10 +348,10 @@ interface FigureDao {
     @Insert
     suspend fun insertAll(figures: List<FigureEntity>)
 
-    /** 阅读页混排：页号 → 页内锚 → 同锚 y 序；同页同锚同 y 时渲染端再以 id 兜底 */
+    /** 阅读页混排：页号 → 页内锚 → 同锚 y 序；同页同锚同 y 以 id ASC 末位定序（查询级确定性，r12-QC5） */
     @Query(
         "SELECT * FROM figures WHERE chapterId = :chapterId " +
-            "ORDER BY pageNo ASC, ordAfterPara ASC, bboxY0 ASC",
+            "ORDER BY pageNo ASC, ordAfterPara ASC, bboxY0 ASC, id ASC",
     )
     fun byChapterFlow(chapterId: Long): Flow<List<FigureEntity>>
 
