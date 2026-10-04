@@ -19,3 +19,6 @@ replay_pid*.log
 
 # E2E 测试现场（截图/数据库快照，含设备数据，不入库）
 .e2e/
+
+# CodeGraph 本地索引缓存
+.codegraph/
