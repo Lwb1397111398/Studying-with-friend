@@ -110,6 +110,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // PDF 文本提取（pdfbox 2.0 的 Android 移植）
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    // JBIG2 等解码缺口不走 ImageIO 插件（Android 无 javax.imageio，装了也轮不到）——
+    // 统一由系统 PdfRenderer 兜底渲染（PdfFigureExtractor.renderAndSave，J2 实测救回 4 张）
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")

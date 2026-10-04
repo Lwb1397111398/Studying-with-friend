@@ -1,13 +1,20 @@
 package com.studyfriend.app.data.importer
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import kotlin.math.ceil
 import com.studyfriend.app.data.importer.pdfpipeline.DocStats
 import com.studyfriend.app.data.importer.pdfpipeline.ExtractedFigure
 import com.studyfriend.app.data.importer.pdfpipeline.FigureExtractorStats
 import com.studyfriend.app.data.importer.pdfpipeline.PageOut
 import com.studyfriend.app.data.importer.pdfpipeline.PdfCleaner
 import com.studyfriend.app.data.importer.pdfpipeline.PdfFigureExtractor
+import com.studyfriend.app.data.importer.pdfpipeline.PageRenderer
+import android.graphics.Rect
 import com.studyfriend.app.data.importer.pdfpipeline.PLine
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
@@ -139,6 +146,37 @@ object PdfLoader {
         return leftN >= xs.size * 0.15f && rightN >= xs.size * 0.15f
     }
 
+    /**
+     * 系统 PdfRenderer（pdfium 内核）整页渲染兜底（r12-P1-1）：tom-roush 移植版
+     * FilterFactory 未注册 JBIG2Filter，JBIG2 等编码的幸存图 pdfbox 解不出——pdfium
+     * 支持全部 PDF 滤波器，整页渲染后由提取器按显示 bbox 裁剪。每次调用独立开
+     * renderer（fd 与 pdfbox 的互不干扰），用完即关；异常一律转 null 由提取器记失败。
+     * [scale] 为 pt→px 比例（提取器按目标宽与像素预算算定）；白底填充防透明区域成黑底。
+     */
+    private fun pdfPageRenderer(context: Context, uri: Uri): PageRenderer =
+        PageRenderer { pageNo, _, scale ->
+            try {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    PdfRenderer(pfd).use { renderer ->
+                        val page = renderer.openPage(
+                            (pageNo - 1).coerceIn(0, renderer.pageCount - 1),
+                        )
+                        val w = ceil(page.width * scale).toInt().coerceAtLeast(1)
+                        val h = ceil(page.height * scale).toInt().coerceAtLeast(1)
+                        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        bmp.eraseColor(Color.WHITE)
+                        val m = Matrix()
+                        m.setScale(scale, scale)
+                        page.render(bmp, null as Rect?, m, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                        bmp
+                    }
+                }
+            } catch (e: Exception) {
+                println("[PdfLoader] pdf renderer fallback failed: ${e.message}")
+                null
+            }
+        }
+
     fun extract(
         context: Context,
         uri: Uri,
@@ -199,7 +237,7 @@ object PdfLoader {
                         // 进度契约（0..pages 各一次）归文字提取所有：图片阶段在全文之后，
                         // 复用页号回调会出现重复末值——保持 onProgress 缺省（no-op）
                         val r = PdfFigureExtractor(File(context.cacheDir, FIGURES_STAGING_DIR))
-                            .extract(doc, pageParaY0s)
+                            .extract(doc, pageParaY0s, pageRenderer = pdfPageRenderer(context, uri))
                         figures = r.figures
                         figureStats = r.stats
                     } catch (e: Exception) {

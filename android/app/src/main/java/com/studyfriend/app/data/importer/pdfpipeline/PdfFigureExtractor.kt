@@ -19,6 +19,7 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * P4 示意图保留——两阶段图片提取器（阶段 1 元数据零解码过滤 / 阶段 2 仅幸存者解码落盘）。
@@ -63,11 +64,13 @@ class PdfFigureExtractor(private val stagingDir: File) {
      * [pageParaY0s]：页号(1-based) → 该页全量段落（含 FRONT/TOC/FOOTNOTE）的段首行
      * y0 列表（crossPageMerge **之后**取，r9-P1-1，与 ReadScreen 渲染口径同源）。
      * [onProgress]：阶段 1 每 50 页回调（当前页号, 总页数）。
+     * [pageRenderer]：解码失败兜底（r12-P1-1，null=不兜底，行为同旧版）。
      */
     fun extract(
         doc: PDDocument,
         pageParaY0s: Map<Int, List<Float>>,
         onProgress: (pageNo: Int, total: Int) -> Unit = { _, _ -> },
+        pageRenderer: PageRenderer? = null,
     ): FigureExtractResult {
         val stats = FigureExtractorStats()
         // 加密权限检查（v1.8，r8-P1-3）：限制提取的书直接跳过，图零提取不逐张撞权限
@@ -117,10 +120,19 @@ class PdfFigureExtractor(private val stagingDir: File) {
         var seqNo = 0
         for (meta in anchored) {
             seqNo++
-            val figure = decodeAndSave(meta, seqNo, stats) ?: continue
-            figures.add(figure)
-            stats.kept++
-            stats.keptPages.add(meta.pageNo)
+            // 解码失败 → 系统 PdfRenderer 整页渲染兜底（JBIG2 等移植版解不了的编码）
+            val err0 = stats.errored
+            val ov0 = stats.erroredOversize
+            val figure = decodeAndSave(meta, seqNo, stats)
+                ?: pageRenderer?.let { renderAndSave(it, meta, seqNo, stats) }
+            if (figure != null) {
+                // 兜底救回即最终成功：撤销本次 decode 阶段的失败记账（errored 含 encode 失败）
+                if (stats.errored > err0) stats.errored = err0
+                if (stats.erroredOversize > ov0) stats.erroredOversize = ov0
+                figures.add(figure)
+                stats.kept++
+                stats.keptPages.add(meta.pageNo)
+            }
         }
         return FigureExtractResult(figures, stats)
     }
@@ -187,9 +199,61 @@ class PdfFigureExtractor(private val stagingDir: File) {
             stats.erroredOversize++
             return null
         }
-        var bmp = decodeWithFallback(meta.image, stats) ?: return null
+        val bmp = decodeWithFallback(meta.image, stats) ?: return null
+        val upright = rotateUpright(bmp, meta, stats)
+        return finalizeFigure(upright, meta, seqNo, stats)
+    }
+
+    /**
+     * 渲染兜底（r12-P1-1）：系统 pdfium 整页渲染 → 显示 bbox 裁剪 → 复用编码落盘。
+     * pdfium 输出即折算显示空间（顶左原点、CTM 已摆好），**跳过 rotateUpright**
+     * （再转正会双重旋转）；渲染比例按显示 bbox 宽达 [PdfFigureThresholds.TARGET_WIDTH_MIN]，
+     * 整页像素预算压在 [PdfFigureThresholds.MAX_SOURCE_PIXELS] 内。失败返回 null
+     * （decode 阶段的失败记账保持，由调用方决定是否撤销）。
+     */
+    private fun renderAndSave(
+        render: PageRenderer,
+        meta: FigureImageMeta,
+        seqNo: Int,
+        stats: FigureExtractorStats,
+    ): ExtractedFigure? {
+        val (pw, ph) = meta.dispPage
+        if (pw <= 0f || ph <= 0f || meta.disp.w <= 0f || meta.disp.h <= 0f) return null
+        var scale = (PdfFigureThresholds.TARGET_WIDTH_MIN / meta.disp.w).coerceAtLeast(0.5f)
+        val maxScale = sqrt(
+            PdfFigureThresholds.MAX_SOURCE_PIXELS.toDouble() / (pw.toDouble() * ph),
+        ).toFloat()
+        if (scale > maxScale) scale = maxScale
+        val pageBmp = try {
+            render.renderPage(meta.pageNo, meta.disp, scale)
+        } catch (e: Exception) {
+            Log.w(TAG, "render fallback p${meta.pageNo} failed", e)
+            null
+        } ?: return null
+        // 裁剪显示 bbox 区域（px = pt × scale，clamp 页内防边界舍入越界）
+        val left = (meta.disp.x * scale).roundToInt().coerceIn(0, pageBmp.width - 1)
+        val top = (meta.disp.y * scale).roundToInt().coerceIn(0, pageBmp.height - 1)
+        val w = (meta.disp.w * scale).roundToInt().coerceAtMost(pageBmp.width - left)
+        val h = (meta.disp.h * scale).roundToInt().coerceAtMost(pageBmp.height - top)
+        if (w <= 0 || h <= 0) {
+            pageBmp.recycle()
+            return null
+        }
+        val cropped = Bitmap.createBitmap(pageBmp, left, top, w, h)
+        if (cropped != pageBmp) pageBmp.recycle()
+        stats.fallbackRendered++
+        return finalizeFigure(cropped, meta, seqNo, stats)
+    }
+
+    /** 降采样（>TARGET_WIDTH_MIN 时）→ 编码 → staging 落盘 → md5 → ExtractedFigure */
+    private fun finalizeFigure(
+        bmp0: Bitmap,
+        meta: FigureImageMeta,
+        seqNo: Int,
+        stats: FigureExtractorStats,
+    ): ExtractedFigure? {
+        var bmp = bmp0
         try {
-            bmp = rotateUpright(bmp, meta, stats)
             if (bmp.width > PdfFigureThresholds.TARGET_WIDTH_MIN) {
                 val newH = (bmp.height.toFloat() * PdfFigureThresholds.TARGET_WIDTH_MIN / bmp.width).roundToInt()
                 val scaled = Bitmap.createScaledBitmap(
@@ -508,4 +572,22 @@ class FigureExtractorStats {
 
     /** 有幸存图的页号集合（parseNote「示意图位于 p…」与低质量分支提示共用） */
     val keptPages = mutableSetOf<Int>()
+
+    /** 系统 PdfRenderer 兜底救回的张数（r12-P1-1：pdfbox(Android) 缺 JBIG2 filter 等解码失败） */
+    var fallbackRendered = 0
+}
+
+/**
+ * 系统 PdfRenderer 整页渲染兜底接口（r12-P1-1）：pdfbox(Android 移植) 的 FilterFactory
+ * 未注册 JBIG2Filter（jar 反编译核实），JBIG2 编码幸存图全部解码失败——tom-roush 无
+ * 现成开关（README 仅 JPX 有可选库），标准 jbig2-imageio 又依赖 Android 不存在的
+ * javax.imageio。故对解码失败的幸存图改用系统 pdfium（支持全部 PDF 滤波器）整页渲染后
+ * 按显示 bbox 裁剪。
+ *
+ * [pageNo] 1-based；[disp] 折算显示空间 bbox（顶左原点，/Rotate 已折算）；
+ * [scale] 渲染比例（pt→px），由提取器按「目标宽 + 整页像素预算」算好传入。
+ * 返回整页位图（宽 = ceil(页宽×scale)），实现方负责异常转 null。
+ */
+fun interface PageRenderer {
+    fun renderPage(pageNo: Int, disp: DispBbox, scale: Float): Bitmap?
 }

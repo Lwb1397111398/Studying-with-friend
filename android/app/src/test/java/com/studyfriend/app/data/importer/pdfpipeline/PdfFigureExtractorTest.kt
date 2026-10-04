@@ -217,4 +217,56 @@ class PdfFigureExtractorTest {
         assertEquals(0, FigureCoordMath.anchorFigure(790f, pages[1].paras.map { it.y0 }))
     }
 
+    // ---- r12-P1-1：JBIG2 解码失败的系统 PdfRenderer 兜底 ----
+
+    /**
+     * 兜底救回：jbig2_fixture 的图 Filter=/JBIG2Decode（tom-roush FilterFactory 无此
+     * filter → decode 必失败），带 PageRenderer 时渲染位图接管——落库、decode 失败记账
+     * 撤销（errored=0）、fallbackRendered 计数。渲染 mock 按真实页尺寸×scale 出「整页」，
+     * 与真实现（PdfLoader.pdfPageRenderer）同口径，保证裁剪区不越界。
+     */
+    @Test
+    fun fallbackRenderer_rescuesUndecodableFigure() {
+        loadFixture("jbig2_fixture.pdf").use { doc ->
+            var calls = 0
+            val result = PdfFigureExtractor(staging).extract(
+                doc, buildParaY0s(doc),
+                pageRenderer = { pageNo, disp, scale ->
+                    calls++
+                    assertEquals("pageNo 1-based", 1, pageNo)
+                    assertTrue("bbox 为 fixture 图", disp.w > 150f && disp.h > 80f)
+                    assertTrue("scale 按目标宽（>1）", scale > 1f)
+                    android.graphics.Bitmap.createBitmap(
+                        kotlin.math.ceil(595 * scale).toInt(),
+                        kotlin.math.ceil(842 * scale).toInt(),
+                        android.graphics.Bitmap.Config.ARGB_8888,
+                    )
+                },
+            )
+            assertEquals("渲染兜底调用 1 次", 1, calls)
+            assertEquals("兜底救回落库", 1, result.figures.size)
+            assertEquals("decode 失败记账被撤销", 0, result.stats.errored)
+            assertEquals("fallbackRendered 计数", 1, result.stats.fallbackRendered)
+            assertEquals("keptPages", setOf(1), result.stats.keptPages.toSet())
+            val f = result.figures.first()
+            assertTrue("staging 落盘 ${f.finalName}", f.stagingFile.exists())
+            assertEquals("md5 对账", f.md5, md5Of(f.stagingFile.readBytes()))
+            assertTrue("pageNo/锚定字段来自 meta", f.pageNo == 1 && f.widthPx > 0)
+        }
+    }
+
+    /** 兜底失败（renderer 返回 null/抛异常）：保持 decode 失败记账（errored=1），零落库 */
+    @Test
+    fun fallbackRenderer_nullKeepsErroredAccounting() {
+        loadFixture("jbig2_fixture.pdf").use { doc ->
+            val result = PdfFigureExtractor(staging).extract(
+                doc, buildParaY0s(doc), pageRenderer = { _, _, _ -> null },
+            )
+            assertEquals("零落库", 0, result.figures.size)
+            assertEquals("保持 decode 失败记账", 1, result.stats.errored)
+            assertEquals("不计 fallbackRendered", 0, result.stats.fallbackRendered)
+            assertTrue("keptPages 空", result.stats.keptPages.isEmpty())
+        }
+    }
+
 }
