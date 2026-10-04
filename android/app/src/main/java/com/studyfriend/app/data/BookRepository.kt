@@ -74,9 +74,7 @@ class BookRepository(
     ) {
         val fd = filesDir ?: throw IllegalStateException("filesDir 未注入（figures 落库依赖）")
         val dir = File(fd, "figures/$bookId").apply { mkdirs() }
-        val startPages = chapterStartPages ?: chapters.map { (_, paras) ->
-            paras.firstNotNullOfOrNull { it.pageNo } ?: 0
-        }
+        val (anchoredIds, startPages) = anchoredChapters(chapterIds, chapters, chapterStartPages)
         val now = System.currentTimeMillis()
         val seen = HashSet<Triple<String, Int, Int>>()
         val entities = figures.mapNotNull { f ->
@@ -93,14 +91,14 @@ class BookRepository(
             }
             if (!moved) return@mapNotNull null
             val chIdx = FigureCoordMath.assignChapter(f.pageNo, startPages)
-            if (chIdx < 0 || chIdx >= chapterIds.size) {
+            if (chIdx < 0 || chIdx >= anchoredIds.size) {
                 println("[BookRepository] figure chapter assign failed p${f.pageNo}")
                 return@mapNotNull null
             }
             if (!seen.add(Triple(f.md5, f.pageNo, f.ordAfterPara))) return@mapNotNull null
             FigureEntity(
                 bookId = bookId,
-                chapterId = chapterIds[chIdx],
+                chapterId = anchoredIds[chIdx],
                 pageNo = f.pageNo,
                 ordAfterPara = f.ordAfterPara,
                 bboxY0 = f.bboxY0,
@@ -151,21 +149,38 @@ class BookRepository(
             )
         }
         if (figures.isNotEmpty()) {
-            val startPages = chapters.map { (_, paras) ->
-                paras.firstNotNullOfOrNull { it.pageNo } ?: 0
-            }
+            val (anchoredIds, startPages) = anchoredChapters(chapterIds, chapters, null)
             db.figureDao().insertAll(
                 figures.mapNotNull { f ->
                     val chIdx = FigureCoordMath.assignChapter(f.pageNo, startPages)
-                    if (chIdx < 0 || chIdx >= chapterIds.size) {
+                    if (chIdx < 0 || chIdx >= anchoredIds.size) {
                         println("[BookRepository] figure reassign skipped p${f.pageNo}")
                         return@mapNotNull null
                     }
-                    f.copy(id = 0, chapterId = chapterIds[chIdx])
+                    f.copy(id = 0, chapterId = anchoredIds[chIdx])
                 },
             )
         }
         db.bookDao().update(book.copy(totalChapters = chapters.size))
+    }
+
+    /**
+     * figures 归属候选（J3 走查修复）：仅含**段落非空**的章。目录校准把 level=2 子节行
+     * 混入 chapters 列表但其 paras 恒空（段落全挂 level=1 父章）——若候选含子节，
+     * 空段章 startPage 兜底 0 会抢走区间归属，且 ReadScreen byChapterFlow(父章) 永远
+     * 查不到挂子节的图（阅读页整书丢图）。返回与候选平行对齐的 (chapterIds, startPages)：
+     * 校准路径 startPages 取 chapterStartPages 同下标，现状路径取候选章首段 pageNo。
+     */
+    private fun anchoredChapters(
+        chapterIds: List<Long>,
+        chapters: List<Pair<ChapterEntity, List<ParagraphEntity>>>,
+        chapterStartPages: List<Int>?,
+    ): Pair<List<Long>, List<Int>> {
+        val idxs = chapters.indices.filter { chapters[it].second.isNotEmpty() }
+        val ids = idxs.map { chapterIds[it] }
+        val starts = if (chapterStartPages != null) idxs.map { chapterStartPages[it] }
+        else idxs.map { i -> chapters[i].second.firstNotNullOfOrNull { it.pageNo } ?: 0 }
+        return ids to starts
     }
 
     fun bookProgressFlow(bookId: Long) = db.bookDao().getProgressFlow(bookId)

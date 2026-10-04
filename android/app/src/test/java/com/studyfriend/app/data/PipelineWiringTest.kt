@@ -215,6 +215,57 @@ class PipelineWiringTest {
         assertTrue(db.figureDao().byBookOnce(bookId).isEmpty())
     }
 
+    // ---- J3 走查修复：目录校准空段子节行混入 chapters，图必须挂有段父章 ----
+
+    /** 父章A(p3/p4) + 空段子节 + 父章B(p10/p11)：子节 startPage 兜底 0 干扰区间归属 */
+    private fun chaptersWithChildSection(): List<Pair<ChapterEntity, List<ParagraphEntity>>> = listOf(
+        chapter("第一章 总则") to listOf(para(0, 3), para(1, 4)),
+        chapter("第一节 子节行") to emptyList(),
+        chapter("第二章 物权变动") to listOf(para(0, 10), para(1, 11)),
+    )
+
+    /** p5 落在子节(0)与 B(10) 之间——含子节候选时会挂子节（挂错层），是关键判别图 */
+    private fun fiveFigures() = listOf(
+        stagedFigure(1, 1), stagedFigure(3, 2), stagedFigure(5, 3),
+        stagedFigure(10, 4), stagedFigure(20, 5),
+    )
+
+    @Test
+    fun importBook_figuresAnchorToParagraphBearingChaptersNotChildSections() = runBlocking {
+        val bookId = repo.importBook(book(), chaptersWithChildSection(), figures = fiveFigures())
+        val rows = db.figureDao().byBookOnce(bookId).sortedBy { it.seqNo }
+        assertEquals(5, rows.size)
+        val chapters = db.chapterDao().byBook(bookId).sortedBy { it.idx }
+        val childId = chapters.first { it.title == "第一节 子节行" }.id
+        val chA = chapters.first { it.title == "第一章 总则" }.id
+        val chB = chapters.first { it.title == "第二章 物权变动" }.id
+        // 无一挂子节；p1 早于首章→A、p3 恰 A 起点→A、p5 区间内→A、p10 恰 B 起点→B、p20 晚于末章 clamp→B
+        rows.forEach { f -> assertNotEquals("图不挂空段子节 seq=${f.seqNo}", childId, f.chapterId) }
+        assertEquals(chA, rows.first { it.seqNo == 1 }.chapterId)
+        assertEquals(chA, rows.first { it.seqNo == 2 }.chapterId)
+        assertEquals(chA, rows.first { it.seqNo == 3 }.chapterId)
+        assertEquals(chB, rows.first { it.seqNo == 4 }.chapterId)
+        assertEquals(chB, rows.first { it.seqNo == 5 }.chapterId)
+    }
+
+    @Test
+    fun replaceBookContent_figuresAnchorSkipsChildSectionsToo() = runBlocking {
+        val bookId = repo.importBook(book(), chaptersWithFigures(), figures = fourFigures())
+        // 重挂引入空段子节（目录校准后章表形态）——重挂归属同样只看有段章
+        repo.replaceBookContent(bookId, book(), chaptersWithChildSection())
+        val rows = db.figureDao().byBookOnce(bookId).sortedBy { it.seqNo }
+        assertEquals(4, rows.size)
+        val chapters = db.chapterDao().byBook(bookId).sortedBy { it.idx }
+        val childId = chapters.first { it.title == "第一节 子节行" }.id
+        val chA = chapters.first { it.title == "第一章 总则" }.id
+        val chB = chapters.first { it.title == "第二章 物权变动" }.id
+        rows.forEach { f -> assertNotEquals("重挂不落子节 seq=${f.seqNo}", childId, f.chapterId) }
+        assertEquals(chA, rows.first { it.seqNo == 1 }.chapterId)
+        assertEquals(chA, rows.first { it.seqNo == 2 }.chapterId)
+        assertEquals(chB, rows.first { it.seqNo == 3 }.chapterId)
+        assertEquals(chB, rows.first { it.seqNo == 4 }.chapterId)
+    }
+
     // ---- removeBook：DB 行 + 磁盘目录（J4） ----
 
     @Test
