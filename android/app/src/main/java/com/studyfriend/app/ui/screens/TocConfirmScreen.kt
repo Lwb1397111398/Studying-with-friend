@@ -103,6 +103,27 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 )
             }
+            // P4（r8-P2-4）：图片提取技术明细——主文案在 parseNote，点开看滤除分布/告警明细
+            val figureDetail = vm.figureNoteDetail
+            if (figureDetail != null) {
+                var showFigureDetail by remember { mutableStateOf(false) }
+                Text(
+                    if (showFigureDetail) "▴ 收起图片提取明细" else "▾ 图片提取明细",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .clickable { showFigureDetail = !showFigureDetail },
+                )
+                if (showFigureDetail) {
+                    Text(
+                        figureDetail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                    )
+                }
+            }
 
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
             error?.let {

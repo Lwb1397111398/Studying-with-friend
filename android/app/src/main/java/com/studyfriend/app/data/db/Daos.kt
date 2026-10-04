@@ -330,6 +330,10 @@ interface VisionQueueDao {
             "OR EXISTS(SELECT 1 FROM review_items r WHERE r.bookId = :bookId)",
     )
     suspend fun hasAnyAiConsumption(bookId: Long): Boolean
+
+    /** 阅读页 FigureRow 错位定位（P4 v1.11，r11-P2-2）：该书已完成视觉替换的页号集合 */
+    @Query("SELECT DISTINCT pageNo FROM vision_queue WHERE bookId = :bookId AND status = 'DONE'")
+    suspend fun donePageNosByBook(bookId: Long): List<Int>
 }
 
 /** 书架徽标投影：视觉增强进度（OPT-F） */
