@@ -255,7 +255,7 @@ class PdfFigureExtractorTest {
         }
     }
 
-    /** 兜底失败（renderer 返回 null/抛异常）：保持 decode 失败记账（errored=1），零落库 */
+    /** 兜底失败（renderer 返回 null）：保持 decode 失败记账（errored=1），零落库 */
     @Test
     fun fallbackRenderer_nullKeepsErroredAccounting() {
         loadFixture("jbig2_fixture.pdf").use { doc ->
@@ -266,6 +266,40 @@ class PdfFigureExtractorTest {
             assertEquals("保持 decode 失败记账", 1, result.stats.errored)
             assertEquals("不计 fallbackRendered", 0, result.stats.fallbackRendered)
             assertTrue("keptPages 空", result.stats.keptPages.isEmpty())
+        }
+    }
+
+    /**
+     * J10 异常隔离（r12-QC1）：渲染兜底抛异常必须被隔离在 renderAndSave 内（转 null），
+     * 不得穿透 extract 拖死文本导入；decode 失败记账保持（errored=1）。
+     */
+    @Test
+    fun fallbackRenderer_thrownExceptionIsolated() {
+        loadFixture("jbig2_fixture.pdf").use { doc ->
+            val result = PdfFigureExtractor(staging).extract(
+                doc, buildParaY0s(doc),
+                pageRenderer = { _, _, _ -> throw RuntimeException("render boom") },
+            )
+            assertEquals("异常被隔离，零落库", 0, result.figures.size)
+            assertEquals("保持 decode 失败记账", 1, result.stats.errored)
+            assertEquals("不计 fallbackRendered", 0, result.stats.fallbackRendered)
+            assertTrue("staging 无残留", staging.listFiles().isNullOrEmpty())
+        }
+    }
+
+    /** J10 取消支持（r12-QC1）：阶段 1 扫描中途取消 → 空结果返回、staging 即刻清、不抛 */
+    @Test
+    fun extract_cancelledDuringScan_returnsEmptyAndCleansStaging() {
+        loadFixture("figures_fixture.pdf").use { doc ->
+            var progressCalls = 0
+            val result = PdfFigureExtractor(staging).extract(
+                doc, buildParaY0s(doc),
+                onProgress = { _, _ -> progressCalls++ },
+                isCancelled = { true },
+            )
+            assertEquals("取消=零落库", 0, result.figures.size)
+            assertEquals("取消发生在进度回调前", 0, progressCalls)
+            assertTrue("staging 无残留", staging.listFiles().isNullOrEmpty())
         }
     }
 

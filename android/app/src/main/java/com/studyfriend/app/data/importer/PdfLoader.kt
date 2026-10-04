@@ -15,6 +15,7 @@ import com.studyfriend.app.data.importer.pdfpipeline.PdfCleaner
 import com.studyfriend.app.data.importer.pdfpipeline.PdfFigureExtractor
 import com.studyfriend.app.data.importer.pdfpipeline.PageRenderer
 import android.graphics.Rect
+import android.util.Log
 import com.studyfriend.app.data.importer.pdfpipeline.PLine
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
@@ -112,6 +113,8 @@ class PdfExtractResult(
  */
 object PdfLoader {
 
+    private const val TAG = "PdfLoader"
+
     private const val SCANNED_CHARS_PER_PAGE = 100
 
     /** P4 幸存图临时落盘目录（cacheDir 下）；confirmImport 时挪入 filesDir/figures/{bookId}/ */
@@ -172,7 +175,7 @@ object PdfLoader {
                     }
                 }
             } catch (e: Exception) {
-                println("[PdfLoader] pdf renderer fallback failed: ${e.message}")
+                Log.w(TAG, "pdf renderer fallback failed: ${e.message}")
                 null
             }
         }
@@ -240,9 +243,17 @@ object PdfLoader {
                             .extract(doc, pageParaY0s, pageRenderer = pdfPageRenderer(context, uri))
                         figures = r.figures
                         figureStats = r.stats
-                    } catch (e: Exception) {
-                        println("[PdfLoader] figure extraction failed: ${e.javaClass.simpleName}: ${e.message}")
+                    } catch (e: OutOfMemoryError) {
+                        // Error 也必须隔离（r12-QC1）：外层 catch(OutOfMemoryError) 会把图片
+                        // 阶段的 OOM 转成整书导入失败——违反「图片失败不拖死文本导入」承诺
+                        Log.w(TAG, "figure extraction OOM: ${e.message}")
                         figureStats = FigureExtractorStats().apply { fatalError = true }
+                        File(context.cacheDir, FIGURES_STAGING_DIR).deleteRecursively()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "figure extraction failed: ${e.javaClass.simpleName}: ${e.message}")
+                        figureStats = FigureExtractorStats().apply { fatalError = true }
+                        // extract 抛异常=幸存图未产出（或产出中途断），staging 无可挪文件，即刻清
+                        File(context.cacheDir, FIGURES_STAGING_DIR).deleteRecursively()
                     }
                     val landscapeRatio = if (dims.isEmpty()) 0f
                     else dims.count { it.second > it.first }.toFloat() / dims.size

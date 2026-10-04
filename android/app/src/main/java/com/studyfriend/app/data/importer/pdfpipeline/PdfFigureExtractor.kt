@@ -71,6 +71,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
         pageParaY0s: Map<Int, List<Float>>,
         onProgress: (pageNo: Int, total: Int) -> Unit = { _, _ -> },
         pageRenderer: PageRenderer? = null,
+        isCancelled: () -> Boolean = { false },
     ): FigureExtractResult {
         val stats = FigureExtractorStats()
         // 加密权限检查（v1.8，r8-P1-3）：限制提取的书直接跳过，图零提取不逐张撞权限
@@ -78,63 +79,82 @@ class PdfFigureExtractor(private val stagingDir: File) {
             stats.permDenied = true
             return FigureExtractResult(emptyList(), stats)
         }
+        // 清上次残留（崩溃/异常/历史版本取消路径可能滞留 cacheDir），再开本轮暂存
         stagingDir.deleteRecursively()
         stagingDir.mkdirs()
+        try {
+            val totalPages = doc.numberOfPages
+            val metas = mutableListOf<FigureImageMeta>()
 
-        val totalPages = doc.numberOfPages
-        val metas = mutableListOf<FigureImageMeta>()
+            // ---- 阶段 1：逐页引擎扫描，零解码只记元数据 ----
+            for (p in 0 until totalPages) {
+                if (isCancelled()) {
+                    Log.w(TAG, "figure scan cancelled at p${p + 1}/$totalPages")
+                    stagingDir.deleteRecursively() // 无幸存者产出，staging 即刻清
+                    return FigureExtractResult(emptyList(), stats)
+                }
+                val page = doc.getPage(p)
+                val pageNo = p + 1
+                val engine = PageScanEngine(page, pageNo, metas, stats)
+                try {
+                    engine.processPage(page)
+                } finally {
+                    engine.release() // 兜底复位（正常路径 processPage 结束时已复位）
+                }
+                if (pageNo % PROGRESS_EVERY_PAGES == 0 || pageNo == totalPages) {
+                    onProgress(pageNo, totalPages)
+                }
+            }
+            stats.totalObjects = metas.size + stats.inlineImageCount
 
-        // ---- 阶段 1：逐页引擎扫描，零解码只记元数据 ----
-        for (p in 0 until totalPages) {
-            val page = doc.getPage(p)
-            val pageNo = p + 1
-            val engine = PageScanEngine(page, pageNo, metas, stats)
-            try {
-                engine.processPage(page)
-            } finally {
-                engine.release() // 兜底复位（正常路径 processPage 结束时已复位）
+            val survivors = applyRules(metas, stats)
+
+            // ---- 锚定 + seqNo（r9-P0-1：全书唯一序号防文件名碰撞；先排序后赋号）----
+            val anchored = survivors
+                .map { meta ->
+                    val paraY0s = pageParaY0s[meta.pageNo] ?: emptyList()
+                    meta.ordAfterPara = FigureCoordMath.anchorFigure(meta.disp.y, paraY0s)
+                    meta
+                }
+                .sortedWith(
+                    compareBy<FigureImageMeta> { it.pageNo }
+                        .thenBy { it.ordAfterPara }
+                        .thenBy { it.disp.y },
+                )
+
+            // ---- 阶段 2：仅幸存者解码、转正、降采样、编码、落 staging、算 md5 ----
+            val figures = mutableListOf<ExtractedFigure>()
+            var seqNo = 0
+            for (meta in anchored) {
+                if (isCancelled()) {
+                    Log.w(TAG, "figure decode cancelled, kept=${figures.size}/${anchored.size}")
+                    break
+                }
+                seqNo++
+                // 解码失败 → 系统 PdfRenderer 整页渲染兜底（JBIG2 等移植版解不了的编码）
+                val err0 = stats.errored
+                val ov0 = stats.erroredOversize
+                val pp0 = stats.erroredPerm
+                val figure = decodeAndSave(meta, seqNo, stats)
+                    ?: pageRenderer?.let { renderAndSave(it, meta, seqNo, stats) }
+                if (figure != null) {
+                    // 兜底救回即最终成功：撤销本次 decode 阶段的失败记账（含权限失败——
+                    // pdfium 走独立 fd 不受 pdfbox 权限限制，救回即与 erroredPerm 矛盾）
+                    if (stats.errored > err0) stats.errored = err0
+                    if (stats.erroredOversize > ov0) stats.erroredOversize = ov0
+                    if (stats.erroredPerm > pp0) stats.erroredPerm = pp0
+                    figures.add(figure)
+                    stats.kept++
+                    stats.keptPages.add(meta.pageNo)
+                }
             }
-            if (pageNo % PROGRESS_EVERY_PAGES == 0 || pageNo == totalPages) {
-                onProgress(pageNo, totalPages)
-            }
+            return FigureExtractResult(figures, stats)
+        } finally {
+            // staging 生命周期：此处**不清**——幸存图要等 confirmImport 才从 staging 挪进
+            // figures/{bookId}/（r12-QC1），extract 返回≠消费完成；清理责任在：
+            // ① 开头 deleteRecursively（清上次残留/取消残留）② 阶段1取消分支（无产出）
+            // ③ PdfLoader 图片阶段 catch（extract 抛异常=无产出可安全清）
         }
-        stats.totalObjects = metas.size + stats.inlineImageCount
-
-        val survivors = applyRules(metas, doc, stats)
-
-        // ---- 锚定 + seqNo（r9-P0-1：全书唯一序号防文件名碰撞；先排序后赋号）----
-        val anchored = survivors
-            .map { meta ->
-                val paraY0s = pageParaY0s[meta.pageNo] ?: emptyList()
-                meta.ordAfterPara = FigureCoordMath.anchorFigure(meta.disp.y, paraY0s)
-                meta
-            }
-            .sortedWith(
-                compareBy<FigureImageMeta> { it.pageNo }
-                    .thenBy { it.ordAfterPara }
-                    .thenBy { it.disp.y },
-            )
-
-        // ---- 阶段 2：仅幸存者解码、转正、降采样、编码、落 staging、算 md5 ----
-        val figures = mutableListOf<ExtractedFigure>()
-        var seqNo = 0
-        for (meta in anchored) {
-            seqNo++
-            // 解码失败 → 系统 PdfRenderer 整页渲染兜底（JBIG2 等移植版解不了的编码）
-            val err0 = stats.errored
-            val ov0 = stats.erroredOversize
-            val figure = decodeAndSave(meta, seqNo, stats)
-                ?: pageRenderer?.let { renderAndSave(it, meta, seqNo, stats) }
-            if (figure != null) {
-                // 兜底救回即最终成功：撤销本次 decode 阶段的失败记账（errored 含 encode 失败）
-                if (stats.errored > err0) stats.errored = err0
-                if (stats.erroredOversize > ov0) stats.erroredOversize = ov0
-                figures.add(figure)
-                stats.kept++
-                stats.keptPages.add(meta.pageNo)
-            }
-        }
-        return FigureExtractResult(figures, stats)
     }
 
     // ---------------------------------------------------------------- 阶段 1 过滤
@@ -142,7 +162,6 @@ class PdfFigureExtractor(private val stagingDir: File) {
     /** R1→R2→R3（xref 型→内容型）依次过滤，返回幸存 meta（副作用：累计 stats） */
     private fun applyRules(
         metas: List<FigureImageMeta>,
-        doc: PDDocument,
         stats: FigureExtractorStats,
     ): MutableList<FigureImageMeta> {
         val afterR1 = mutableListOf<FigureImageMeta>()
@@ -201,6 +220,8 @@ class PdfFigureExtractor(private val stagingDir: File) {
         }
         val bmp = decodeWithFallback(meta.image, stats) ?: return null
         val upright = rotateUpright(bmp, meta, stats)
+        // 转正创建的是新位图（恒等/非正交返回原引用）：原图立即可回收，不跨处理单元驻留
+        if (upright !== bmp) bmp.recycle()
         return finalizeFigure(upright, meta, seqNo, stats)
     }
 
@@ -287,7 +308,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
             stats.errored++
             return null
         } finally {
-            bmp.recycle()
+            bmp?.recycle() // 平台类型防御：createScaledBitmap 异常路径下 bmp 可能未赋新值
         }
     }
 
@@ -296,7 +317,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
         try {
             return image.image
         } catch (e: SecurityException) {
-            println("[PdfFigureExtractor] perm denied: ${e.message}")
+            Log.w(TAG, "perm denied: ${e.message}")
             stats.erroredPerm++
             return null
         } catch (e: Exception) {
@@ -305,7 +326,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
                 image.colorSpace = PDDeviceRGB.INSTANCE
                 return image.image
             } catch (e2: Exception) {
-                println("[PdfFigureExtractor] decode failed after RGB fallback: ${e2.message}")
+                Log.w(TAG, "decode failed after RGB fallback: ${e2.message}")
                 stats.errored++
                 return null
             }
@@ -324,7 +345,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
         )
         if (aff == null) {
             if (stats.nonOrthoCtmPages.add(meta.pageNo)) {
-                println("[PdfFigureExtractor] p${meta.pageNo} skewed CTM, keep orientation")
+                Log.w(TAG, "p${meta.pageNo} skewed CTM, keep orientation")
             }
             return src
         }
@@ -363,6 +384,11 @@ class PdfFigureExtractor(private val stagingDir: File) {
     }
 
     /** 编码落盘并对落盘字节算 md5（hex，小写）；IO 失败返回 null */
+    /**
+     * 编码落 staging 并算 md5。md5 对 **staging 文件字节**计算：importBook/重挂挪移用
+     * renameTo（同分区原子改名，字节不变）或 copyTo（字节复制），filesDir 最终文件
+     * 字节与 staging 一致，故此 md5 等价于最终落盘文件摘要（r12-QC2 声明）。
+     */
     private fun encodeAndHash(bmp: Bitmap, file: File, format: String): String? {
         return try {
             FileOutputStream(file).use { out ->
@@ -376,7 +402,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
             val digest = MessageDigest.getInstance("MD5").digest(file.readBytes())
             digest.joinToString("") { "%02x".format(it) }
         } catch (e: Exception) {
-            println("[PdfFigureExtractor] encode failed: ${e.message}")
+            Log.w(TAG, "encode failed: ${e.message}")
             file.delete()
             null
         }
@@ -386,7 +412,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
         val digest = MessageDigest.getInstance("MD5").digest(image.stream.toByteArray())
         digest.joinToString("") { "%02x".format(it) }
     } catch (e: Exception) {
-        println("[PdfFigureExtractor] raw md5 failed: ${e.message}")
+        Log.w(TAG, "raw md5 failed: ${e.message}")
         null
     }
 
@@ -487,7 +513,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
     companion object {
         private const val TAG = "PdfFigureExtractor"
         private const val FORM_DEPTH_LIMIT = 50
-        private const val JPEG_QUALITY = 85
+        private const val JPEG_QUALITY = 90
         private const val PROGRESS_EVERY_PAGES = 50
 
         init {

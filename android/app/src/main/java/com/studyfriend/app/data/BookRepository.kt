@@ -1,6 +1,7 @@
 package com.studyfriend.app.data
 
 import androidx.room.withTransaction
+import android.util.Log
 import com.studyfriend.app.data.db.BookEntity
 import com.studyfriend.app.data.db.ChapterAssetEntity
 import com.studyfriend.app.data.db.ChapterEntity
@@ -17,6 +18,8 @@ import java.io.File
 
 /** 纯 DB 操作封装（不含 AI/解析逻辑），UI 经此访问数据，不直捅 DAO。
  *  P4 例外：figures 的 staging 文件挪移属落库配套 IO，随 importBook 事务执行 */
+private const val TAG = "BookRepository"
+
 class BookRepository(
     private val db: StudyDatabase,
     /** filesDir 根：figures/{bookId}/ 最终目录与删书清理依赖；null=无图操作（测试可省） */
@@ -86,13 +89,13 @@ class BookRepository(
                         true
                     })
             } catch (e: Exception) {
-                println("[BookRepository] figure move failed ${f.finalName}: ${e.message}")
+                Log.w(TAG, "figure move failed ${f.finalName}: ${e.message}")
                 false
             }
             if (!moved) return@mapNotNull null
             val chIdx = FigureCoordMath.assignChapter(f.pageNo, startPages)
             if (chIdx < 0 || chIdx >= anchoredIds.size) {
-                println("[BookRepository] figure chapter assign failed p${f.pageNo}")
+                Log.w(TAG, "figure chapter assign failed p${f.pageNo}")
                 return@mapNotNull null
             }
             if (!seen.add(Triple(f.md5, f.pageNo, f.ordAfterPara))) return@mapNotNull null
@@ -154,7 +157,7 @@ class BookRepository(
                 figures.mapNotNull { f ->
                     val chIdx = FigureCoordMath.assignChapter(f.pageNo, startPages)
                     if (chIdx < 0 || chIdx >= anchoredIds.size) {
-                        println("[BookRepository] figure reassign skipped p${f.pageNo}")
+                        Log.w(TAG, "figure reassign skipped p${f.pageNo}")
                         return@mapNotNull null
                     }
                     f.copy(id = 0, chapterId = anchoredIds[chIdx])

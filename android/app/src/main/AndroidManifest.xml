@@ -5,9 +5,13 @@
     <!-- 应用自更新（M7）：覆盖安装下载好的新 APK 需要声明；首次安装时系统会让用户确认 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- largeHeap（r12-P0-4）：630 页大书导入时 PDFBox 对象图 + 全量文本结构贴线
+         192MB growth limit 飞行，五跑真机 java.lang.OutOfMemoryError 崩溃实证；
+         申请后 Java heap 上限升至 576MB，消除「同一 APK 时崩时不崩」的随机性 -->
     <application
         android:name=".StudyApp"
         android:allowBackup="true"
+        android:largeHeap="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
