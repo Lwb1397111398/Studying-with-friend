@@ -30,6 +30,13 @@
             </intent-filter>
         </activity>
 
+        <!-- P6a 判据③ PoC：主进程跑（StudyApp 初始化含 WorkManager，独立进程会崩）；
+             内存口径=启动基线→OCR 峰值差；仅 adb am start 触发（extra dir），不进 launcher -->
+        <activity
+            android:name=".OcrPocActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- 应用自更新（M7）：把缓存目录里下载好的 APK 安全地共享给系统安装程序 -->
         <provider
             android:name="androidx.core.content.FileProvider"
