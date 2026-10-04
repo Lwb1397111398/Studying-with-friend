@@ -1,14 +1,15 @@
 # M4a 阅读页与粗读流水线 · 模块总览
 
-> 状态：✅ 完成（计划 v1 82 分不通过 → v2 92 分通过 → 实现 → 质检第一轮 82 分 → 6 P1 全修复 → 复验 90 分通过 → 6 项 P2 收尾 → **P5 章节树 UI（树形挂接/校准徽标/节行目录锚/highlight 滚动定位/FRONT-BACK 次级展示）**）
-> 验证：**477/477 单测全绿**（全模块），assembleDebug 构建通过；P5 E2E：mzzz 16 章树形+70 节挂接展示、节行点击跳父章+滚动定位到节标题段、校准徽标、sample_book 未校准扁平形态、删假章 9→8 章落库（J1-J9 判据全过）
+> 状态：✅ 完成（计划 v1 82 分不通过 → v2 92 分通过 → 实现 → 质检第一轮 82 分 → 6 P1 全修复 → 复验 90 分通过 → 6 项 P2 收尾 → P5 章节树 UI → **P4-D 阅读页示意图混排（sealed ReadRow + FigureRow 解码/LRU/失败双态/全屏预览）**）
+> 验证：**572/572 单测全绿**（全模块），assembleDebug 构建通过；P5 E2E：mzzz 16 章树形+70 节挂接展示、节行点击跳父章+滚动定位到节标题段、校准徽标、sample_book 未校准扁平形态、删假章 9→8 章落库（J1-J9 判据全过）；P4-D 混排逻辑 ReadScreenRowsTest 9 例锁定（J3 走查随 J2 E2E）
 
 ## 功能清单
 
 | 功能 | 说明 |
 | --- | --- |
 | 章目录页 | 路由 `BOOK/{bookId}`；书架点书进入；**P5 章节树**：`byBookTreeFlow` 全行投影（章+节）→ `buildChapterTree` 按 parentOrder 挂接（防御：越界/null 挂前最近 level1、零 level1 扁平自成树）→ `flattenTree` 拍平渲染，章行尾「展开/收起小节」箭头（无节行不显示）；**校准徽标**「✓ 已按目录校准」（任一行 calibrated=true 即显示）；章行 = 序号/标题/一行摘要/在读·读完·未读徽标/本章包徽标，行尾操作按数据推导：未粗读→"粗读"、中断或断点数据（READING+gist 空）→"继续"、已完成→"重读"、进行中→"进度 x/y+停止"；**节行**（level=2）= 缩进小字次级样式，无粗读按钮，点击=目录锚跳父章+highlight 滚动定位（节行段落恒空，不作为导航目的地）；点行进阅读页 |
-| 阅读页 | 顶栏章标题+返回；本章要点卡（gist + key_terms，`byIdFlow` 收集，粗读完成即时刷新）；段落流按 aiAction 渲染：EXPLAIN/GROUP→"讲/合并讲"徽标+why 小字、SKIP→"已跳过"标签+全文半透明（alpha 0.55，仍可读）、NONE→正常文本；**role=TOC/FOOTNOTE/FRONT/BACK 段小字次级样式**（`ReadStyles.isSecondaryRole` 纯函数判定，P5-F 定案：FRONT/BACK 仅视觉降级，AI 规划/计数口径不变——展示与加工解耦），TOC/FOOTNOTE 不参与标注计数，粗读规划两处过滤同跳过 FOOTNOTE；**P5 highlight 定位**：Routes.READ 可选 `?highlight=` 参数（Uri.encode），`findHighlightIndex` 在正文段（排除 TOC/FOOTNOTE）里三级匹配（归一化精确 == → startsWith 多命中取最短 → null 静默不滚动），`listState.animateScrollToItem` 滚到节标题段 |
+| 阅读页 | 顶栏章标题+返回；本章要点卡（gist + key_terms，`byIdFlow` 收集，粗读完成即时刷新）；段落流按 aiAction 渲染：EXPLAIN/GROUP→"讲/合并讲"徽标+why 小字、SKIP→"已跳过"标签+全文半透明（alpha 0.55，仍可读）、NONE→正常文本；**role=TOC/FOOTNOTE/FRONT/BACK 段小字次级样式**（`ReadStyles.isSecondaryRole` 纯函数判定，P5-F 定案：FRONT/BACK 仅视觉降级，AI 规划/计数口径不变——展示与加工解耦），TOC/FOOTNOTE 不参与标注计数，粗读规划两处过滤同跳过 FOOTNOTE；**P5 highlight 定位**：Routes.READ 可选 `?highlight=` 参数（Uri.encode），`findHighlightIndex` 在正文段（排除 TOC/FOOTNOTE）里三级匹配（归一化精确 == → startsWith 多命中取最短 → null 静默不滚动），`listState.animateScrollToItem` 滚到节标题段；**P4-D 示意图混排**：`byChapterFlow` 收集本章 figures → `buildReadRows` sealed ReadRow（Para/Fig）——图插在同 pageNo 第 ordAfterPara 段后（渲染列表=页内全量段口径），ord=-1 三态（该页有段→页首段前/该页无段→页码更小的最后一段后/全章无更早段→章首），ord 越界 `coerceAtMost(页段数-1)` 兜底页末，同锚多图保持 byChapterFlow 序稳定展开；LazyColumn itemKey 段/图前缀防碰撞；highlight 滚动经 paraId 反查行下标（混排后下标不再相等） |
+| P4-D FigureRow | `FigureEntity` 尺寸 `aspectRatio` 先占位（无布局跳动）→ `LaunchedEffect` 经 `FigureBitmapCache.decodeDispatcher`（`Dispatchers.Default.limitedParallelism(2)`，r5-P2-2）解码：先 LRU 命中（读前 `isRecycled` 防竞态）、decodeBounds → 官方采样算法按屏宽预算算 `inSampleSize` → 刷 State；**LRU 按字节** `maxMemory×15%` clamp [15MB, 50MB]（r7-P1-5），驱逐弃引用不显式 recycle（API≥26 像素在 Java 堆，recycle 与 Compose 持有引用竞态）；**失败双态**（r7-P2-7）：`file.exists()==false` → 灰底「图片已丢失」整块可点重试（仍失败维持提示）、BitmapFactory 返回 null → 「图片已损坏」+Log.w 记 file；圆角+1dp 描边+「图 {seqNo}（p{pageNo}）」角标；`contentDescription="示意图，第{n}页"`（TODO(P6) caption）；**vision DONE 命中 Log.w**（r11-P2-2）：produceState 预取 `donePageNosByBook(bookId)`，FigureRow 命中打「锚定可能偏 1-2 段」日志，logcat 直接定位错位图；**全屏预览 Dialog**（P2-1/r5-P2-10）：挂 ReadScreen 顶层（不进 LazyColumn，开关不重建列表、关闭回原滚动位），独立解码不占 LRU、按屏幕尺寸重算采样、`DisposableEffect.onDispose` 用完即回收 |
 | 操作条七态 | 进行中（进度条+停止）/ 中断（消息+从断点继续+全部重读）/ 成功（消息+标记读完；degraded 时加"重试归并"）/ 失败（重试；keyIssue 时加"去设置"）/ 待归并（全标注+无 gist→"完成归并"）/ 未开始（"开始粗读"）/ 部分标注（数据推导断点入口，进程重启后仍可用） |
 | force 二次确认 | 所有"重读/全部重读"先弹确认框（"覆盖现有标注"），确认后才 force=true——防误触覆盖 |
 | 确定性分块 | RoughReadChunks：8000 字 + 40 段双上限、段不跨块、超长段独立成块不丢弃；同输入同划分（断点续跑前提） |
@@ -34,7 +35,7 @@ assets/prompts/rough_read_merge.txt  归并 prompt
 ui/screens/ChapterListScreen.kt 章目录页（P5 章节树：buildChapterTree 挂接+flattenTree 拍平+校准徽标+SectionRow 目录锚；行尾操作按数据推导）
 ui/screens/ChapterTree.kt       P5 树纯函数：ChapterNode/TreeItem、buildChapterTree（onFallback 注入日志）、flattenTree、normalizeHighlight、findHighlightIndex
 ui/screens/ReadStyles.kt        P5-F 次级角色判定 isSecondaryRole（TOC/FOOTNOTE/FRONT/BACK）
-ui/screens/ReadScreen.kt        阅读页 + ActionBar 七态 + ParaRow/ParaTag + force 确认弹窗 + highlight 滚动定位（LaunchedEffect+listState）
+ui/screens/ReadScreen.kt        阅读页 + ActionBar 七态 + ParaRow/ParaTag + force 确认弹窗 + highlight 滚动定位（LaunchedEffect+listState）；P4-D：buildReadRows 混排（sealed ReadRow）、FigureRow（aspectRatio 占位/IO 解码/LRU/失败双态/角标/vision Log.w）、FigurePreviewDialog 全屏预览、FigureBitmapCache（decodeDispatcher limitedParallelism(2)+按字节 LRU）、calcInSampleSize 官方采样
 ui/nav/AppNav.kt                BOOK/READ 路由（READ 传 onOpenSettings；READ 可选 highlight 参数 Uri.encode）
 StudyApp.kt                     database/appScope/roughReadRunner 三单例
 test/.../RoughReadChunksTest.kt    5 例
@@ -45,6 +46,7 @@ test/.../M4aUiSmokeTest.kt         4 例（Compose 冒烟）
 test/.../ChapterTreeTest.kt        12 例（P5：正常挂接/越界/null/前无章/零 level1/拍平/highlight 三级匹配+TOC 排除）
 test/.../P5TreeUiSmokeTest.kt      4 例（P5 Compose 冒烟：树渲染+徽标/节行点击回调/收起隐藏/未校准无徽标）
 test/.../ReadStylesTest.kt         3 例（P5-F 次级角色四值 true/BODY/未知值）
+test/.../ReadScreenRowsTest.kt     9 例（P4-D：无图恒等/锚后插/ord=-1 三态/clamp 页末/同锚 DAO 序稳定/null 页码回退/采样真值表）
 ```
 
 ## 设计决策（与踩坑）
@@ -93,3 +95,4 @@ test/.../ReadStylesTest.kt         3 例（P5-F 次级角色四值 true/BODY/未
 ## 最后更新
 
 - 2026-10-03 P5 章节树 UI：章目录页树形挂接（buildChapterTree/flattenTree+越界防御）、校准徽标、节行=目录锚（点击跳父章+findHighlightIndex 滚动定位）、FRONT/BACK 次级展示（ReadStyles.isSecondaryRole 展示与加工解耦）；新增 ChapterTree.kt/ReadStyles.kt，ChapterTreeTest 12 例+P5TreeUiSmokeTest 4 例+ReadStylesTest 3 例；E2E J1-J9 全过（详见 docs/plans/P5-章节树UI计划案.md）
+- 2026-10-04 P4-D 阅读页示意图混排（commit 795592e）：sealed ReadRow 段图混排（ordAfterPara 锚+ord=-1 三态+clamp）、FigureRow（aspectRatio 占位/limitedParallelism(2) IO 解码/按字节 LRU clamp[15,50MB]/失败双态「图片已丢失可重试·图片已损坏 Log.w」/seqNo 角标）、vision DONE 页命中 Log.w（donePageNosByBook）、全屏预览 Dialog 挂顶层独立解码用完即回收、TocConfirmScreen 图片提取明细展开区（figureNoteDetail）；ReadScreenRowsTest 9 例，全模块 572 绿。**已知取舍**：LRU 驱弃不 recycle（API≥26 像素在 Java 堆，recycle 与 Compose 引用竞态，isRecycled 读取守卫兜底）；失败态无断图图标（material-icons-extended 未引入，纯文案）；J3 走查随 J2 E2E 模拟器实测
