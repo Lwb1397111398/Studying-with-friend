@@ -237,10 +237,18 @@ object PdfLoader {
                     var figures = emptyList<ExtractedFigure>()
                     var figureStats: FigureExtractorStats? = null
                     try {
-                        // 进度契约（0..pages 各一次）归文字提取所有：图片阶段在全文之后，
-                        // 复用页号回调会出现重复末值——保持 onProgress 缺省（no-op）
+                        // 进度契约（r12-QC3-P1）：图片阶段转发每 50 页回调——630 页大书的
+                        // 图片扫描段以分钟计，进度条必须持续可动；代价是数字在文字阶段
+                        // 满格后回落再爬一遍，比长时段静止（像卡死）诚实。
+                        // 取消透传（r12-QC4-P1）：extractor 已支持 isCancelled 检查点，
+                        // caller 此前未接线——图片扫描段（大书以分钟计）点取消必须即时停
                         val r = PdfFigureExtractor(File(context.cacheDir, FIGURES_STAGING_DIR))
-                            .extract(doc, pageParaY0s, pageRenderer = pdfPageRenderer(context, uri))
+                            .extract(
+                                doc, pageParaY0s,
+                                onProgress = onProgress,
+                                pageRenderer = pdfPageRenderer(context, uri),
+                                isCancelled = isCancelled,
+                            )
                         figures = r.figures
                         figureStats = r.stats
                     } catch (e: OutOfMemoryError) {
@@ -255,6 +263,10 @@ object PdfLoader {
                         // extract 抛异常=幸存图未产出（或产出中途断），staging 无可挪文件，即刻清
                         File(context.cacheDir, FIGURES_STAGING_DIR).deleteRecursively()
                     }
+                    // 图片阶段取消转导入取消信号（r12-QC4-P1）：放在图片 try-catch 之后——
+                    // extractor 取消=空结果+清 staging 不抛异常；若放 try 内会被
+                    // catch(Exception) 吞掉转 fatalError，取消被伪装成图片失败
+                    if (isCancelled()) throw CancelledImportException()
                     val landscapeRatio = if (dims.isEmpty()) 0f
                     else dims.count { it.second > it.first }.toFloat() / dims.size
                     PdfExtractResult(

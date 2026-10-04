@@ -116,6 +116,10 @@ fun isR2Decoration(b: DispBbox, pageW: Float, pageH: Float): Boolean {
  * R3 页眉/水印同位重复：同一图出现在 ≥3 页且各页归一化位置两两偏差 ≤2%。
  * 内容型兜底（不同 xref 同字节）由调用方按 xref/rawMd5 分组后传入本函数，分组语义在此之外。
  * 位置不同的合法重复（如书末插图目录）不命中。
+ *
+ * 实现按**基线相对**判定（与首点比较）：首点-各点差 ≤tol 蕴含任意两点差 ≤2tol，
+ * 即「两两偏差 ≤4%」——严格弱于两两比较的上界表述（r12-QC3-P2 注记，实现侧
+ * 更宽松而非更严；若需精确两两语义改为 O(n²) 比较，n=候选组 ≤10 张可忽略）。
  */
 fun isR3RepeatingHeader(normPositions: List<NormPos>): Boolean {
     if (normPositions.size < PdfFigureThresholds.R3_MIN_PAGES) return false

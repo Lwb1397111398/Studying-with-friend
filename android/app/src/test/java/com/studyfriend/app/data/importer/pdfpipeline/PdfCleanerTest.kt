@@ -431,4 +431,33 @@ class PdfCleanerTest {
         assertEquals(listOf(100f), preview.getValue(1))
         assertEquals(listOf(100f), preview.getValue(2))
     }
+
+    @Test
+    fun crossPageMergeY0Preview_y0MonotonicNonDecreasing_anchorContract() {
+        // 锚定契约（r12-QC3-P2）：FigureCoordMath.anchorFigure 的 KDoc 要求 paraY0s 按 y
+        // 递增，preview 是锚定的直接输入——产出口径必须单调非递减，含跨页并段页
+        // （页首段被吃掉不影响单调性）也一样。契约在此锁定，防 preview 未来重构不保序
+        val p1 = pageOut(
+            1,
+            listOf(Para("第一页首段。", y0 = 80f), Para("上一页末段话说了一半，还在继续说", y0 = 700f)),
+            lastLine = PLine("上一页末段话说了一半，还在继续说", 50f, 540f, 700f, 10f),
+        )
+        val p2 = pageOut(
+            2,
+            listOf(
+                Para("下一页开头的接续内容。", y0 = 100f),
+                Para("中段独立句。", y0 = 300f),
+                Para("末段独立句。", y0 = 600f),
+            ),
+            lastLine = null,
+            firstLine = PLine("下一页开头的接续内容。", 50f, 400f, 100f, 10f),
+        )
+        val preview = PdfCleaner.crossPageMergeY0Preview(listOf(p1, p2), stats)
+        preview.forEach { (pageNo, y0s) ->
+            assertTrue("p$pageNo y0 单调非递减（锚定契约）", y0s.zipWithNext().all { (a, b) -> a <= b })
+        }
+        assertEquals(listOf(80f, 700f), preview.getValue(1))
+        // 页首段并入上页：p2 预演只剩 2 段，仍单调
+        assertEquals(listOf(300f, 600f), preview.getValue(2))
+    }
 }

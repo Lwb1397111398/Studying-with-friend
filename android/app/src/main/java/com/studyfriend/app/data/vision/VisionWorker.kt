@@ -42,7 +42,7 @@ class VisionWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             // ordAfterPara 锚定保命；低质量放行页（第一道闸判定、lowQuality 标记）例外
             val figurePages = db.figureDao().pageNosByBook(bookId).toSet()
             for (item in pending) {
-                if (item.pageNo in figurePages && !item.lowQuality) {
+                if (figureGateSkip(item.pageNo, figurePages, item.lowQuality)) {
                     Log.w(
                         TAG,
                         "figure gate: page ${item.pageNo} skipped (figure page, anchoring protection)",
@@ -99,5 +99,12 @@ class VisionWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
         /** 单页最多消化 3 轮（轮内转写还有 1 次模型级重试），仍失败定格 FAILED */
         const val MAX_PAGE_ATTEMPTS = 3
+
+        /**
+         * 图页消费闸判定（r12-QC3-P1 抽纯函数供单测，worker 内薄包一层）：
+         * 幸存图页且非低质量放行页 → 跳过转写（ordAfterPara 锚定保命）。
+         */
+        fun figureGateSkip(pageNo: Int, figurePages: Set<Int>, lowQuality: Boolean): Boolean =
+            pageNo in figurePages && !lowQuality
     }
 }

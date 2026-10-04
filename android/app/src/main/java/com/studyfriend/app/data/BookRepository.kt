@@ -225,8 +225,14 @@ class BookRepository(
     suspend fun calibrateExistingBook(bookId: Long): Result<Unit> =
         Result.failure(NotImplementedError("calibrateExistingBook 本期仅预留骨架（P3b-2 方案 Z），P5 接入实现"))
 
-    /** 目录重切：事务内删旧章重插，段落/讲解/资产等子表靠 CASCADE 清空 */
+    /**
+     * 目录重切：事务内删旧章重插，段落/讲解/资产等子表靠 CASCADE 清空。
+     * ⚠ figures 行随 chapters CASCADE 蒸发且本方法不做重挂（r12-QC4-P1 告警）：
+     * 章结构变化后的图归属重挂必须走 [replaceBookContent]（四步重挂逐列保留）；
+     * 保留本方法仅供不需要 figures 的既有调用方，新代码勿用。
+     */
     suspend fun replaceChapters(bookId: Long, chapters: List<ChapterEntity>) {
+        Log.w(TAG, "replaceChapters does NOT reassign figures; figures rows will be CASCADE-deleted. Use replaceBookContent if chapter structure changes")
         db.withTransaction {
             db.chapterDao().deleteByBook(bookId)
             db.chapterDao().insertAll(chapters)

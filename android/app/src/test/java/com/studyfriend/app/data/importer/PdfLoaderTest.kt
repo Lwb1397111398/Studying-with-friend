@@ -123,7 +123,9 @@ class PdfLoaderTest {
         PdfLoader.extract(context, toUri(bytes), onProgress = { p, t -> seen.add(p to t) })
         assertEquals(0 to 3, seen.first())
         assertEquals(3 to 3, seen.last())
-        assertEquals((0..3).toList(), seen.map { it.first }) // 单调不减且连续
+        // 文字阶段 0..pages 逐页；图片阶段转发（r12-QC3-P1 进度契约）在其后继续——
+        // 3 页书仅末页 pageNo==totalPages 触发一次，整体单调不减、以满格收尾
+        assertEquals((0..3).toList() + 3, seen.map { it.first })
     }
 
     @Test
@@ -253,5 +255,29 @@ class PdfLoaderTest {
         assertEquals("标记不残留在段落文本里", 0, chapters.sumOf { ch -> ch.paras.count { it.text.contains("〔页") } })
         assertEquals(1, chapters[0].paras.first().pageNo)
         assertEquals(2, chapters[1].paras.first().pageNo)
+    }
+
+    @Test
+    fun figurePhaseCheckpoint_cancelsAfterFigurePhaseProgress() {
+        // r12-QC4-P1：图片阶段取消透传 + 图片 try-catch 后检查点。文字阶段满格仅
+        // fullMarks=1（末页 p==t）；图片阶段转发回调（进度契约 r12-QC3-P1）使
+        // fullMarks=2 后，extractor 检查点或图片段后检查点必须中止——若删透传、
+        // 或检查点被放回 try 内被 catch(Exception) 吞掉，extract 会正常完成 → 本例红
+        val bytes = pdfBytes(
+            listOf(fillerLines("Chapter 1 A", 4), fillerLines("Chapter 2 B", 4), fillerLines("Chapter 3 C", 4)),
+        )
+        var fullMarks = 0
+        try {
+            PdfLoader.extract(
+                context, toUri(bytes),
+                onProgress = { p, t -> if (p == t) fullMarks++ },
+                isCancelled = { fullMarks >= 2 },
+            )
+            throw AssertionError("应当抛出取消")
+        } catch (e: PdfImportException) {
+            assertTrue("取消应发生在图片阶段回调之后（满格≥2次）", fullMarks >= 2)
+            assertTrue(e.message!!.contains("取消"))
+        }
+        assertTempFilesCleaned()
     }
 }

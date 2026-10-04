@@ -150,7 +150,8 @@ class PdfFigureExtractorTest {
         loadFixture("inline_fixture.pdf").use { doc ->
             val result = extract(doc)
             assertEquals("30 个内联图对象", 30, result.stats.inlineImageCount)
-            assertEquals("无 xref 图", 0, result.stats.totalObjects - result.stats.inlineImageCount)
+            // r12-QC3-P1 语义：totalObjects 只计可提取候选（metas），内联图独立计数
+            assertEquals("无 xref 候选图", 0, result.stats.totalObjects)
             assertEquals("内联图不提取", 0, result.figures.size)
             assertEquals("页号分布覆盖 2 页", 2, result.stats.biPages.size)
             assertEquals(15, result.stats.biPages[1])

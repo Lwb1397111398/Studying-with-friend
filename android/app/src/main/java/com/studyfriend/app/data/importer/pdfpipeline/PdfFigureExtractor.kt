@@ -20,6 +20,7 @@ import java.security.MessageDigest
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlin.reflect.KMutableProperty0
 
 /**
  * P4 示意图保留——两阶段图片提取器（阶段 1 元数据零解码过滤 / 阶段 2 仅幸存者解码落盘）。
@@ -105,7 +106,9 @@ class PdfFigureExtractor(private val stagingDir: File) {
                     onProgress(pageNo, totalPages)
                 }
             }
-            stats.totalObjects = metas.size + stats.inlineImageCount
+            // totalObjects 只计可提取候选图元（metas），「检测到 X 张」与 r1/r2/r3/kept 账目
+            // 闭合；内联图不可提取、由 detail 行与比率 warn 独立展示（r12-QC3-P1）
+            stats.totalObjects = metas.size
 
             val survivors = applyRules(metas, stats)
 
@@ -140,9 +143,9 @@ class PdfFigureExtractor(private val stagingDir: File) {
                 if (figure != null) {
                     // 兜底救回即最终成功：撤销本次 decode 阶段的失败记账（含权限失败——
                     // pdfium 走独立 fd 不受 pdfbox 权限限制，救回即与 erroredPerm 矛盾）
-                    if (stats.errored > err0) stats.errored = err0
-                    if (stats.erroredOversize > ov0) stats.erroredOversize = ov0
-                    if (stats.erroredPerm > pp0) stats.erroredPerm = pp0
+                    rollbackIfIncreased(stats::errored, err0)
+                    rollbackIfIncreased(stats::erroredOversize, ov0)
+                    rollbackIfIncreased(stats::erroredPerm, pp0)
                     figures.add(figure)
                     stats.kept++
                     stats.keptPages.add(meta.pageNo)
@@ -245,10 +248,13 @@ class PdfFigureExtractor(private val stagingDir: File) {
             PdfFigureThresholds.MAX_SOURCE_PIXELS.toDouble() / (pw.toDouble() * ph),
         ).toFloat()
         if (scale > maxScale) scale = maxScale
+        // 单张耗时留证（r12-QC4-P2）：J8 兜底渲染单张耗时暂 UNMEASURED，此日志使
+        // 下一次真机导入自动留下毫秒级证据（logcat grep "fallback p"）
+        val startedNs = System.nanoTime()
         val pageBmp = try {
             render.renderPage(meta.pageNo, meta.disp, scale)
         } catch (e: Exception) {
-            Log.w(TAG, "render fallback p${meta.pageNo} failed", e)
+            Log.w(TAG, "render fallback p${meta.pageNo} failed (${(System.nanoTime() - startedNs) / 1_000_000}ms)", e)
             null
         } ?: return null
         // 裁剪显示 bbox 区域（px = pt × scale，clamp 页内防边界舍入越界）
@@ -263,6 +269,7 @@ class PdfFigureExtractor(private val stagingDir: File) {
         val cropped = Bitmap.createBitmap(pageBmp, left, top, w, h)
         if (cropped != pageBmp) pageBmp.recycle()
         stats.fallbackRendered++
+        Log.i(TAG, "fallback p${meta.pageNo} took ${(System.nanoTime() - startedNs) / 1_000_000}ms (w=${w} h=${h})")
         return finalizeFigure(cropped, meta, seqNo, stats)
     }
 
@@ -357,13 +364,25 @@ class PdfFigureExtractor(private val stagingDir: File) {
         if (identity) return src
         val m = Matrix()
         m.setValues(floatArrayOf(sx, skx, 0f, sky, sy, 0f, 0f, 0f, 1f))
-        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+        return try {
+            Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+        } catch (e: Exception) {
+            // createBitmap 极端 float 精度下可抛 IAE：退回原图维持原方向，src 交还调用方
+            // 按恒等路径回收。不能 finally recycle——恒等路径返回的就是 src 本身（r12-QC3-P0）
+            Log.w(TAG, "p${meta.pageNo} rotate failed, keep orientation: ${e.message}")
+            src
+        }
     }
 
     private fun sign(v: Float): Float = when {
         abs(v) < 0.5f -> 0f
         v > 0f -> 1f
         else -> -1f
+    }
+
+    /** 兜底救回即最终成功：decode 阶段多记的失败计数回退到快照（r12-QC4-P3 去重三处同型 if） */
+    private fun rollbackIfIncreased(prop: KMutableProperty0<Int>, snapshot: Int) {
+        if (prop.get() > snapshot) prop.set(snapshot)
     }
 
     /**
@@ -585,6 +604,8 @@ class FigureExtractorStats {
     /** 页号 → 内联图出现次数（parseNote 技术明细：p12 含 3 处内联图，≤5 页全列） */
     val biPages = mutableMapOf<Int, Int>()
     var droppedFormDepth = 0
+
+    /** 本 pdfbox fork 未暴露 OC 隐藏层（Optional Content）判定，恒 0；P6 版面模型支持时升格（B2 残项，Log.w 登记） */
     var droppedOC = 0
 
     /** 整书权限拒绝（入口跳过；parseNote 主文案改「该书限制图片提取」） */

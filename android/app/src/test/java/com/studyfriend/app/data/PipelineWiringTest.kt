@@ -291,6 +291,77 @@ class PipelineWiringTest {
         assertTrue(db.figureDao().pageNosByBook(bookId + 1).isEmpty())
     }
 
+    // ---- r12-QC4-P2-4：insertFigures 文件系统故障注入（单图挪移失败剔除，J2 口径）----
+
+    @Test
+    fun importBook_missingStagingFile_figureDroppedNoOrphanRow() = runBlocking {
+        // 场景①：staging 文件从未写出——renameTo false + copyTo 抛 NoSuchFileException→剔除
+        val ghost = ExtractedFigure(
+            pageNo = 5, ordAfterPara = 0, bboxY0 = 100f, seqNo = 1,
+            widthPx = 100, heightPx = 80, format = "png",
+            stagingFile = File(stagingDir, "p5_f1.png"), // 未写出
+            finalName = "p5_f1.png", md5 = md5Hex("ghost".toByteArray()),
+        )
+        val bookId = repo.importBook(
+            book(), chaptersWithFigures(),
+            figures = listOf(ghost, stagedFigure(6, 2)),
+        )
+        val rows = db.figureDao().byBookOnce(bookId)
+        assertEquals("坏图剔除、好图照常落库", 1, rows.size)
+        assertEquals(6, rows[0].pageNo)
+        assertFalse("无孤儿文件", File(filesRoot, "figures/$bookId/p5_f1.png").exists())
+    }
+
+    @Test
+    fun importBook_renameFails_copyFallbackLandsSameBytes() = runBlocking {
+        // 场景②：target 已被同名文件占用。Windows 上 renameTo 不覆盖已存在文件→false，
+        // 走 copyTo(overwrite) 回退；Linux renameTo 直接覆盖成功——两平台最终状态一致，
+        // 断言只锁「落库+字节对账+staging 清空」外部契约（J2），不绑定内部走哪条分支
+        val prevId = repo.importBook(book(), chaptersWithFigures())
+        val bookId = prevId + 1 // Room 自增连续（单线程 inMemory），预置下一本的冲突
+        File(filesRoot, "figures/$bookId").mkdirs()
+        File(filesRoot, "figures/$bookId/p7_f1.png").writeBytes("stale".toByteArray())
+        val landedId = repo.importBook(
+            book(title = "第二本"), chaptersWithFigures(),
+            figures = listOf(stagedFigure(7, 1)),
+        )
+        assertEquals("bookId 预测自洽（预置打在正确的书上）", bookId, landedId)
+        val rows = db.figureDao().byBookOnce(landedId)
+        assertEquals(1, rows.size)
+        val final = File(filesRoot, "figures/$landedId/p7_f1.png")
+        assertTrue(final.exists())
+        assertEquals("回退落盘字节与 staging 对账", md5Hex("seed-1".toByteArray()), md5Hex(final.readBytes()))
+        assertFalse("staging 已清", File(stagingDir, "p7_f1.png").exists())
+    }
+
+    @Test
+    fun importBook_moveAndCopyBothFail_figureDroppedNoOrphanRow() = runBlocking {
+        // 场景③：target 位置被同名**非空目录**占用——renameTo(file→dir) 两平台皆败
+        // （Windows MoveFile / Linux EISDIR）；copyTo 底层 Files.copy(REPLACE_EXISTING)
+        // 对**空目录**目标会静默替换成功（JVM 探针实证），仅非空目录抛
+        // DirectoryNotEmptyException→两处皆败→剔除，行无孤儿值
+        val prevId = repo.importBook(book(), chaptersWithFigures())
+        val bookId = prevId + 1
+        val occupied = File(filesRoot, "figures/$bookId/p9_f1.png")
+        occupied.mkdirs()
+        File(occupied, ".occupied").writeBytes(byteArrayOf(1)) // 非空化：Files.copy 才会抛
+        val evil = ExtractedFigure(
+            pageNo = 9, ordAfterPara = 0, bboxY0 = 100f, seqNo = 1,
+            widthPx = 100, heightPx = 80, format = "png",
+            stagingFile = File(stagingDir, "p9_f1.png").apply { writeBytes("evil".toByteArray()) },
+            finalName = "p9_f1.png", md5 = md5Hex("evil".toByteArray()),
+        )
+        val landedId = repo.importBook(
+            book(title = "第三本"), chaptersWithFigures(),
+            figures = listOf(evil, stagedFigure(10, 2)),
+        )
+        assertEquals(bookId, landedId)
+        val rows = db.figureDao().byBookOnce(landedId)
+        assertEquals("双失败图剔除、好图照常", 1, rows.size)
+        assertEquals(10, rows[0].pageNo)
+        assertFalse("无孤儿文件", File(filesRoot, "figures/$landedId/p9_f1.png").isFile)
+    }
+
     @Test
     fun importBook_withoutFilesDir_throwsOnFigures() = runBlocking {
         val bare = BookRepository(db)

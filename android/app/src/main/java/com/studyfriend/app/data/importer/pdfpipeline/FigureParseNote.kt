@@ -59,7 +59,11 @@ object FigureParseNote {
         if (stats.nonOrthoCtmPages.isNotEmpty()) {
             lines += "${formatPages(stats.nonOrthoCtmPages, "页")} 含旋转/镜像图，按原始方向展示"
         }
-        if (stats.fallbackRendered > 0) lines += "${stats.fallbackRendered} 张图用系统渲染器补提（原编码为 pdfbox 不支持的 JBIG2 等格式）"
+        // 措辞点（r12-QC3-P2）：fallbackRendered 不计入 errored——「补提成功」与「跳过」
+        // 是两个出口，明写「不计入下方跳过数」防读者把两行账目对不上
+        if (stats.fallbackRendered > 0) {
+            lines += "${stats.fallbackRendered} 张图 pdfbox 解码失败、由系统渲染器补提成功（不计入下方跳过数）"
+        }
         if (stats.errored > 0) lines += "⚠ 因 CMYK/格式问题跳过 ${stats.errored} 张"
         if (stats.erroredPerm > 0) lines += "⚠ ${stats.erroredPerm} 张图因版权权限限制未提取"
         if (stats.erroredOversize > 0) lines += "⚠ ${stats.erroredOversize} 张图因尺寸过大未提取"

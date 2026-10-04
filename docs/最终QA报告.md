@@ -85,3 +85,17 @@
 - 粗读产物版本戳：chapter.gist 暂无 promptVersion 列，prompt 升级后旧标注需手动 force 重跑。
 - release 签名配置：目前出 unsigned 包，自用时用 Android Studio 或 apksigner 自签。
 - 讲解详略可扩展为按书/按章覆盖。
+
+## 8. v0.1.0 后功能迭代的质检线（持续追加）
+
+本报告 §1-§7 固化 v0.1.0 交付时点；此后每个功能阶段沿用同一纪律（计划案 AI 评分 ≥90 循环 → 逐功能真书验证 → 代码 AI 质检 ≥90 循环），轨迹如下：
+
+| 阶段 | 计划案评分 | 代码质检 | 备注 |
+| --- | --- | --- | --- |
+| P3a 字号证据链 | v6.1 = 90 | 93 | 真书假章 13→12 |
+| P3b-1 目录视觉探针 | v13.1 = 94（13 轮） | 见 .e2e/review_p3b1_code.py | 两本真书三门全 PASS |
+| P3b-2 目录驱动切章 | — | 84→90 | 八条 E2E 判据全 PASS |
+| P5 章节树 UI | 四轮 84→87→87→92 | 随 P3b-2 管线 | E2E J1-J9 全过 |
+| P4 示意图保留 | v1.11 = 91（11 轮） | 三轮 81→85→见下 | 六跑 630 页真书 E2E |
+
+P4 补充（2026-10-04）：代码质检第三轮前发现 **P0 级运行时缺陷**——630 页真书导入在 192MB Java heap 上限贴线飞行，第五跑真机 OOM 崩溃（crash 缓冲区 `OutOfMemoryError thrown while trying to throw an exception` 铁证）。修复 `android:largeHeap="true"`（192→576MB，r12-P0-4），六跑全程无崩，meminfo 曲线 MEASURED（峰值 PSS 1252MB 瞬时 / 稳态 118MB）；代价：大书文本提取 ~170s→~9.5 分钟（大堆 GC 变懒），换导入稳定性。详见 docs/plans/P4-示意图保留计划案.md、.e2e/review_p4_code_reply.txt。
