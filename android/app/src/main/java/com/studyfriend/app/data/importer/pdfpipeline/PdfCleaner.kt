@@ -302,19 +302,10 @@ object PdfCleaner {
         for (i in 1 until pages.size) {
             val prev = pages[i - 1]
             val cur = pages[i]
-            if (prev.tocLike || cur.tocLike) continue
-            val last = prev.paras.lastOrNull() ?: continue
-            val first = cur.paras.firstOrNull() ?: continue
-            if (last.footnote || first.footnote) continue
-            if (endsSentence(last.text)) continue
-            val lastGeom = prev.lastLine ?: continue
-            val firstGeom = cur.firstLine ?: continue
-            if (lastGeom.x1 < 0f || firstGeom.x0 < 0f) continue
-            if (lastGeom.x1 < stats.right - 3f * stats.bodySize) continue
-            if (firstGeom.x0 >= stats.left + 0.8f * stats.bodySize) continue
-            if (firstGeom.size >= stats.bodySize * 1.15f) continue
-            cur.paras.removeAt(0)
-            // size 取两侧 max（P3a）：305 行守卫已保证首段非标题，此处防御性保留字号证据；
+            if (!shouldCrossMerge(prev, cur, stats)) continue
+            val first = cur.paras.removeAt(0)
+            val last = prev.paras[prev.paras.size - 1]
+            // size 取两侧 max（P3a）：字号守卫已保证首段非标题，此处防御性保留字号证据；
             // y0 保留主体段（prev 末段）原值——P4 图锚定按页内段 y0 序列定位，续接文本
             // 属于主体段，其几何锚点不变
             prev.paras[prev.paras.size - 1] = Para(
@@ -323,6 +314,45 @@ object PdfCleaner {
                 y0 = last.y0,
             )
         }
+    }
+
+    /** 跨页续接判定（[crossPageMerge] 与 [crossPageMergeY0Preview] 共用；纯读，不改对象） */
+    internal fun shouldCrossMerge(prev: PageOut, cur: PageOut, stats: DocStats): Boolean {
+        if (prev.tocLike || cur.tocLike) return false
+        val last = prev.paras.lastOrNull() ?: return false
+        val first = cur.paras.firstOrNull() ?: return false
+        if (last.footnote || first.footnote) return false
+        if (endsSentence(last.text)) return false
+        val lastGeom = prev.lastLine ?: return false
+        val firstGeom = cur.firstLine ?: return false
+        if (lastGeom.x1 < 0f || firstGeom.x0 < 0f) return false
+        if (lastGeom.x1 < stats.right - 3f * stats.bodySize) return false
+        if (firstGeom.x0 >= stats.left + 0.8f * stats.bodySize) return false
+        if (firstGeom.size >= stats.bodySize * 1.15f) return false
+        return true
+    }
+
+    /**
+     * 跨页续接的 y0 口径预演（P4 图锚定专用，计划案 r9-P1-1）：不改对象，输出 merge 后
+     * 每页的段 y0 序列（cur 首段并走 = 列表去头；prev 末段 y0 保留主体段原值，与
+     * [crossPageMerge] 的合并动作同口径）。判定与合并逻辑同源 [shouldCrossMerge]，杜绝
+     * 双实现漂移。
+     *
+     * 为什么不直接提前跑 [crossPageMerge]：真 merge 在 assembleText（视觉转写之后）执行，
+     * 转写页整页替换会覆盖 merge 产物——若 merge 提前，「转写页→图页」相邻续接时图页
+     * 首段文本被并入转写页后随整页替换蒸发。预演只产出锚定用的 y0 序列，文本零风险。
+     */
+    fun crossPageMergeY0Preview(pages: List<PageOut>, stats: DocStats): Map<Int, List<Float>> {
+        val out = HashMap<Int, List<Float>>(pages.size * 2)
+        pages.forEach { out[it.pageNum] = it.paras.map { p -> p.y0 } }
+        for (i in 1 until pages.size) {
+            val prev = pages[i - 1]
+            val cur = pages[i]
+            if (!shouldCrossMerge(prev, cur, stats)) continue
+            val curY0s = out.getValue(cur.pageNum)
+            if (curY0s.isNotEmpty()) out[cur.pageNum] = curY0s.subList(1, curY0s.size)
+        }
+        return out
     }
 
     // ---------------------------------------------------------------- 坏字清理

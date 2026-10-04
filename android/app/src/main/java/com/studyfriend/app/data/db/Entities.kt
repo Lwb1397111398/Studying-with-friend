@@ -114,6 +114,8 @@ data class VisionQueueEntity(
     val originChars: Int,
     val status: String, // PENDING / DONE / FAILED
     val attempts: Int = 0,
+    /** P4 低质量放行标记：该页是幸存图页且文字层烂（第一道闸放行），第二道闸据此放行转写 */
+    val lowQuality: Boolean = false,
     val updatedAt: Long,
 )
 

@@ -169,4 +169,29 @@ class MigrationTest {
             }
         }
     }
+
+@Test
+fun migrate5To6_visionQueueLowQualityColumn() {
+    val dbName = "migration-test-56.db"
+    helper.createDatabase(dbName, 5).use { v5 ->
+        v5.execSQL(
+            "INSERT INTO vision_queue (bookId, uri, pageNo, originChars, status, attempts, updatedAt) " +
+                "VALUES (1, 'uri://x', 12, 300, 'PENDING', 0, 1)",
+        )
+    }
+    helper.runMigrationsAndValidate(dbName, 6, true, *MIGRATIONS).use { v6 ->
+        v6.execSQL(
+            "INSERT INTO vision_queue (bookId, uri, pageNo, originChars, status, attempts, lowQuality, updatedAt) " +
+                "VALUES (1, 'uri://x', 13, 80, 'PENDING', 0, 1, 2)",
+        )
+        v6.query("SELECT pageNo, lowQuality FROM vision_queue ORDER BY pageNo").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals(12, cur.getInt(0))
+            assertEquals("旧行默认 0", 0, cur.getInt(1))
+            assertTrue(cur.moveToNext())
+            assertEquals(13, cur.getInt(0))
+            assertEquals("新行写入 1", 1, cur.getInt(1))
+        }
+    }
+}
 }

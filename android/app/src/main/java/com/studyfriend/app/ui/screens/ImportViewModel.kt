@@ -28,9 +28,13 @@ import com.studyfriend.app.data.importer.PdfImportException
 import com.studyfriend.app.data.importer.PdfLoader
 import com.studyfriend.app.data.importer.PdfPageRenderer
 import com.studyfriend.app.data.importer.TextLoader
+import com.studyfriend.app.data.importer.pdfpipeline.ExtractedFigure
+import com.studyfriend.app.data.importer.pdfpipeline.FigureExtractorStats
+import com.studyfriend.app.data.importer.pdfpipeline.FigureParseNote
 import com.studyfriend.app.data.importer.pdfpipeline.PageSelector
 import com.studyfriend.app.data.importer.pdfpipeline.PageTranscription
 import com.studyfriend.app.data.importer.pdfpipeline.Para
+import com.studyfriend.app.data.importer.pdfpipeline.excludeFigurePages
 import com.studyfriend.app.data.importer.pdfpipeline.CalibrateOutcome
 import com.studyfriend.app.data.importer.pdfpipeline.TocChapterCalibrator
 import com.studyfriend.app.data.importer.pdfpipeline.TocEntry
@@ -59,7 +63,7 @@ sealed class TocProbeState {
 /** 导入流程状态：全文/解析结果活在这里，ImportScreen→TocConfirmScreen 共享，旋转不重读文件 */
 class ImportViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val repo = BookRepository((app as StudyApp).database)
+    private val repo = BookRepository((app as StudyApp).database, app.filesDir)
     private val settings = SettingsRepository((app as StudyApp).database, (app as StudyApp).secretStore)
 
     var bookTitle by mutableStateOf("")
@@ -74,6 +78,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     var error by mutableStateOf<String?>(null)
         private set
     var parseNote by mutableStateOf<String?>(null)
+        private set
+
+    /** P4 双层文案（r8-P2-4）：主文案已并入 parseNote；detail 供确认页「详情」展开区（commit D） */
+    var figureNoteDetail by mutableStateOf<String?>(null)
         private set
     var chapters by mutableStateOf<List<ParsedChapter>>(emptyList())
         private set
@@ -125,6 +133,13 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      * 文字层先行；确认落库后写 vision_queue 交 WorkManager 后台逐页转写。
      */
     private var pendingVisionItems: List<Pair<Int, Int>>? = null
+
+    /** P4 幸存图（staging 文件在 confirmImport 经 importBook 挪入 filesDir）；TXT/粘贴恒空 */
+    private var pendingFigures: List<ExtractedFigure> = emptyList()
+    /** P4 提取统计（parseNote 主文案/详情生成源）；null=TXT/粘贴路径 */
+    private var figureStats: FigureExtractorStats? = null
+    /** P4 低质量放行页 → 该页幸存图数（第一道闸 bypassed，parseNote 消费） */
+    private var figureBypassed: Map<Int, Int> = emptyMap()
     /** P5-E（F3 修复）：同步视觉转写失败的页（t==null / 异常中断时未处理页），页号 to 文字层字数。
      *  与 [pendingVisionItems] 合并去重后随导入落 vision_queue，避免失败页永久滞留文字层 */
     private var failedVisionItems: List<Pair<Int, Int>>? = null
@@ -170,6 +185,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 deleted = emptySet()
                 drainImportDone()
                 visionStatsNote = null
+                clearFigures()
                 tocState = TocProbeState.Idle // 粘贴路径无探针；清掉上一本 PDF 可能残留的目录
                 probeSegments = null
                 if (bookTitle.isBlank()) bookTitle = "粘贴笔记"
@@ -202,6 +218,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 visionStatsNote = null // 新文件读取开始，旧书的视觉统计作废
                 pendingVisionItems = null // 旧书的队列暂存同步作废（否则换书确认会错入队）
                 failedVisionItems = null
+                clearFigures() // P4：旧书幸存图同步作废
                 // 新文件开始先清上一本的探针态（PDF 路径 runTocProbe 会重跑；TXT 保持 Idle）
                 tocState = TocProbeState.Idle
                 probeSegments = null
@@ -219,6 +236,11 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             onProgress = { p, t -> progress = p to t },
                             isCancelled = { cancelFlag.get() },
                             allowScanned = vision != null,
+                        )
+                        pendingFigures = result.figures
+                        figureStats = result.figureStats
+                        figureNoteDetail = FigureParseNote.detail(
+                            result.figureStats, result.landscapeRatio, result.doubleColumnSuspicion,
                         )
                         applyVision(result, uri, vision)
                         runTocProbe(result, uri)
@@ -267,11 +289,21 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** P4 幸存图相关状态统一清（换文件/粘贴/失败/回书架） */
+    private fun clearFigures() {
+        pendingFigures = emptyList()
+        figureStats = null
+        figureBypassed = emptyMap()
+        figureNoteDetail = null
+    }
+
     /** 读取失败：清掉上一次文件的解析结果，避免把旧章节误导入 */
     private fun failRead(message: String?) {
         error = message
         sourceText = null
         parseNote = null
+        figureNoteDetail = null
+        clearFigures()
         chapters = emptyList()
         deleted = emptySet()
         imported = false // 防御：残留 true 会让守卫误放行旧事件
@@ -290,22 +322,35 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      *   后台页完成前阅读看到的是文字层内容。
      */
     private suspend fun applyVision(result: PdfExtractResult, uri: Uri, vision: VisionTranscriber?) {
+        // P4 第一道闸（计划案 §3-C，r6-P1-3）：幸存图页排除出视觉转写（整页替换会毁锚定），
+        // 低质量图页（rawChars<100 或 pua>10%）放行并记 bypassed（parseNote 提示+入队标记）
+        val figurePageNos = pendingFigures.map { it.pageNo }.toSet()
+        val figureCountByPage = pendingFigures.groupingBy { it.pageNo }.eachCount()
         val selected = when (val sel = PageSelector.select(result.pages, scanned = result.scanned)) {
-            is PageSelector.Selection.Pages -> sel.pages
+            is PageSelector.Selection.Pages -> {
+                val g = excludeFigurePages(sel.pages, result.pages, figurePageNos, figureCountByPage)
+                figureBypassed = g.bypassed
+                g.filtered
+            }
             is PageSelector.Selection.TooMany -> {
                 if (sel.pages.size > VisionScheduler.MAX_QUEUE_PAGES) throw PdfImportException(
                     "需要视觉识别的页面太多（${sel.totalPages} 页，超过后台队列上限）；请把文件拆小后分批导入",
                 )
-                pendingVisionItems = sel.pages.map { pageNo ->
+                val g = excludeFigurePages(sel.pages, result.pages, figurePageNos, figureCountByPage)
+                figureBypassed = g.bypassed
+                pendingVisionItems = g.filtered.map { pageNo ->
                     val page = result.pages.first { it.pageNum == pageNo }
                     pageNo to page.paras.sumOf { it.text.length }
                 }
                 visionStatsNote =
-                    "检测到 ${sel.pages.size} 页画质可疑，先用文字层内容导入；" +
+                    "检测到 ${g.filtered.size} 页画质可疑，先用文字层内容导入；" +
                         "完成导入后 App 会在后台自动视觉增强这些页（每页约 1 分钟，可正常阅读，无需等待）"
                 return
             }
-            PageSelector.Selection.None -> return
+            PageSelector.Selection.None -> {
+                figureBypassed = emptyMap()
+                return
+            }
         }
         if (selected.isEmpty() || vision == null) return
         var replaced = 0
@@ -500,8 +545,19 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                         rows to outcome.chapters.count { it.level == 1 }
                     }
                 }
-                val newBookId = repo.importBook(book, pairs, totalChapters)
-                // OPT-F 后台视觉队列；P5-E F3：超上限暂存页 + 同步转写失败页合并去重入队
+                // P4：figures 同事务落库（r9-P2-1）；校准路径用 outcome 起点区间，
+                // 现状路径 null（importBook 按每章首段 pageNo 推）
+                val figureStartPages = outcome?.chapters?.map { it.startPage }
+                val newBookId = repo.importBook(
+                    book, pairs,
+                    figures = pendingFigures,
+                    chapterStartPages = figureStartPages,
+                    totalChapters = totalChapters,
+                )
+                // OPT-F 后台视觉队列；P5-E F3：超上限暂存页 + 同步转写失败页合并去重入队。
+                // P4：入队的幸存图页必是第一道闸放行的低质量页 → lowQuality 标记，
+                // VisionWorker 第二道闸据此放行（非低质量图页已被闸滤除，防御性双保险）
+                val figurePageNos = pendingFigures.map { it.pageNo }.toSet()
                 (pendingVisionItems.orEmpty() + failedVisionItems.orEmpty())
                     .distinctBy { it.first }
                     .takeIf { it.isNotEmpty() }
@@ -514,6 +570,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                                     pageNo = pageNo,
                                     originChars = originChars,
                                     status = DbValues.VQ_PENDING,
+                                    lowQuality = pageNo in figurePageNos,
                                     updatedAt = now,
                                 )
                             },
@@ -554,6 +611,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         visionStatsNote = null
         pendingVisionItems = null
         failedVisionItems = null
+        clearFigures()
         chapters = emptyList()
         imported = false
         isPdf = false
@@ -644,10 +702,11 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     "未识别到章节标题，已按每约 3000 字盲切为 ${result.size} 个部分"
                 else -> null
             }
-            parseNote = when {
-                blindNote != null && visionStatsNote != null -> "$blindNote；$visionStatsNote"
-                else -> blindNote ?: visionStatsNote
-            }
+            // P4 双层文案（r8-P2-4）：主文案进 parseNote，技术明细走 figureNoteDetail
+            val figureNote = FigureParseNote.main(figureStats, figureBypassed)
+            parseNote = listOfNotNull(blindNote, figureNote, visionStatsNote)
+                .joinToString("；")
+                .ifEmpty { null }
         } catch (e: PatternSyntaxException) {
             error = "识别规则正则无效：${e.description ?: e.message ?: "语法错误"}"
         } catch (e: CustomRegexNoMatchException) {

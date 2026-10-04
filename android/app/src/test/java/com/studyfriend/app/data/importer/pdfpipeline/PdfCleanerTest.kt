@@ -397,4 +397,38 @@ class PdfCleanerTest {
         assertEquals(1, p2.paras.size)
         assertEquals(10.5f, p1.paras[0].size, 0.01f)
     }
+
+    @Test
+    fun crossPageMergeY0Preview_matchesRealMergeAndLeavesInputUntouched() {
+        val p1 = pageOut(
+            1,
+            listOf(Para("上一页末段话说了一半，还在继续说", y0 = 700f)),
+            lastLine = PLine("上一页末段话说了一半，还在继续说", 50f, 540f, 700f, 10f),
+        )
+        val p2 = pageOut(
+            2,
+            listOf(Para("下一页开头的接续内容。", y0 = 100f), Para("下一段另起。", y0 = 140f)),
+            lastLine = null,
+            firstLine = PLine("下一页开头的接续内容。", 50f, 400f, 100f, 10f),
+        )
+        val pages = listOf(p1, p2)
+        val preview = PdfCleaner.crossPageMergeY0Preview(pages, stats)
+        // 预演不改对象（图页文本零风险的前提）
+        assertEquals(2, p2.paras.size)
+        assertEquals(listOf(700f), preview.getValue(1))
+        assertEquals(listOf(140f), preview.getValue(2))
+        // 与真 merge 后的段落 y0 口径逐页一致（同源判定防漂移）
+        PdfCleaner.crossPageMerge(pages, stats)
+        assertEquals(p1.paras.map { it.y0 }, preview.getValue(1))
+        assertEquals(p2.paras.map { it.y0 }, preview.getValue(2))
+    }
+
+    @Test
+    fun crossPageMergeY0Preview_noMerge_returnsOriginalY0Lists() {
+        val p1 = pageOut(1, listOf(Para("第一页完整句。", y0 = 100f)), lastLine = null)
+        val p2 = pageOut(2, listOf(Para("第二页独立段。", y0 = 100f)), lastLine = null)
+        val preview = PdfCleaner.crossPageMergeY0Preview(listOf(p1, p2), stats)
+        assertEquals(listOf(100f), preview.getValue(1))
+        assertEquals(listOf(100f), preview.getValue(2))
+    }
 }

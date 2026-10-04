@@ -58,7 +58,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun ReviewScreen() {
     val app = LocalContext.current.applicationContext as StudyApp
-    val repo = remember { BookRepository(app.database) }
+    val repo = remember { BookRepository(app.database, app.filesDir) }
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
     // 评估会话快照（计划 §2.2）：进入时读一次资产；复习中资产被重生成/清空不中途换题。

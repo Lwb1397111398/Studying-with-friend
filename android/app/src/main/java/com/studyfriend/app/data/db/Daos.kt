@@ -355,6 +355,10 @@ interface FigureDao {
     @Query("SELECT * FROM figures WHERE bookId = :bookId ORDER BY pageNo ASC, seqNo ASC")
     suspend fun byBookOnce(bookId: Long): List<FigureEntity>
 
+    /** 第二道闸（VisionWorker）用：幸存图所在页号集合 */
+    @Query("SELECT DISTINCT pageNo FROM figures WHERE bookId = :bookId")
+    suspend fun pageNosByBook(bookId: Long): List<Int>
+
     @Query("DELETE FROM figures WHERE bookId = :bookId")
     suspend fun deleteByBook(bookId: Long)
 }

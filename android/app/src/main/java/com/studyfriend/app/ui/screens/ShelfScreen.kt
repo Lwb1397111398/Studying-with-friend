@@ -34,7 +34,7 @@ import com.studyfriend.app.data.db.VisionProgress
 @Composable
 fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
     val app = LocalContext.current.applicationContext as StudyApp
-    val repo = remember { BookRepository(app.database) }
+    val repo = remember { BookRepository(app.database, app.filesDir) }
     val books by repo.shelfFlow().collectAsStateWithLifecycle(initialValue = null)
     // 书架复习徽标（M6 计划 §3.3）：N>0 行尾"N 章待复习"；now 进页固化
     val now = remember { System.currentTimeMillis() }

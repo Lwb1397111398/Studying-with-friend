@@ -74,7 +74,9 @@ object VisionRebuilder {
                 bookId = bookId, idx = 0, title = ch.title,
                 readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
             ) to ch.paras.map { p ->
-                ParagraphEntity(chapterId = 0, idx = 0, text = p.text, role = p.role)
+                // pageNo 保留（P4 起被 figures 重挂消费：replaceBookContent 按每章首段
+                // pageNo 推章起点区间；此前丢弃会导致重挂后书无法再校准、图归属无据）
+                ParagraphEntity(chapterId = 0, idx = 0, text = p.text, role = p.role, pageNo = p.pageNo)
             }
         }
         BookRepository(db).replaceBookContent(

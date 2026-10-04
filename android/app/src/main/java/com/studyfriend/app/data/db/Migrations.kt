@@ -116,4 +116,14 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
-val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // P4 低质量放行标记（计划案 §3-C P1-3「以低质量分支标记为准」）：第一道闸放行的
+        // 图页入队时置 1，VisionWorker 第二道闸据此放行（Boolean 存 INTEGER 0/1）
+        db.execSQL("ALTER TABLE `vision_queue` ADD COLUMN `lowQuality` INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+val MIGRATIONS: Array<Migration> = arrayOf(
+    MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
+)

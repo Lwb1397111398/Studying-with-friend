@@ -18,7 +18,7 @@ import androidx.room.RoomDatabase
         VisionQueueEntity::class,
         FigureEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class StudyDatabase : RoomDatabase() {

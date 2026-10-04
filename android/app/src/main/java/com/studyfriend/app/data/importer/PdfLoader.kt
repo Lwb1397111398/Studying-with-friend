@@ -3,8 +3,11 @@ package com.studyfriend.app.data.importer
 import android.content.Context
 import android.net.Uri
 import com.studyfriend.app.data.importer.pdfpipeline.DocStats
+import com.studyfriend.app.data.importer.pdfpipeline.ExtractedFigure
+import com.studyfriend.app.data.importer.pdfpipeline.FigureExtractorStats
 import com.studyfriend.app.data.importer.pdfpipeline.PageOut
 import com.studyfriend.app.data.importer.pdfpipeline.PdfCleaner
+import com.studyfriend.app.data.importer.pdfpipeline.PdfFigureExtractor
 import com.studyfriend.app.data.importer.pdfpipeline.PLine
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
@@ -21,13 +24,25 @@ class CancelledImportException(message: String = "已取消") : PdfImportExcepti
  * 提取产物（OPT-E）：清洗后的逐页段落 + 全书几何统计 + 是否扫描版。
  * assembleText() 先做跨页续接合并（视觉整页替换发生在合并之前——VM 流程是
  * extract → 选页 → 视觉转写替换 → assembleText，合并标志防重复合并）。
+ *
+ * P4 扩展：figures（幸存图，staging 文件已落盘）+ figureStats（parseNote 对账）+
+ * 横版占比/双栏嫌疑两个版式信号。TXT/粘贴路径不经过本类（figures 恒空）。
  */
 class PdfExtractResult(
     val pages: List<PageOut>,
     val stats: DocStats,
     val scanned: Boolean,
+    /** P4 幸存图（seqNo/md5 已算定）；staging 文件在 confirmImport 时挪入 filesDir/figures/{bookId}/ */
+    val figures: List<ExtractedFigure> = emptyList(),
+    /** P4 图片提取统计；null=TXT 路径或提取器未运行（异常时也非 null，fatalError=true） */
+    val figureStats: FigureExtractorStats? = null,
+    /** 横版（折算后 h>w）页占比 0..1；parseNote 横版提示阈值 30% */
+    val landscapeRatio: Float = 0f,
+    /** 行左边界双峰嫌疑（简化直方图，见 [PdfLoader.detectDoubleColumn]）；parseNote 多栏提示 */
+    val doubleColumnSuspicion: Boolean = false,
+    alreadyMerged: Boolean = false,
 ) {
-    private var merged = false
+    private var merged = alreadyMerged
 
     /**
      * [styleAware]=true 时给大字段落打〔标题〕前缀（P3a 字号证据链，PDF 路径专用）：
@@ -92,6 +107,38 @@ object PdfLoader {
 
     private const val SCANNED_CHARS_PER_PAGE = 100
 
+    /** P4 幸存图临时落盘目录（cacheDir 下）；confirmImport 时挪入 filesDir/figures/{bookId}/ */
+    private const val FIGURES_STAGING_DIR = "figures_staging"
+
+    /** 双栏嫌疑：行左边界最大相邻间隙超过此值（pt）视为两峰分界 */
+    private const val DOUBLE_COL_MIN_GAP_PT = 30f
+
+    /**
+     * 双栏嫌疑检测（计划案 v1.11，r11-P2-3 简化实现）：全部行左边界 x0 排序后取最大
+     * 相邻间隙，>30pt 且间隙两侧行数各 ≥15% 判双峰。「峰」以最大间隙近似直方图双峰，
+     * 保守高召回（提示性文案，非判定）；行数 <20 不足以谈分布。
+     */
+    private fun detectDoubleColumn(pagesLines: List<List<PLine>>, stats: DocStats): Boolean {
+        val xs = pagesLines.asSequence().flatten().map { it.x0 }
+            .filter { it >= 0f && it < stats.right + stats.bodySize * 2 }
+            .toList()
+        if (xs.size < 20) return false
+        val sorted = xs.sorted()
+        var maxGap = 0f
+        var split = -1
+        for (i in 1 until sorted.size) {
+            val gap = sorted[i] - sorted[i - 1]
+            if (gap > maxGap) {
+                maxGap = gap
+                split = i
+            }
+        }
+        if (maxGap <= DOUBLE_COL_MIN_GAP_PT) return false
+        val leftN = split
+        val rightN = sorted.size - split
+        return leftN >= xs.size * 0.15f && rightN >= xs.size * 0.15f
+    }
+
     fun extract(
         context: Context,
         uri: Uri,
@@ -140,7 +187,31 @@ object PdfLoader {
                         )
                     }
                     val stats = PdfCleaner.docStats(pagesLines, dims)
-                    PdfExtractResult(PdfCleaner.clean(pagesLines, dims, stats), stats, scanned)
+                    val pageOuts = PdfCleaner.clean(pagesLines, dims, stats)
+                    // P4 图锚定口径（r9-P1-1）：锚定必须拿 merge 后的页内段序。真 merge 在
+                    // assembleText（视觉转写之后）执行，这里只做不改对象的 y0 预演——提前
+                    // 跑真 merge 会让「转写页→图页」续接段随整页替换蒸发（预演 KDoc 详述）
+                    val pageParaY0s = PdfCleaner.crossPageMergeY0Preview(pageOuts, stats)
+                    // P4 图片提取（r11-P1-1 异常隔离）：独立 try-catch，图片失败不拖死文本导入
+                    var figures = emptyList<ExtractedFigure>()
+                    var figureStats: FigureExtractorStats? = null
+                    try {
+                        // 进度契约（0..pages 各一次）归文字提取所有：图片阶段在全文之后，
+                        // 复用页号回调会出现重复末值——保持 onProgress 缺省（no-op）
+                        val r = PdfFigureExtractor(File(context.cacheDir, FIGURES_STAGING_DIR))
+                            .extract(doc, pageParaY0s)
+                        figures = r.figures
+                        figureStats = r.stats
+                    } catch (e: Exception) {
+                        println("[PdfLoader] figure extraction failed: ${e.javaClass.simpleName}: ${e.message}")
+                        figureStats = FigureExtractorStats().apply { fatalError = true }
+                    }
+                    val landscapeRatio = if (dims.isEmpty()) 0f
+                    else dims.count { it.second > it.first }.toFloat() / dims.size
+                    PdfExtractResult(
+                        pageOuts, stats, scanned, figures, figureStats,
+                        landscapeRatio, detectDoubleColumn(pagesLines, stats),
+                    )
                 }
             } catch (e: InvalidPasswordException) {
                 throw PdfImportException("PDF 已加密，请先解除密码保护再导入")

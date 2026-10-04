@@ -36,7 +36,60 @@ object PdfFigureThresholds {
 
     /** 降采样目标宽下限（px）：显示尺寸上限不足时兜底，保全屏预览放大清晰度 */
     const val TARGET_WIDTH_MIN = 1200
+
+    /**
+     * 低质量防御分支（计划案 §3-C，P1-3）：图页清洗前文字层字符数低于此值 → 文字层烂，
+     * 第一/第二道闸均放行视觉转写（锚定偏移的代价 < 整页乱码）
+     */
+    const val LOW_RAW_CHARS = 100
+
+    /** 低质量防御分支：PUA 坏字形占清洗前字符数比例超过此值 → 同上放行 */
+    const val LOW_PUA_RATIO = 0.10f
 }
+
+/** 第一道闸产物：过滤后的可疑页 + 低质量放行的图页→该页幸存图数（parseNote 与入队标记消费） */
+data class FigureGateResult(
+    val filtered: List<Int>,
+    val bypassed: Map<Int, Int>,
+)
+
+/**
+ * 视觉转写第一道闸（计划案 §3-C，P1-2 方案 B「含图页不转写」源头过滤）：
+ * 幸存图所在页从视觉转写选页中排除——整页替换会重排段落，`ordAfterPara` 锚定即失效。
+ * 例外（低质量防御分支，P1-3）：图页文字层烂（rawChars < 100 或 pua > 10%）时排除的
+ * 代价大于锚定偏移 → 放行转写并记入 [FigureGateResult.bypassed]；第二道闸按同一标记
+ * （vision_queue.lowQuality）放行。applyVision 选页与 confirmImport 入队两个入口统一走
+ * 本函数；VisionWorker 消费兜底闸是独立防线（§3-C 5b）。
+ */
+fun excludeFigurePages(
+    selected: List<Int>,
+    pages: List<PageOut>,
+    figurePageNos: Set<Int>,
+    figureCountByPage: Map<Int, Int> = emptyMap(),
+): FigureGateResult {
+    if (figurePageNos.isEmpty()) return FigureGateResult(selected, emptyMap())
+    val byNo = pages.associateBy { it.pageNum }
+    val filtered = mutableListOf<Int>()
+    val bypassed = linkedMapOf<Int, Int>()
+    for (pageNo in selected) {
+        if (pageNo !in figurePageNos) {
+            filtered += pageNo
+            continue
+        }
+        val page = byNo[pageNo]
+        if (page != null && isLowQualityPage(page)) {
+            bypassed[pageNo] = figureCountByPage[pageNo] ?: 0
+            filtered += pageNo
+        }
+        // 非低质量图页：静默排除（上游是优化，下游拒绝是保命，无 parseNote 义务）
+    }
+    return FigureGateResult(filtered, bypassed)
+}
+
+/** 低质量页判据（计划案 §3-C P1-3 双判据，常量见 [PdfFigureThresholds]） */
+fun isLowQualityPage(page: PageOut): Boolean =
+    page.rawChars < PdfFigureThresholds.LOW_RAW_CHARS ||
+        (page.rawChars > 0 && page.puaCount > page.rawChars * PdfFigureThresholds.LOW_PUA_RATIO)
 
 /** 折算后显示空间 bbox（pt）：x/y 为左上角，w/h 为宽高（y 自顶向下） */
 data class DispBbox(val x: Float, val y: Float, val w: Float, val h: Float)

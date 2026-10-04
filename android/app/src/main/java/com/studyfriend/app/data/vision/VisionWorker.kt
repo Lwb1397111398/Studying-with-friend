@@ -37,7 +37,19 @@ class VisionWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
         var renderer: PdfPageRenderer? = null
         try {
+            // P4 第二道闸（计划案 §3-C 5b，r6-P1-3c）：幸存图页消费兜底——上游
+            // excludeFigurePages 过滤失守（历史遗留队列行/缓存变体/新入口）时下游仍拒绝，
+            // ordAfterPara 锚定保命；低质量放行页（第一道闸判定、lowQuality 标记）例外
+            val figurePages = db.figureDao().pageNosByBook(bookId).toSet()
             for (item in pending) {
+                if (item.pageNo in figurePages && !item.lowQuality) {
+                    Log.w(
+                        TAG,
+                        "figure gate: page ${item.pageNo} skipped (figure page, anchoring protection)",
+                    )
+                    dao.updateStatus(item.id, DbValues.VQ_DONE, item.attempts, System.currentTimeMillis())
+                    continue
+                }
                 val uri = item.uri
                 if (VisionCache.read(applicationContext, uri, item.pageNo) != null) {
                     dao.updateStatus(item.id, DbValues.VQ_DONE, item.attempts, System.currentTimeMillis())

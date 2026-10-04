@@ -1,5 +1,6 @@
 package com.studyfriend.app.data.importer.pdfpipeline
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -129,5 +130,64 @@ class PdfFigureRulesTest {
         val b = DispBbox(60f, 200f, 284f, 229f) // p488
         assertFalse(isR1FullPageBleed(b, 408f, 630f))
         assertFalse(isR2Decoration(b, 408f, 630f))
+    }
+
+    // ---- excludeFigurePages 第一道闸 + 低质量防御分支（J6③④，计划案 §3-C） ----
+
+    private fun gatePage(pageNum: Int, rawChars: Int, puaCount: Int) =
+        PageOut(
+            pageNum, tocLike = false, rawChars = rawChars, puaCount = puaCount,
+            lineCount = 5, shortLineCount = 0,
+            paras = mutableListOf(Para("文本")), firstLine = null, lastLine = null,
+        )
+
+    @Test
+    fun gate_figurePageExcluded_healthyPagesUntouched() {
+        val pages = listOf(gatePage(3, 900, 0), gatePage(4, 900, 0), gatePage(5, 900, 0))
+        val g = excludeFigurePages(listOf(3, 4, 5), pages, setOf(4), mapOf(4 to 2))
+        assertEquals(listOf(3, 5), g.filtered)
+        assertTrue(g.bypassed.isEmpty())
+    }
+
+    @Test
+    fun gate_lowQualityFigurePageBypassed_withFigureCount() {
+        // rawChars<100 的图页：第一道闸放行并记该页幸存图数（parseNote + 入队 lowQuality 消费）；
+        // 健康图页（p3）静默排除——上游是优化，下游拒绝是保命
+        val pages = listOf(gatePage(3, 900, 0), gatePage(4, 80, 0))
+        val g = excludeFigurePages(listOf(3, 4), pages, setOf(3, 4), mapOf(3 to 1, 4 to 2))
+        assertEquals(listOf(4), g.filtered)
+        assertEquals(mapOf(4 to 2), g.bypassed)
+    }
+
+    @Test
+    fun gate_lowQualityByPuaRatio_bypassed() {
+        // pua 90 / rawChars 800 = 11.25% > 10% → 放行
+        val pages = listOf(gatePage(9, 800, 90))
+        val g = excludeFigurePages(listOf(9), pages, setOf(9), mapOf(9 to 1))
+        assertEquals(listOf(9), g.filtered)
+        assertEquals(mapOf(9 to 1), g.bypassed)
+    }
+
+    @Test
+    fun gate_emptyFigureSet_identity() {
+        val pages = listOf(gatePage(3, 900, 0))
+        val g = excludeFigurePages(listOf(3), pages, emptySet())
+        assertEquals(listOf(3), g.filtered)
+        assertTrue(g.bypassed.isEmpty())
+    }
+
+    @Test
+    fun lowQuality_rawCharsBoundary() {
+        // rawChars=100 不低（<100 才低）；99 低
+        assertFalse(isLowQualityPage(gatePage(1, 100, 0)))
+        assertTrue(isLowQualityPage(gatePage(1, 99, 0)))
+    }
+
+    @Test
+    fun lowQuality_puaRatioBoundary() {
+        // pua 恰 10% 不低（>10% 才低）；10.1% 低；rawChars=0 走 rawChars 分支直接判低
+        assertFalse(isLowQualityPage(gatePage(1, 100, 10)))
+        assertTrue(isLowQualityPage(gatePage(1, 100, 11)))
+        assertTrue(isLowQualityPage(gatePage(1, 0, 0)))
     }
 }
