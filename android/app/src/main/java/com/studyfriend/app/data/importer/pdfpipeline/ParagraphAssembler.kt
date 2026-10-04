@@ -74,15 +74,19 @@ object ParagraphAssembler {
         // curMax 只在行文本实际进入 cur 时更新（takeIn）：断段臂先 flush 再 takeIn，
         // 顺序反了会把断段行的字号混进前一段（单测 p3a_titleFollowedByBody 锁定）
         var curMax = 0f
+        // 段首行 y0（P4 图锚定数据源）：段首行进入 cur 时记录，flush 后重置
+        var curY0 = -1f
 
         fun flush() {
             val t = cur.toString().trim()
-            if (t.isNotEmpty()) paras.add(Para(t, size = curMax))
+            if (t.isNotEmpty()) paras.add(Para(t, size = curMax, y0 = curY0))
             cur.setLength(0)
             curMax = 0f
+            curY0 = -1f
         }
 
         fun takeIn(line: PLine) {
+            if (cur.isEmpty()) curY0 = line.y0
             curMax = max(curMax, line.size)
             cur.append(line.text)
         }

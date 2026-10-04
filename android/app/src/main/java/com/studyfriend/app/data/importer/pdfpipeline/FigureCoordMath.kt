@@ -64,16 +64,36 @@ object FigureCoordMath {
 
     /**
      * CTM → 方向仿射（计划案 v1.8，r8-P2-8）：90° 倍数旋转（可带翻转/均匀缩放）→ 归一化
-     * 仿射，阶段 2 编码前据此把像素转正；斜切/非 90° 旋转/非均匀缩放 → null，
+     * 仿射，阶段 2 编码前据此把像素转正；斜切/非 90° 旋转 → null，
      * 走「按原始方向展示 + parseNote 提示」分支。
+     * [srcW]/[srcH] 提供时均匀性按「pt/px」判定（n1 对源 x 轴、n2 对源 y 轴）——
+     * 显示 bbox 长宽比 ≠ 像素长宽比的拉伸显示图（pt 非均匀、像素均匀）照常转正；
+     * 缺省时按 pt 均匀判定（J1 既有用例口径）。
      */
-    fun ctmToAffine(a: Float, b: Float, c: Float, d: Float, e: Float, f: Float): CtmAffine? {
+    fun ctmToAffine(
+        a: Float,
+        b: Float,
+        c: Float,
+        d: Float,
+        e: Float,
+        f: Float,
+        srcW: Int? = null,
+        srcH: Int? = null,
+    ): CtmAffine? {
         val n1 = sqrt(a * a + b * b)
         val n2 = sqrt(c * c + d * d)
         if (n1 < 1e-6f || n2 < 1e-6f) return null
-        // 正交（轴点积≈0）且均匀缩放（两轴模长一致）
+        // 正交（轴点积≈0）
         if (abs(a * c + b * d) > 1e-3f * n1 * n2) return null
-        if (abs(n1 - n2) > 1e-3f * max(n1, n2)) return null
+        // 均匀缩放：像素口径（有源尺寸）优先——同一旋转图各像素轴缩放一致即转正安全
+        val uniformOk = if (srcW != null && srcH != null && srcW > 0 && srcH > 0) {
+            val px1 = n1 / srcW
+            val px2 = n2 / srcH
+            abs(px1 - px2) <= 1e-3f * max(px1, px2)
+        } else {
+            abs(n1 - n2) <= 1e-3f * max(n1, n2)
+        }
+        if (!uniformOk) return null
         val ux = a / n1
         val uy = b / n1
         val vx = c / n2

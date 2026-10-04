@@ -18,9 +18,11 @@ data class PLine(
  * 段落；footnote=true 为页脚小字区段落（视觉转写的注释也归此）。
  * size = 段内最大字号，单位 pt（磅），与 PLine.size 同源同单位；0f=字号未知
  * （assembleText(styleAware=true) 不打〔标题〕前缀、不拦任何标题命中，安全方向）。
- * 内存数据类：持久化经 ParsedPara→Room Entity 转换，size 不入库、无 migration 问题。
+ * y0 = 段首行显示空间 y0（pt，y 自顶向下；crossPageMerge 时保留合并主体段的原 y0），
+ * P4 示意图锚定 ordAfterPara 的数据源；-1f=未知（视觉转写整页替换等无几何来源的构造）。
+ * 内存数据类：持久化经 ParsedPara→Room Entity 转换，size/y0 不入库、无 migration 问题。
  */
-data class Para(val text: String, val footnote: Boolean = false, val size: Float = 0f)
+data class Para(val text: String, val footnote: Boolean = false, val size: Float = 0f, val y0: Float = -1f)
 
 /**
  * 单页清洗产物。paras 可变：视觉转写整页替换时由调用方改写。

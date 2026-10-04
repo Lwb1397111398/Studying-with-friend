@@ -228,7 +228,7 @@ object PdfCleaner {
             val footerBandStart = pageHeight * (1f - FOOTER_BAND_FACTOR)
 
             val kept = mutableListOf<PLine>()
-            val footnotes = mutableListOf<String>()
+            val footnoteLines = mutableListOf<PLine>()
             for (line in lines) {
                 val norm = stripControl(maybeYiNormalize(line.text))
                 if (norm.isBlank()) continue
@@ -246,7 +246,7 @@ object PdfCleaner {
                 if (!tocLike && l.y0 >= footerBandStart &&
                     (l.size in 0.1f..(stats.bodySize * FOOTER_SIZE_FACTOR) || footnoteMarked(l.text))
                 ) {
-                    footnotes.add(l.text)
+                    footnoteLines.add(l)
                     continue
                 }
                 kept.add(l)
@@ -259,7 +259,7 @@ object PdfCleaner {
                     PageOut(
                         idx + 1, tocLike = true, rawChars = allText.length, puaCount = puaCount,
                         lineCount = 0, shortLineCount = 0,
-                        paras = kept.map { Para(it.text, size = it.size) },
+                        paras = kept.map { Para(it.text, size = it.size, y0 = it.y0) },
                         firstLine = null, lastLine = null,
                     ),
                 )
@@ -269,8 +269,14 @@ object PdfCleaner {
             val lineCount = kept.size
             val shortLineCount = kept.count { it.x0 >= 0f && it.x1 < stats.right - 1.5f * stats.bodySize }
             val paras = ParagraphAssembler.assemble(kept, stats, hits).toMutableList()
-            if (footnotes.isNotEmpty()) {
-                paras.add(Para(joinTexts(footnotes), footnote = true))
+            if (footnoteLines.isNotEmpty()) {
+                // 脚注段 y0 = 首条脚注行 y0（P4 锚定：图在脚注上方时锚到脚注段之前的段）
+                paras.add(
+                    Para(
+                        joinTexts(footnoteLines.map { it.text }), footnote = true,
+                        y0 = footnoteLines.first().y0,
+                    ),
+                )
             }
             out.add(
                 PageOut(
@@ -308,10 +314,13 @@ object PdfCleaner {
             if (firstGeom.x0 >= stats.left + 0.8f * stats.bodySize) continue
             if (firstGeom.size >= stats.bodySize * 1.15f) continue
             cur.paras.removeAt(0)
-            // size 取两侧 max（P3a）：305 行守卫已保证首段非标题，此处防御性保留字号证据
+            // size 取两侧 max（P3a）：305 行守卫已保证首段非标题，此处防御性保留字号证据；
+            // y0 保留主体段（prev 末段）原值——P4 图锚定按页内段 y0 序列定位，续接文本
+            // 属于主体段，其几何锚点不变
             prev.paras[prev.paras.size - 1] = Para(
                 joinTexts(listOf(last.text, first.text)),
                 size = max(last.size, first.size),
+                y0 = last.y0,
             )
         }
     }

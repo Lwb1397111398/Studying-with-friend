@@ -156,6 +156,25 @@ class FigureCoordMathTest {
     }
 
     @Test
+    fun ctmToAffine_pixelUniformStretchRotation_returnsAffine() {
+        // B2 实测场景（fixture p20）：旋转 90° 且显示 bbox 长宽比 ≠ 像素长宽比——
+        // cm [0 150 -100 0 350 330]（源 300×200，显示 100×150pt）：pt 模长 150≠100
+        // 非均匀，但像素口径 150/300 == 100/200 均匀 → 有源尺寸时应转正而非 null
+        assertNull(FigureCoordMath.ctmToAffine(0f, 150f, -100f, 0f, 350f, 330f))
+        val aff = FigureCoordMath.ctmToAffine(0f, 150f, -100f, 0f, 350f, 330f, srcW = 300, srcH = 200)
+        assertNotNull(aff)
+        assertEquals(0f, aff!!.scaleX, 0.01f)
+        assertEquals(-150f, aff.skewX, 0.01f) // snap(vx)=-1 × n1=150（skew 带 scale 因子，提取器只取符号）
+        assertEquals(150f, aff.skewY, 0.01f)
+        assertEquals(0f, aff.scaleY, 0.01f)
+        assertFalse(aff.flip)
+        // 像素口径下真非均匀（拉伸旋转）仍拒绝
+        assertNull(
+            FigureCoordMath.ctmToAffine(0f, 150f, -100f, 0f, 0f, 0f, srcW = 300, srcH = 100),
+        )
+    }
+
+    @Test
     fun ctmToAffine_degenerate_returnsNull() {
         assertNull(FigureCoordMath.ctmToAffine(0f, 0f, 0f, 0f, 0f, 0f))
     }
