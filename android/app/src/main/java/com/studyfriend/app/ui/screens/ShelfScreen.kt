@@ -1,6 +1,7 @@
 package com.studyfriend.app.ui.screens
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,14 +13,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -30,6 +36,7 @@ import com.studyfriend.app.data.BookRepository
 import com.studyfriend.app.data.db.BookEntity
 import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.VisionProgress
+import kotlinx.coroutines.launch
 
 @Composable
 fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
@@ -43,6 +50,9 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
     // 视觉增强徽标（OPT-F）：后台转写进度 "视觉增强 x/y"，有队列的书才显示
     val visionProgress by repo.visionProgressFlow().collectAsStateWithLifecycle(initialValue = emptyList())
     val visionByBook = remember(visionProgress) { visionProgress.associate { it.bookId to it } }
+    // 长按删除：数据层 removeBook 已有（CASCADE+磁盘图清理），此处只补 UI 入口
+    var pendingDelete by remember { mutableStateOf<BookEntity?>(null) }
+    val scope = rememberCoroutineScope()
 
     Box(Modifier.fillMaxSize()) {
         val list = books
@@ -52,7 +62,10 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
                 title = "书架还是空的",
                 subtitle = "点右下角 + 导入 TXT，开始和搭子一起读书",
             )
-            else -> BookList(list, dueByBook, visionByBook, onOpenBook)
+            else -> BookList(
+                list, dueByBook, visionByBook, onOpenBook,
+                onDeleteRequest = { pendingDelete = it },
+            )
         }
 
         FloatingActionButton(
@@ -64,14 +77,33 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
             Icon(Icons.Filled.Add, contentDescription = "导入书籍")
         }
     }
+
+    pendingDelete?.let { book ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除《${book.title}》？") },
+            text = { Text("章节、复习记录和插图会一并删除，无法恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDelete = null
+                    scope.launch { repo.removeBook(book) }
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            },
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookList(
     books: List<BookEntity>,
     dueByBook: Map<Long, Int>,
     visionByBook: Map<Long, VisionProgress>,
     onOpenBook: (Long) -> Unit,
+    onDeleteRequest: (BookEntity) -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
         item {
@@ -85,9 +117,10 @@ private fun BookList(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(
+                    .combinedClickable(
                         enabled = book.status == DbValues.BOOK_READY,
                         onClick = { onOpenBook(book.id) },
+                        onLongClick = { onDeleteRequest(book) },
                     )
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
