@@ -74,12 +74,14 @@ class OcrImportRunnerPageGateTest {
         nDims: Int = 2,
         nMeans: Int = 2,
         nConfs: Int = 2,
+        nDrafts: Int = 2,
     ) = OcrImportRunner.Outcome(
         pagesLines = List(nLines) { emptyList() },
         dims = List(nDims) { 100f to 200f },
         fallbackPages = emptyList(),
         pageMeanConfs = List(nMeans) { 0.9f },
         pageLineConfs = List(nConfs) { emptyList() },
+        pageDrafts = List(nDrafts) { emptyList() },
     )
 
     @Test
@@ -90,6 +92,11 @@ class OcrImportRunnerPageGateTest {
     @Test(expected = IllegalArgumentException::class)
     fun `outcome rejects mismatched lineConfs length`() {
         outcome(nConfs = 3)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `outcome rejects mismatched drafts length`() {
+        outcome(nDrafts = 3)
     }
 
     @Test(expected = IllegalArgumentException::class)

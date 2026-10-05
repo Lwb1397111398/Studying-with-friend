@@ -510,6 +510,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      * Debug 抽样（v1.1 P1-4）：仅 DEBUG 构建（编译期常量短路 + R8 死代码消除，release
      * 无此路径也无 ocr_debug 目录）。每 20 页抽 1 页：页面 PNG + 识别文本成对落盘
      * filesDir/ocr_debug/<bookKey>/，S7/S8 人工核查识别质量用。
+     * 兜底页草稿全量落盘（d<页号>.txt：行文本+行尾 tab+置信度 3 位）——置信度-质量
+     * 分层标定（P6b 落地报告 §7 画线）的数据源，过闸页草稿不入库故只落兜底页。
      */
     private fun writeOcrDebugSample(uri: Uri, outcome: OcrImportRunner.Outcome) {
         if (!BuildConfig.DEBUG) return
@@ -517,6 +519,16 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<StudyApp>()
             val dir = File(ctx.filesDir, "ocr_debug/${ocrBookKey()}")
             dir.mkdirs()
+            outcome.fallbackPages.forEach { fb ->
+                val lines = outcome.pageDrafts.getOrNull(fb.pageNo - 1).orEmpty()
+                // 行文本只作 %s 参数不作模板（OCR 文本含 % 会炸 UnknownFormatConversion，
+                // 实录：d094 附近「%车」致中断，p 抽样一并跳过）；单页失败不拖垮其余落盘
+                runCatching {
+                    File(dir, "d%03d.txt".format(fb.pageNo)).writeText(
+                        lines.joinToString("\n") { "%s\t%.3f".format(it.text, it.confidence) },
+                    )
+                }.onFailure { Log.w("P6b", "draft p${fb.pageNo}: ${it.message}") }
+            }
             PdfPageRenderer(ctx, uri).use { renderer ->
                 for (p in 1..outcome.pagesLines.size step 20) {
                     val bmp = renderer.renderPageBitmap(p - 1)

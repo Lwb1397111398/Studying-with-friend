@@ -62,16 +62,22 @@ class OcrImportRunner(
         /** 每页行级置信度（与 pagesLines 同序同长，碎片合并后 conf=min 口径）；
          *  兜底页空列表。离线校验快照（v1.3 P1-2）用 */
         val pageLineConfs: List<List<Float>>,
+        /** 每页识别草稿（规则 a/b 后原始行，与 pagesLines 同序同长）；仅兜底页非空、
+         *  过闸页恒空（草稿不入库）。生产管线不消费，供 DEBUG 抽样落盘做置信度-质量
+         *  分层标定（P6b 落地报告 §7 选项 A 的画线依据） */
+        val pageDrafts: List<List<OcrLine>>,
     ) {
         init {
-            // 逐页列表四方同长不变量（S6）：快照/告警按页索引取值，错位会越界或张冠李戴
+            // 逐页列表五方同长不变量（S6）：快照/告警按页索引取值，错位会越界或张冠李戴
             require(
                 pagesLines.size == dims.size &&
                     dims.size == pageMeanConfs.size &&
-                    pageMeanConfs.size == pageLineConfs.size,
+                    pageMeanConfs.size == pageLineConfs.size &&
+                    pageLineConfs.size == pageDrafts.size,
             ) {
                 "Outcome 逐页列表长度不一致：lines=${pagesLines.size} dims=${dims.size} " +
-                    "meanConfs=${pageMeanConfs.size} lineConfs=${pageLineConfs.size}"
+                    "meanConfs=${pageMeanConfs.size} lineConfs=${pageLineConfs.size} " +
+                    "drafts=${pageDrafts.size}"
             }
         }
     }
@@ -154,6 +160,7 @@ class OcrImportRunner(
             val fallbacks = mutableListOf<FallbackPage>()
             val pageMeanConfs = mutableListOf<Float>()
             val pageLineConfs = mutableListOf<List<Float>>()
+            val pageDrafts = mutableListOf<List<OcrLine>>()
             var fragmentLinesMerged = 0 // 规则 d 合并掉的碎片行数（判据③c 生产可观测）
             val pass2Start = System.currentTimeMillis()
             val pagesLines = pagesOcrLines.mapIndexed { idx, lines ->
@@ -162,6 +169,7 @@ class OcrImportRunner(
                     fallbacks.add(FallbackPage(pageNo, "DIAGRAM"))
                     pageMeanConfs.add(0f)
                     pageLineConfs.add(emptyList())
+                    pageDrafts.add(lines)
                     emptyList() // diagram 页整页兜底，OCR 草稿不入库
                 } else {
                     val reason = PageGate.decide(lines)
@@ -169,12 +177,14 @@ class OcrImportRunner(
                         fallbacks.add(FallbackPage(pageNo, reason))
                         pageMeanConfs.add(0f)
                         pageLineConfs.add(emptyList())
+                        pageDrafts.add(lines)
                         emptyList()
                     } else {
                         pageMeanConfs.add(PageGate.meanConf(lines))
                         val merged = OcrTextPostProcessor.mergeFragments(lines, bodySize)
                         fragmentLinesMerged += lines.size - merged.size
                         pageLineConfs.add(merged.map { it.confidence })
+                        pageDrafts.add(emptyList())
                         merged.map { it.toPLine() }
                     }
                 }
@@ -192,6 +202,7 @@ class OcrImportRunner(
                 fallbackPages = fallbacks,
                 pageMeanConfs = pageMeanConfs,
                 pageLineConfs = pageLineConfs,
+                pageDrafts = pageDrafts,
             )
         }
     }
