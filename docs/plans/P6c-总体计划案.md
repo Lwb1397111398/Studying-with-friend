@@ -315,8 +315,10 @@ import fitz
 
 
 def load_dict(p: str):
-    # 手机侧 open(): 空行过滤（OcrEngine.kt:56）
-    return [ln for ln in Path(p).read_text("utf-8").splitlines() if ln.strip()]
+    # 手机侧 open()（OcrEngine.kt:56）: readText().lines().filter { it.isNotEmpty() }
+    # ——只滤真空行；第 1 行的全角空格「　」是真实词条（class 1），必须保留
+    # （Python strip() 会把「　」当空白滤掉 → 全部类号错位 1，2026-10-05 对账 A 实录）
+    return [ln for ln in Path(p).read_text("utf-8").splitlines() if ln != ""]
 
 
 def norm_chw(img_rgb: np.ndarray) -> np.ndarray:
@@ -431,11 +433,14 @@ def crop_and_rec_pre(img: np.ndarray, box, sx: float, sy: float, rec_aspect: boo
         pad[:, :, :rw] = x
         return pad
     # 生产口径：OcrEngine.kt:100-115（取整+钳制+硬拉伸 320x48）
+    # 裁剪=Bitmap.createBitmap(bitmap, x0, y0, x1-x0, y1-y0)——宽高 x1-x0/y1-y0，
+    # 即不含 x1/y1 行列（det 框含端点语义下手机实际丢最后一行列，逐位复刻照抄；
+    # 含端点版每框多 1px → 降采样相位偏移 → 对账 A 仅 4/20，2026-10-05 实录）
     x0 = int(box[0] * sx); y0 = int(box[1] * sy)
     x0 = min(max(x0, 0), W - 2); y0 = min(max(y0, 0), H - 2)
     x1 = int(box[2] * sx); y1 = int(box[3] * sy)
     x1 = min(max(x1, x0 + 1), W - 1); y1 = min(max(y1, y0 + 1), H - 1)
-    crop = img[y0:y1 + 1, x0:x1 + 1]
+    crop = img[y0:y1, x0:x1]
     im = cv2.resize(crop, (320, 48), interpolation=cv2.INTER_LINEAR)
     return norm_chw(im)[0]
 
@@ -503,7 +508,7 @@ def main():
         img = preproc(img, a.preproc)
         if a.unclip == "on":
             im, _ = det_pre(img, det_limit, limit_type)
-            prob = sess.run(None, {"x": norm_chw(im)})[0][0]
+            prob = sess.run(None, {"x": norm_chw(im)})[0][0, 0]  # (N,1,H,W) → [H,W]
             boxes = det_post_unclip(prob)
             lines = []
             for pts, bw, bh in boxes:
@@ -513,7 +518,7 @@ def main():
                     lines.append((txt, cf))
         else:
             im, (sx, sy) = det_pre(img, det_limit, limit_type)
-            prob = sess.run(None, {"x": norm_chw(im)})[0][0]
+            prob = sess.run(None, {"x": norm_chw(im)})[0][0, 0]  # (N,1,H,W) → [H,W]
             boxes = det_post_axis_aligned(prob, det_limit)
             lines = []
             for i in range(0, len(boxes), 8):
