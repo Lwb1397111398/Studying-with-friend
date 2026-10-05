@@ -193,8 +193,10 @@ object PdfLoader {
         onProgress: (page: Int, total: Int) -> Unit = { _, _ -> },
         isCancelled: () -> Boolean = { false },
         allowScanned: Boolean = false,
-        /** P6b S4：true=调用方准备走本地 OCR 管线——跳过幸存图提取（扫描书每页是整页
-         *  图，抓出来会挤爆图库且干扰视觉兜底闸）；文字层照常探测 scanned 判定 */
+        /** P6b S4：true=调用方准备走本地 OCR 管线——扫描书跳过幸存图提取（每页是整页
+         *  图，抓出来会挤爆图库且干扰视觉兜底闸）；文字层照常探测 scanned 判定。
+         *  注意仅对扫描书生效：scanned=false（数字书）一律照常提图，否则插图丢失
+         *  （S7 E2E mfzz 回归实测） */
         ocrMode: Boolean = false,
     ): PdfExtractResult {
         PDFBoxResourceLoader.init(context)
@@ -244,10 +246,13 @@ object PdfLoader {
                     // 跑真 merge 会让「转写页→图页」续接段随整页替换蒸发（预演 KDoc 详述）
                     val pageParaY0s = PdfCleaner.crossPageMergeY0Preview(pageOuts, stats)
                     // P4 图片提取（r11-P1-1 异常隔离）：独立 try-catch，图片失败不拖死文本导入。
-                    // OCR 模式跳过：扫描书幸存图=整页扫描图，抓取无意义且会耗分钟级成本
+                    // OCR 模式跳过仅对扫描书生效（S7 E2E 回归修复）：ocrMode 本意是「扫描书
+                    // 幸存图=整页扫描图，抓取无意义且会耗分钟级成本」；若数字书也跳过，
+                    // 插图全丢且图页不再被排除出视觉队列（E2E 实测 mfzz 队列 146→150、
+                    // figures 4→0，多出的恰是图页 86/482/488/492）
                     var figures = emptyList<ExtractedFigure>()
                     var figureStats: FigureExtractorStats? = null
-                    if (!ocrMode) try {
+                    if (!ocrMode || !scanned) try {
                         // 进度契约（r12-QC3-P1）：图片阶段转发每 50 页回调——630 页大书的
                         // 图片扫描段以分钟计，进度条必须持续可动；代价是数字在文字阶段
                         // 满格后回落再爬一遍，比长时段静止（像卡死）诚实。

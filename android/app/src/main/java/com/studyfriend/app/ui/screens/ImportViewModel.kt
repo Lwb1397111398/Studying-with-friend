@@ -270,6 +270,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             onProgress = { p, t -> progress = p to t },
                             isCancelled = { cancelFlag.get() },
                             allowScanned = vision != null || ocrReady || ocrEnabled,
+                            // ocrMode 仅扫描书生效（extract 内判 scanned）：数字书照常提图
                             ocrMode = ocrReady,
                         )
                         if (result.scanned && ocrReady) {
