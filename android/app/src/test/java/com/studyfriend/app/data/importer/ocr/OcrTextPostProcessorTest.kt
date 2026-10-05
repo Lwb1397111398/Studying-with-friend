@@ -235,12 +235,37 @@ class OcrTextPostProcessorTest {
         assertEquals(243, checked) // 8 页行总数（38+31+30+36+30+30+41+7）
     }
 
+    // ================= D 判据：独立验证（S2b fixture，训练/测试分离） =================
+
+    @Test
+    fun `rule c - independent validation 3 diagram hit and 3 body zero false positive`() {
+        // S2b 补跑 fixture（docs/plans/P6b 计划案 §S2b）：6 页全在 8 页标定集外。
+        // DIAGRAM 组三形态：p135 横排主体+竖排侧标签（机制⑥）/p218 行内竖排标签（机制⑥）
+        // /p266 整页旋转图（机制④）；BODY 组 p055/p119/p398 预检竖排框零命中。
+        // p219 横排树状图页不入集：规则 c 按设计不覆盖（树线字符被 OCR 认成「厂」「L」），
+        // 属 P6c DocLayout 移交范围（t3_dval_run.py 头注释记档）。
+        val root = Json.parseToJsonElement(readDvalFixture()).jsonObject
+        val expectedType = root["expected_type"]!!.jsonObject
+        root["pages"]!!.jsonArray.forEach { p ->
+            val page = p.jsonObject
+            val pageNum = page["page"]!!.jsonPrimitive.int
+            val lines = page["lines"]!!.jsonArray.map { it.toOcrLine() }
+            val want = expectedType[pageNum.toString()]!!.jsonPrimitive.content
+            assertEquals("p%03d".format(pageNum), want, OcrTextPostProcessor.classifyPage(lines).name)
+        }
+    }
+
     // ================= fixture 读取 =================
 
     private fun readFixture(): String =
         javaClass.getResourceAsStream("/ocr/t3_sample8.json")
             ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
             ?: error("fixture 缺失：src/test/resources/ocr/t3_sample8.json")
+
+    private fun readDvalFixture(): String =
+        javaClass.getResourceAsStream("/ocr/t3_dval.json")
+            ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+            ?: error("fixture 缺失：src/test/resources/ocr/t3_dval.json")
 
     private fun kotlinx.serialization.json.JsonElement.toOcrLine(): OcrLine {
         val o = jsonObject
