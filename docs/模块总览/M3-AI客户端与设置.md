@@ -8,7 +8,7 @@
 | 功能 | 说明 |
 | --- | --- |
 | 设置页 | API 地址（placeholder 提示"一般以 /v1 结尾"）/ 模型名 / 温度（0.0–1.0）/ API Key 密码框（打码显示、trailingIcon 清除） |
-| 扫描书本地识别开关（P6b S4） | `ocrEnabled`（默认开）即点即存（`saveOcrEnabled`，键 `ocr_enabled`）；关闭后扫描版 PDF 回退纯视觉路径。开关下方展示模型就绪状态（`OcrModelStore.modelsPresent`=filesDir/ocr_models 三文件齐，VM init 读一次，S5 下载器落地后接刷新）；另存 OCR 反馈计数（`ocr_feedback_total`+按书 `ocr_feedback_book_*`，≥3 次下次导入提示升级）与 `ocr_last_version`（引擎升级重导触发用，UI 延后） |
+| 扫描书本地识别开关（P6b S4/S5） | `ocrEnabled`（默认开）即点即存（`saveOcrEnabled`，键 `ocr_enabled`）；关闭后扫描版 PDF 回退纯视觉路径。开关下方展示模型就绪状态（`OcrModelStore.modelsPresent`=filesDir/ocr_models 三文件齐，VM init 读一次）；未就绪时显示「下载识别模型」按钮（`downloadOcrModels`：`ocrDownloadPct!=null` 防重入→解 GitHub 只读令牌→`OcrModelDownloader.downloadModels` IO 下载，`ocrDownloadPct` 驱动进度条，成功刷新就绪态+人话 message，失败报错，finally 清进度态）；另存 OCR 反馈计数（`ocr_feedback_total`+按书 `ocr_feedback_book_*`，≥3 次下次导入提示升级）与 `ocr_last_version`（引擎升级重导触发用，UI 延后） |
 | 视觉兜底配置 | 开关 + 视觉 API 地址 + 视觉 API Key（独立加密存 `vision_key_enc`）+ 视觉模型名；地址/Key 留空回退主配置（文本走 A 家、视觉兜底走 B 家时才填专属值）； OPT-E 引入。**OPT-F 起：点「保存」若视觉队列有待转写页，自动重调度全部队列任务（`reenqueueAllPending`，REPLACE）——新 Key/模型立即生效开跑；App 启动还有 `restorePending` 续跑兜底（进程死亡/重启不丢队列）** |
 | Key 加密存储 | AndroidKeyStore AES-256 密钥 + SecretCrypto 协议：12B 随机 IV + 128 位 GCM tag，payload = `Base64(iv||ct)` 存 settings 表 `api_key_enc`，明文 Key 永不落库 |
 | 密钥失效自愈 | 解密任何异常（换机/清数据/密文损坏）→ 删旧密文 + 中文提示重填；encrypt 同样包装为 SecretCryptoException |
@@ -75,5 +75,5 @@ M4 段落讲解 / M5 章末总结将复用 `AiClient.chatJson(req, deserializer,
 - 设置页新增「应用更新」区块：当前版本（BuildConfig.VERSION_NAME）、手动「检查更新」、「自动检查更新」开关（即点即存）、GitHub 访问令牌输入（密码框 + 已存清除）+「保存令牌」+「如何获取令牌？」步骤指引弹窗。界面与状态机在 `UpdateViewModel/UpdateDialog`（详见 M7），本模块只提供存储面。
 - `SettingsRepository` 新增：`github_token_enc`（与 AI Key 同一套 SecretCrypto 加密落库）、`update_auto_check`（缺省开）、`update_last_check_ms`（24h 节流）、`update_api_base`（测试覆盖用隐藏键，默认空 = 官方 GitHub API）。
 - `SettingsSnapshot` 相应加 `hasGithubToken / updateAutoCheck / updateApiBase` 三字段。
-- 最后更新：2026-10-05 P6b S4 扫描书本地识别开关（ocrEnabled 即点即存+模型就绪展示）。
+- 最后更新：2026-10-05 P6b S5 模型下载入口（设置页「下载识别模型」按钮+进度条+就绪态刷新，OcrModelDownloader 令牌下载，防重入）。
 - 2026-10-01（M7 接入）。

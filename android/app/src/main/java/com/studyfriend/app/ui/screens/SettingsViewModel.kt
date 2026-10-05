@@ -8,7 +8,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.SettingsRepository
+import com.studyfriend.app.data.importer.ocr.OcrModelDownloader
 import com.studyfriend.app.data.importer.ocr.OcrModelStore
+import com.studyfriend.app.data.update.UpdateChecker
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
@@ -59,6 +63,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var ocrModelsReady by mutableStateOf(false)
         private set
+    var ocrDownloadPct by mutableStateOf<Int?>(null)
+        private set  // null=未在下载；0-100=下载中
 
     private var testJob: Job? = null
 
@@ -195,6 +201,38 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 error = "保存视觉开关失败：${e.message ?: "未知错误"}"
+            }
+        }
+    }
+
+    /**
+     * 下载 OCR 模型（P6b S5）：GitHub Release ocr-models-v1 三件套 ~21MB →
+     * filesDir/ocr_models/，SHA-256 校验；令牌用 M7 设置页存的 GitHub 只读令牌
+     * （私有仓库拉资产必须带，没有则 API 404 报人话）。下载中禁止重复触发。
+     */
+    fun downloadOcrModels() {
+        if (ocrDownloadPct != null) return
+        ocrDownloadPct = 0
+        viewModelScope.launch {
+            try {
+                val token = repo.decryptGithubTokenOrNull()
+                withContext(Dispatchers.IO) {
+                    OcrModelDownloader.downloadModels(
+                        token = token,
+                        modelsDir = OcrModelStore.modelsDir(getApplication<StudyApp>()),
+                        onProgress = { done, total, pct ->
+                            ocrDownloadPct = (((done - 1) * 100 + pct) / total).coerceIn(0, 100)
+                        },
+                    )
+                }
+                ocrModelsReady = OcrModelStore.modelsPresent(getApplication<StudyApp>())
+                message = "识别模型下载完成，现在可以导入扫描书了"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = "模型下载失败：${e.message ?: "未知错误"}"
+            } finally {
+                ocrDownloadPct = null
             }
         }
     }

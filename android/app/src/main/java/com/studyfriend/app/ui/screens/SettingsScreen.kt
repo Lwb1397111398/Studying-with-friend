@@ -163,10 +163,22 @@ fun SettingsScreen(vm: SettingsViewModel, updateVm: UpdateViewModel) {
                     )
                     if (!vm.ocrModelsReady) {
                         Text(
-                            "识别模型尚未下载，首次导入扫描书时会提示下载（约 21MB）",
+                            "识别模型尚未下载（约 21MB，需联网一次，此后离线识别）",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.tertiary,
                         )
+                        val pct = vm.ocrDownloadPct
+                        if (pct != null) {
+                            LinearProgressIndicator(
+                                progress = { pct / 100f },
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            )
+                        } else {
+                            Button(
+                                onClick = { vm.downloadOcrModels() },
+                                modifier = Modifier.padding(top = 4.dp),
+                            ) { Text("下载识别模型") }
+                        }
                     }
                 }
                 Switch(checked = vm.ocrEnabled, onCheckedChange = { vm.changeOcrEnabled(it) })

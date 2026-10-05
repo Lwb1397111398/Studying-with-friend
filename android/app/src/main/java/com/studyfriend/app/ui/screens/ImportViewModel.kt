@@ -259,13 +259,17 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     if (isPdfFile) {
                         phase = "提取 PDF 文字"
                         val vision = settings.buildVisionTranscriber()
-                        // P6b S4：OCR 就绪（开关开 + 模型三件齐）时扫描书走本地识别主路径
-                        val ocrReady = settings.load().ocrEnabled && OcrModelStore.modelsPresent(app)
+                        // P6b S4/S5：OCR 就绪（开关开 + 模型三件齐）时扫描书走本地识别主路径；
+                        // 开关开但模型未下载时仍放行 extract（否则扫描书在 extract 内提前抛错，
+                        // 拿不到 scanned 标志引导用户去设置页下载）
+                        val ocrEnabled = settings.load().ocrEnabled
+                        val modelsReady = OcrModelStore.modelsPresent(app)
+                        val ocrReady = ocrEnabled && modelsReady
                         val result = PdfLoader.extract(
                             app, uri,
                             onProgress = { p, t -> progress = p to t },
                             isCancelled = { cancelFlag.get() },
-                            allowScanned = vision != null || ocrReady,
+                            allowScanned = vision != null || ocrReady || ocrEnabled,
                             ocrMode = ocrReady,
                         )
                         if (result.scanned && ocrReady) {
@@ -277,6 +281,12 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             runTocProbe(ocrResult, uri)
                             content = ocrResult.assembleText(styleAware = true)
                         } else {
+                            if (result.scanned && ocrEnabled && !modelsReady && vision == null) {
+                                throw PdfImportException(
+                                    "这本书是扫描版（没有文字层）；「扫描书本地识别」的模型还没下载，" +
+                                        "请先到设置页点「下载识别模型」（约 21MB）再导入，或配置视觉模型",
+                                )
+                            }
                             pendingFigures = result.figures
                             figureStats = result.figureStats
                             figureNoteDetail = FigureParseNote.detail(

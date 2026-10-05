@@ -110,7 +110,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // PDF 文本提取（pdfbox 2.0 的 Android 移植）
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
-    // P6a 判据③ PoC：onnxruntime-android（PP-OCRv5 mobile det+rec 推理，assets/ocr/）
+    // P6b OCR 推理（PP-OCRv5 mobile det+rec；模型 ~21MB 不进 APK，走 S5 GitHub Release 下载）
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     // JBIG2 等解码缺口不走 ImageIO 插件（Android 无 javax.imageio，装了也轮不到）——
     // 统一由系统 PdfRenderer 兜底渲染（PdfFigureExtractor.renderAndSave，J2 实测救回 4 张）

@@ -82,6 +82,9 @@ class OcrImportRunner(
     }
 
     private suspend fun runLocked(): Outcome {
+        // open/close 在同一执行器内成对（S4 质检自查补：close 在 finally，open 缺失会让
+        // recognize 抛「未 open」——JVM 单测测不到引擎真实加载，S7 E2E 才暴露，此处堵死）
+        engine.open(OcrModelStore.modelsDir(context))
         PdfPageRenderer(context, uri).use { renderer ->
             val total = renderer.pageCount
             // ---- 竖排书两段式排除（引擎 open 前，纯渲染统计）----

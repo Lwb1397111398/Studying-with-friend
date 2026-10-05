@@ -204,7 +204,8 @@ object UpdateChecker {
         }
     }
 
-    private fun open(url: String, token: String?): HttpURLConnection {
+    /** HTTP 连接工厂（鉴权头/UA/API 版本头统一）；P6b S5 OcrModelDownloader 复用 */
+    internal fun open(url: String, token: String?): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.requestMethod = "GET"
         conn.setRequestProperty("Accept", "application/vnd.github+json")

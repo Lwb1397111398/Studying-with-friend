@@ -35,7 +35,7 @@ interface OcrEngine : AutoCloseable {
 }
 
 /**
- * PP-OCRv5 mobile det+rec 生产引擎（P6a PoC 逻辑移植，OcrPocActivity 同口径）：
+ * PP-OCRv5 mobile det+rec 生产引擎（P6a PoC 逻辑移植，OcrPocActivity 下架后以此为准）：
  * det 预处理 limit 960/32 取整/(x/255−0.5)/0.5 → det 推理 → 后处理（prob>0.3、
  * 8 连通 BFS、轴对齐框、扩张 25%、均值≥0.5 过滤）→ 框按 y 桶 24px+x 排序（阅读序）
  * → rec 批 8（48×320 拉伸）→ CTC greedy 解码（class 0=blank，dict[class−1]）。
