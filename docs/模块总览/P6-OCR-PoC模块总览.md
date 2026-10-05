@@ -1,6 +1,6 @@
 # P6 OCR PoC 模块总览
 
-> **进度（2026-10-05，P6b 完成+画线复核收口）**：P6b S1-S8 全部落地——生产管线 `data/importer/ocr/`（OcrEngine/PpOcrEngine/OcrTextPostProcessor/OcrImportRunner 等），导入主路径接线，PoC activity 已从 App 下架（模型 21MB 出 APK 走 GitHub Release ocr-models-v1 分发）。**E2E 判据结论**：①②③c 过、③③b 阻塞记档、④ No-Go 倾向不自动回退报老板拍板——根因=本文件 §「已知坑」中 PoC 数据（rapidocr PC 原型，median 0.9751）与生产 PP-OCRv5 mobile（median 0.895）置信度口径错位，**本文件的 PoC 判据数据不可外推到生产引擎**；画线复核实证 **0.85 阈值是准的不下调**（质量悬崖恰压 0.85，pageDrafts 401 页草稿全量重算+12 页目视，M2 决策 34）；DPI 140→200 列 P6c 首个实验候选。详见 [M2 导入与解析](M2-导入与解析.md) 决策 33/34、docs/plans/P6b-落地报告.md。下文 OcrPocActivity 流程为历史记录（逻辑已移植 PpOcrEngine）。
+> **进度（2026-10-05，P6b 完成+画线复核收口）**：P6b S1-S8 全部落地——生产管线 `data/importer/ocr/`（OcrEngine/PpOcrEngine/OcrTextPostProcessor/OcrImportRunner 等），导入主路径接线，PoC activity 已从 App 下架（模型 21MB 出 APK 走 GitHub Release ocr-models-v1 分发）。**E2E 判据结论**：①②③c 过、③③b 阻塞记档、④ No-Go 倾向不自动回退报老板拍板——根因=本文件 §「已知坑」中 PoC 数据（rapidocr PC 原型，median 0.9751）与生产 PP-OCRv5 mobile（median 0.895）置信度口径错位，**本文件的 PoC 判据数据不可外推到生产引擎**；画线复核实证 **0.85 阈值是准的不下调**（质量悬崖恰压 0.85，pageDrafts 401 页草稿全量重算+12 页目视，M2 决策 34）；**P6c 质量提升已立项**（换模型+输入侧联动优化，交付文档 docs/plans/P6c-扫描件质量提升交付文档.md）。详见 [M2 导入与解析](M2-导入与解析.md) 决策 33/34、docs/plans/P6b-落地报告.md。下文 OcrPocActivity 流程为历史记录（逻辑已移植 PpOcrEngine）。
 
 ## 模块职责（一句话）
 验证 PP-OCRv5 mobile（det+rec）在安卓端识别扫描书页面的可行性（P6a PoC），为 P6b 扫描件管线立项提供 Go/No-Go 数据。
