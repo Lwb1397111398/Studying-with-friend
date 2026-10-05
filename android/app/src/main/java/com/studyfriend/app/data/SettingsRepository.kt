@@ -7,6 +7,7 @@ import com.studyfriend.app.data.ai.SecretStore
 import com.studyfriend.app.data.ai.isStructurallyCorrupt
 import com.studyfriend.app.data.db.SettingEntity
 import com.studyfriend.app.data.db.StudyDatabase
+import com.studyfriend.app.data.importer.pdfpipeline.TextSourceRow
 import com.studyfriend.app.data.importer.pdfpipeline.TocVisionParser
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import java.io.File
@@ -32,6 +33,8 @@ data class SettingsSnapshot(
     val updateAutoCheck: Boolean,
     /** 更新源 API 地址覆盖：仅测试/私有部署用，空 = 官方 GitHub API */
     val updateApiBase: String,
+    /** 扫描书本地识别（OCR）开关（P6b S4）：默认开；off = 扫描书走现状路径（回滚方案载体） */
+    val ocrEnabled: Boolean,
 )
 
 /**
@@ -63,6 +66,7 @@ class SettingsRepository(
             hasGithubToken = db.settingDao().get(KEY_GITHUB_TOKEN_ENC)?.value != null,
             updateAutoCheck = db.settingDao().get(KEY_UPDATE_AUTO)?.value != "false",
             updateApiBase = db.settingDao().get(KEY_UPDATE_API_BASE)?.value.orEmpty(),
+            ocrEnabled = db.settingDao().get(KEY_OCR_ENABLED)?.value != "false",
         )
     }
 
@@ -122,6 +126,40 @@ class SettingsRepository(
     suspend fun clearVisionKey() {
         db.settingDao().delete(KEY_VISION_KEY_ENC)
     }
+
+    // ---- 扫描书本地识别（P6b S4）：开关 / 用户反馈计数 / OCR 版本标记 ----
+
+    /** OCR 开关即点即存（off = 扫描书走现状路径，OCR 产出缓存不删） */
+    suspend fun saveOcrEnabled(enabled: Boolean) {
+        db.settingDao().upsert(SettingEntity(KEY_OCR_ENABLED, if (enabled) "true" else "false"))
+    }
+
+    /**
+     * 用户反馈「识别结果有误？」计数 +1（v1.3 P1-1 回滚评估入口）：
+     * 全局累计 + 按书（书名 key）双记；返回全局累计数，≥3 时导入完成提示升级
+     * 「建议在设置中关闭 OCR」。
+     */
+    suspend fun addOcrFeedback(bookKey: String): Int {
+        val total = (db.settingDao().get(KEY_OCR_FEEDBACK_TOTAL)?.value?.toIntOrNull() ?: 0) + 1
+        val perBookKey = "$KEY_OCR_FEEDBACK_BOOKPrefix$bookKey"
+        val perBook = (db.settingDao().get(perBookKey)?.value?.toIntOrNull() ?: 0) + 1
+        db.withTransaction {
+            db.settingDao().upsert(SettingEntity(KEY_OCR_FEEDBACK_TOTAL, total.toString()))
+            db.settingDao().upsert(SettingEntity(perBookKey, perBook.toString()))
+        }
+        return total
+    }
+
+    suspend fun ocrFeedbackTotal(): Int =
+        db.settingDao().get(KEY_OCR_FEEDBACK_TOTAL)?.value?.toIntOrNull() ?: 0
+
+    /** 记录本次导入使用的 OCR 产出版本（引擎版本升级时供重导提示比对，v1.5 S1 条款） */
+    suspend fun saveLastOcrVersion(version: Int) {
+        db.settingDao().upsert(SettingEntity(KEY_OCR_LAST_VERSION, version.toString()))
+    }
+
+    suspend fun lastOcrVersion(): Int =
+        db.settingDao().get(KEY_OCR_LAST_VERSION)?.value?.toIntOrNull() ?: TextSourceRow.PROD_OCR_V1
 
     // ---- 应用自更新（M7）：GitHub 只读令牌 / 自动检查开关 / 上次检查时间 ----
 
@@ -230,6 +268,11 @@ class SettingsRepository(
         const val KEY_VISION_MODEL = "vision_model"
         const val KEY_VISION_BASE = "vision_base"
         const val KEY_VISION_KEY_ENC = "vision_key_enc"
+        // 扫描书本地识别（P6b S4）
+        const val KEY_OCR_ENABLED = "ocr_enabled"
+        const val KEY_OCR_FEEDBACK_TOTAL = "ocr_feedback_total"
+        const val KEY_OCR_FEEDBACK_BOOKPrefix = "ocr_feedback_book_"
+        const val KEY_OCR_LAST_VERSION = "ocr_last_version"
         // 应用自更新（M7）
         const val KEY_GITHUB_TOKEN_ENC = "github_token_enc"
         const val KEY_UPDATE_AUTO = "update_auto_check"

@@ -1,5 +1,7 @@
 # P6 OCR PoC 模块总览
 
+> **进度（2026-10-05）**：P6b 生产化进行中——生产管线已落地 `data/importer/ocr/`（OcrEngine/PpOcrEngine/OcrTextPostProcessor/OcrImportRunner 等），S4 起导入主路径接线，详见 [M2 导入与解析](M2-导入与解析.md) 的 P6b 小节与 docs/plans/P6b-扫描件管线计划案.md。本文件保留 PoC 判据数据供 S7 E2E 参考。
+
 ## 模块职责（一句话）
 验证 PP-OCRv5 mobile（det+rec）在安卓端识别扫描书页面的可行性（P6a PoC），为 P6b 扫描件管线立项提供 Go/No-Go 数据。
 

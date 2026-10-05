@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.SettingsRepository
+import com.studyfriend.app.data.importer.ocr.OcrModelStore
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
@@ -53,6 +54,12 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     var hasVisionKey by mutableStateOf(false)
         private set
 
+    /** 扫描书本地识别（P6b S4）：开关即点即存；模型就绪与否只读展示 */
+    var ocrEnabled by mutableStateOf(true)
+        private set
+    var ocrModelsReady by mutableStateOf(false)
+        private set
+
     private var testJob: Job? = null
 
     init {
@@ -67,6 +74,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             visionModel = s.visionModel
             visionBaseUrl = s.visionBaseUrl
             hasVisionKey = s.hasVisionKey
+            ocrEnabled = s.ocrEnabled
+            ocrModelsReady = OcrModelStore.modelsPresent(getApplication<StudyApp>())
         }
     }
 
@@ -186,6 +195,21 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 error = "保存视觉开关失败：${e.message ?: "未知错误"}"
+            }
+        }
+    }
+
+    /** 扫描书本地识别开关（P6b S4）：即点即存；下一次导入 PDF 时生效 */
+    fun changeOcrEnabled(enabled: Boolean) {
+        if (enabled == ocrEnabled) return
+        ocrEnabled = enabled
+        viewModelScope.launch {
+            try {
+                repo.saveOcrEnabled(enabled)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = "保存扫描识别开关失败：${e.message ?: "未知错误"}"
             }
         }
     }

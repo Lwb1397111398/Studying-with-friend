@@ -91,6 +91,41 @@ class VisionTranscriber(
         ),
     )
 
+    /**
+     * AI 目视判断竖排（P6b S4 竖排书拒绝链最后一环）：全本投影扫描疑似后抽 3 页问
+     * 视觉模型；答「是/否」，解析失败返回 null（调用方按「确认不了不拒绝」放行）。
+     */
+    suspend fun isVerticalPage(pngBase64: String): Boolean? {
+        val raw = try {
+            AiClient.chat(
+                ChatRequest(
+                    baseUrl = baseUrl,
+                    apiKey = apiKey,
+                    model = model,
+                    temperature = 0.1,
+                    maxTokens = 2000,
+                    messages = listOf(
+                        AiMessage(
+                            role = "user",
+                            content = VERTICAL_PROMPT,
+                            images = listOf("data:image/png;base64,$pngBase64"),
+                        ),
+                    ),
+                    readTimeoutMs = 120_000,
+                ),
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return null
+        }
+        return when {
+            raw.contains("是竖排") || raw.contains("VERTICAL") -> true
+            raw.contains("不是竖排") || raw.contains("横排") || raw.contains("HORIZONTAL") -> false
+            else -> null
+        }
+    }
+
     private fun parseTranscription(raw: String): PageTranscription? = TranscriptionJson.parse(raw)
 
     private fun passesLengthGuard(originChars: Int, transcribedChars: Int): Boolean =
@@ -100,6 +135,11 @@ class VisionTranscriber(
         const val TRANSCRIBE_ATTEMPTS = 2
         const val LENGTH_GUARD_ORIGIN_MIN = 200
         const val LENGTH_GUARD_RATIO = 0.5
+
+        /** 竖排目视判定的钉死格式提示词：强约束短语，解析按短语匹配（P6b S4） */
+        private val VERTICAL_PROMPT =
+            "这张书页图片里的文字排版是竖排（从上到下、从右到左阅读）还是横排？" +
+                "只回答以下四个短语之一：是竖排 / 不是竖排。不要任何解释。"
 
         /** 实测有效的钉死格式提示词：只输出 JSON、忠实原文、忽略页眉页脚页码 */
         private val PROMPT =

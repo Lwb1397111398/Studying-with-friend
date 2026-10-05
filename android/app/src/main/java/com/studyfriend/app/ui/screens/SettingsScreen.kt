@@ -147,6 +147,31 @@ fun SettingsScreen(vm: SettingsViewModel, updateVm: UpdateViewModel) {
                 )
             }
 
+            // 扫描书本地识别（P6b S4）：手机本地 OCR 引擎识别扫描版 PDF；开关即点即存
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("扫描书本地识别", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "扫描版 PDF 用手机离线引擎识别文字，无需联网、逐页约 1 秒。识别不了的" +
+                            "图示页会自动转交视觉模型增强；关闭后扫描书只能靠视觉模型整本转写",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (!vm.ocrModelsReady) {
+                        Text(
+                            "识别模型尚未下载，首次导入扫描书时会提示下载（约 21MB）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
+                }
+                Switch(checked = vm.ocrEnabled, onCheckedChange = { vm.changeOcrEnabled(it) })
+            }
+
             // 讲解详略三档（总计划 §1 目标 7）：即选即存
             Text("讲解详略", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

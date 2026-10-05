@@ -193,6 +193,9 @@ object PdfLoader {
         onProgress: (page: Int, total: Int) -> Unit = { _, _ -> },
         isCancelled: () -> Boolean = { false },
         allowScanned: Boolean = false,
+        /** P6b S4：true=调用方准备走本地 OCR 管线——跳过幸存图提取（扫描书每页是整页
+         *  图，抓出来会挤爆图库且干扰视觉兜底闸）；文字层照常探测 scanned 判定 */
+        ocrMode: Boolean = false,
     ): PdfExtractResult {
         PDFBoxResourceLoader.init(context)
         val tmp = File(context.cacheDir, "import_${System.nanoTime()}.pdf")
@@ -240,10 +243,11 @@ object PdfLoader {
                     // assembleText（视觉转写之后）执行，这里只做不改对象的 y0 预演——提前
                     // 跑真 merge 会让「转写页→图页」续接段随整页替换蒸发（预演 KDoc 详述）
                     val pageParaY0s = PdfCleaner.crossPageMergeY0Preview(pageOuts, stats)
-                    // P4 图片提取（r11-P1-1 异常隔离）：独立 try-catch，图片失败不拖死文本导入
+                    // P4 图片提取（r11-P1-1 异常隔离）：独立 try-catch，图片失败不拖死文本导入。
+                    // OCR 模式跳过：扫描书幸存图=整页扫描图，抓取无意义且会耗分钟级成本
                     var figures = emptyList<ExtractedFigure>()
                     var figureStats: FigureExtractorStats? = null
-                    try {
+                    if (!ocrMode) try {
                         // 进度契约（r12-QC3-P1）：图片阶段转发每 50 页回调——630 页大书的
                         // 图片扫描段以分钟计，进度条必须持续可动；代价是数字在文字阶段
                         // 满格后回落再爬一遍，比长时段静止（像卡死）诚实。
@@ -298,5 +302,24 @@ object PdfLoader {
         } finally {
             tmp.delete()
         }
+    }
+
+    /**
+     * OCR 管线收尾（P6b S4）：OcrImportRunner 产出的 pagesLines/dims 走与数字路径
+     * 完全共用的 docStats → clean → 跨页续接 y0 预演 → 双栏检测 → PdfExtractResult。
+     * figures 恒空（OCR 模式跳过幸存图提取，扫描书整页图不进图库）。
+     * 纯内存操作，不开 PDF——scanned=true 交调用方决定 OCR 兜底页入队。
+     */
+    fun finalizeOcr(outcome: com.studyfriend.app.data.importer.ocr.OcrImportRunner.Outcome): PdfExtractResult {
+        val stats = PdfCleaner.docStats(outcome.pagesLines, outcome.dims)
+        val pageOuts = PdfCleaner.clean(outcome.pagesLines, outcome.dims, stats)
+        PdfCleaner.crossPageMergeY0Preview(pageOuts, stats) // P4 锚定口径预演（与 extract 同步执行）
+        val landscapeRatio = if (outcome.dims.isEmpty()) 0f
+        else outcome.dims.count { it.second > it.first }.toFloat() / outcome.dims.size
+        return PdfExtractResult(
+            pageOuts, stats, scanned = true,
+            figures = emptyList(), figureStats = null,
+            landscapeRatio, detectDoubleColumn(outcome.pagesLines, stats),
+        )
     }
 }

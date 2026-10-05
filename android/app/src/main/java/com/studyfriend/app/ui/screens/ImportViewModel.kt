@@ -2,6 +2,7 @@ package com.studyfriend.app.ui.screens
 
 import android.app.Application
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
@@ -27,7 +28,12 @@ import com.studyfriend.app.data.importer.PdfExtractResult
 import com.studyfriend.app.data.importer.PdfImportException
 import com.studyfriend.app.data.importer.PdfLoader
 import com.studyfriend.app.data.importer.PdfPageRenderer
+import com.studyfriend.app.BuildConfig
 import com.studyfriend.app.data.importer.TextLoader
+import com.studyfriend.app.data.importer.ocr.OcrImportRunner
+import com.studyfriend.app.data.importer.ocr.OcrModelStore
+import com.studyfriend.app.data.importer.ocr.PpOcrEngine
+import com.studyfriend.app.data.importer.pdfpipeline.TextSourceRow
 import com.studyfriend.app.data.importer.pdfpipeline.ExtractedFigure
 import com.studyfriend.app.data.importer.pdfpipeline.FigureExtractorStats
 import com.studyfriend.app.data.importer.pdfpipeline.FigureParseNote
@@ -50,6 +56,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /** 目录探针状态机（P3b-2 §3.5）：Idle=未开始/已清空，Running=视觉识别中，Done=过守卫的
  *  目录条目全集（等价原非 null），Failed=无 tocLike/视觉未配置/识别失败/异常（等价原 null）。 */
@@ -98,6 +109,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     var isPdf by mutableStateOf(false)
         private set
 
+    /** P6b S4：本次导入走本地 OCR 路径 → parseNote 区显示「识别结果有误？」反馈入口 */
+    var ocrImported by mutableStateOf(false)
+        private set
+
     /** PDF 提取进度 (page,total)；null=非提取阶段 */
     var progress by mutableStateOf<Pair<Int, Int>?>(null)
         private set
@@ -111,6 +126,18 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     /** 用户取消：提取循环在下一个检查点中止（解析中点取消则解析完成后生效） */
     fun cancelImport() {
         if (busy) cancelFlag.set(true)
+    }
+
+    /**
+     * OCR 识别质量反馈入口（P6b S4，parseNote 区「识别结果有误？」按钮）：
+     * 全局+本书双计数（v1.2 P1-3）；累计 ≥3 次时下一次扫描书导入的备注里提示升级。
+     */
+    fun reportOcrFeedback() {
+        if (!ocrImported) return
+        viewModelScope.launch {
+            val total = settings.addOcrFeedback(bookTitle)
+            Log.i("P6b", "ocr feedback +1, total=$total")
+        }
     }
 
     private var sourceText: String? = null
@@ -218,6 +245,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 visionStatsNote = null // 新文件读取开始，旧书的视觉统计作废
                 pendingVisionItems = null // 旧书的队列暂存同步作废（否则换书确认会错入队）
                 failedVisionItems = null
+                ocrImported = false
                 clearFigures() // P4：旧书幸存图同步作废
                 // 新文件开始先清上一本的探针态（PDF 路径 runTocProbe 会重跑；TXT 保持 Idle）
                 tocState = TocProbeState.Idle
@@ -231,21 +259,34 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     if (isPdfFile) {
                         phase = "提取 PDF 文字"
                         val vision = settings.buildVisionTranscriber()
+                        // P6b S4：OCR 就绪（开关开 + 模型三件齐）时扫描书走本地识别主路径
+                        val ocrReady = settings.load().ocrEnabled && OcrModelStore.modelsPresent(app)
                         val result = PdfLoader.extract(
                             app, uri,
                             onProgress = { p, t -> progress = p to t },
                             isCancelled = { cancelFlag.get() },
-                            allowScanned = vision != null,
+                            allowScanned = vision != null || ocrReady,
+                            ocrMode = ocrReady,
                         )
-                        pendingFigures = result.figures
-                        figureStats = result.figureStats
-                        figureNoteDetail = FigureParseNote.detail(
-                            result.figureStats, result.landscapeRatio, result.doubleColumnSuspicion,
-                        )
-                        applyVision(result, uri, vision)
-                        runTocProbe(result, uri)
-                        // P3a 字号证据链：PDF 路径打〔标题〕前缀，parse 侧按 isPdf 同步认标
-                        content = result.assembleText(styleAware = true)
+                        if (result.scanned && ocrReady) {
+                            // 本地 OCR 主路径：两遍法识别 → 兜底页交视觉队列；视觉不整书转写
+                            val ocrResult = runOcrPath(app, uri)
+                            pendingFigures = emptyList() // ocrMode 下 figures 已空，防御性清
+                            figureStats = null
+                            figureNoteDetail = null
+                            runTocProbe(ocrResult, uri)
+                            content = ocrResult.assembleText(styleAware = true)
+                        } else {
+                            pendingFigures = result.figures
+                            figureStats = result.figureStats
+                            figureNoteDetail = FigureParseNote.detail(
+                                result.figureStats, result.landscapeRatio, result.doubleColumnSuspicion,
+                            )
+                            applyVision(result, uri, vision)
+                            runTocProbe(result, uri)
+                            // P3a 字号证据链：PDF 路径打〔标题〕前缀，parse 侧按 isPdf 同步认标
+                            content = result.assembleText(styleAware = true)
+                        }
                     } else {
                         phase = "读取文件"
                         content = TextLoader.decode(
@@ -307,11 +348,183 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         chapters = emptyList()
         deleted = emptySet()
         imported = false // 防御：残留 true 会让守卫误放行旧事件
+        ocrImported = false
         drainImportDone()
         isPdf = false
         tocState = TocProbeState.Idle
         probeSegments = null
     }
+
+    /**
+     * 扫描书本地 OCR 主路径（P6b S4）：OcrImportRunner 两遍法识别 → PdfLoader.finalizeOcr
+     * 复用数字路径 clean 链 → 兜底页交视觉队列（originChars=0，VisionWorker 长度守卫直接
+     * 放行整页转写；视觉未配置则不入队只提示）→ 漂移告警/字数偏差进 visionStatsNote →
+     * 离线校验快照 + debug 抽样落盘 → 记 ocrImported（parseNote 反馈入口标记）。
+     * 引擎 close 由 Runner 的 finally 保证（v1.2 P2-3）。
+     */
+    private suspend fun runOcrPath(app: StudyApp, uri: Uri): PdfExtractResult {
+        phase = "本地文字识别"
+        val outcome = OcrImportRunner(
+            app, uri, PpOcrEngine(),
+            onProgress = { p, t, eta ->
+                phase = "本地文字识别 第 $p/$t 页（约剩 $eta 分钟）"
+            },
+            isCancelled = { cancelFlag.get() },
+            aiVerticalCheck = ::aiVerticalCheck,
+        ).run()
+        val result = PdfLoader.finalizeOcr(outcome)
+        ocrImported = true
+        val vision = settings.buildVisionTranscriber()
+        pendingVisionItems = if (vision != null) {
+            outcome.fallbackPages.map { it.pageNo to 0 }
+        } else {
+            null
+        }
+        failedVisionItems = null
+        val notes = buildList {
+            if (outcome.fallbackPages.isNotEmpty()) {
+                add(
+                    if (vision != null) {
+                        "本地识别完成；${outcome.fallbackPages.size} 页（图示或画质差）导入后自动视觉增强"
+                    } else {
+                        "本地识别完成；${outcome.fallbackPages.size} 页未能识别（图示或画质差），" +
+                            "配置视觉增强后可后台补齐"
+                    },
+                )
+            }
+            buildOcrQualityNote(outcome, result)?.let { add(it) }
+            // 反馈升级提示（v1.2 P1-3）：历史累计反馈 ≥3 次时点出
+            if (settings.ocrFeedbackTotal() >= 3) {
+                add("你已多次反馈识别问题；如本书效果不佳，可在设置中关闭「扫描书本地识别」改用视觉增强")
+            }
+        }
+        visionStatsNote = notes.joinToString("；").ifEmpty { null }
+        writeOcrVerifySnapshot(outcome)
+        writeOcrDebugSample(uri, outcome)
+        settings.saveLastOcrVersion(TextSourceRow.PROD_OCR_V1)
+        return result
+    }
+
+    /** 竖排 AI 目视确认：视觉未配置或任何一页判定失败 → null（放行，确认不了不拒） */
+    private suspend fun aiVerticalCheck(
+        pageNos: List<Int>,
+        render: (Int) -> String,
+    ): List<Boolean>? {
+        val vision = settings.buildVisionTranscriber() ?: return null
+        return pageNos.map { p -> vision.isVerticalPage(render(p)) ?: return null }
+    }
+
+    /**
+     * OCR 质量备注（v1.4 P2-1 漂移两级告警 + v1.2 P1-1 字数偏差代理）；null=无可提示。
+     * 置信度告警：兜底页（0f）剔除后页均置信度 median <0.85 硬告警（建议关 OCR）/
+     * <0.90 预警；字数偏差：|页字数−中位|/中位 >60% 的页占比 >10% → 提示可能识别不完整。
+     */
+    private fun buildOcrQualityNote(
+        outcome: OcrImportRunner.Outcome,
+        result: PdfExtractResult,
+    ): String? {
+        val parts = mutableListOf<String>()
+        val confs = outcome.pageMeanConfs.filter { it > 0f }
+        if (confs.size >= 5) {
+            val median = confs.sorted()[confs.size / 2]
+            val pct = "%.2f".format(median)
+            if (median < OcrImportRunner.PageGate.CONF_THRESHOLD) {
+                parts.add("全书识别质量偏低（平均置信度 $pct），建议检查扫描件清晰度，" +
+                    "或在设置中关闭「扫描书本地识别」")
+            } else if (median < 0.90f) {
+                parts.add("识别质量略低（平均置信度 $pct），建议导入后抽查几页阅读效果")
+            }
+        }
+        val charCounts = result.pages.map { p -> p.paras.sumOf { it.text.length } }.filter { it > 0 }
+        if (charCounts.size >= 5) {
+            val med = charCounts.sorted()[charCounts.size / 2].toFloat()
+            if (med > 0f) {
+                val odd = charCounts.count { kotlin.math.abs(it - med) / med > 0.6f }
+                if (odd > charCounts.size * 0.10) {
+                    parts.add("$odd 页文字量明显偏离全书水平，可能识别不完整")
+                }
+            }
+        }
+        return parts.joinToString("；").ifEmpty { null }
+    }
+
+    /**
+     * 离线校验快照（v1.3 P1-2）：固定种子（bookTitle.hashCode）从有内容的页里抽 1-2 页，
+     * 落盘 filesDir/ocr_verify/<bookKey>/snapshot.json（页码+文本+行级置信度），首月每两周
+     * 人工抽查对照原书，监控识别漂移；滚动保留最近 2 本。任何失败只记 log 不影响导入。
+     */
+    private fun writeOcrVerifySnapshot(outcome: OcrImportRunner.Outcome) {
+        try {
+            val ctx = getApplication<StudyApp>()
+            val dir = File(ctx.filesDir, "ocr_verify/${ocrBookKey()}")
+            dir.mkdirs()
+            val candidates = outcome.pagesLines.withIndex().filter { (_, ls) -> ls.isNotEmpty() }
+            if (candidates.isEmpty()) return
+            val rng = java.util.Random(bookTitle.hashCode().toLong())
+            val count = if (outcome.pagesLines.size >= 100) 2 else 1
+            val picked = List(count) { candidates[rng.nextInt(candidates.size)] }.distinctBy { it.index }
+            val json = buildJsonObject {
+                put("bookTitle", bookTitle)
+                put("savedAt", System.currentTimeMillis())
+                put("pageCount", outcome.pagesLines.size)
+                put("pages", buildJsonArray {
+                    picked.forEach { (idx, lines) ->
+                        add(buildJsonObject {
+                            put("page", idx + 1)
+                            put("lineCount", lines.size)
+                            put("confs", buildJsonArray {
+                                outcome.pageLineConfs[idx].forEach { add(JsonPrimitive(it)) }
+                            })
+                            put("text", lines.joinToString("\n") { it.text })
+                        })
+                    }
+                })
+            }
+            File(dir, "snapshot.json").writeText(json.toString())
+            File(ctx.filesDir, "ocr_verify").listFiles()
+                ?.filter { it.isDirectory }
+                ?.sortedBy { it.lastModified() }
+                ?.dropLast(2)
+                ?.forEach { it.deleteRecursively() }
+        } catch (e: Exception) {
+            Log.w("P6b", "ocr verify snapshot: ${e.message}")
+        }
+    }
+
+    /**
+     * Debug 抽样（v1.1 P1-4）：仅 DEBUG 构建（编译期常量短路 + R8 死代码消除，release
+     * 无此路径也无 ocr_debug 目录）。每 20 页抽 1 页：页面 PNG + 识别文本成对落盘
+     * filesDir/ocr_debug/<bookKey>/，S7/S8 人工核查识别质量用。
+     */
+    private fun writeOcrDebugSample(uri: Uri, outcome: OcrImportRunner.Outcome) {
+        if (!BuildConfig.DEBUG) return
+        try {
+            val ctx = getApplication<StudyApp>()
+            val dir = File(ctx.filesDir, "ocr_debug/${ocrBookKey()}")
+            dir.mkdirs()
+            PdfPageRenderer(ctx, uri).use { renderer ->
+                for (p in 1..outcome.pagesLines.size step 20) {
+                    val bmp = renderer.renderPageBitmap(p - 1)
+                    try {
+                        File(dir, "p%03d.png".format(p)).outputStream().use { out ->
+                            bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+                        }
+                    } finally {
+                        bmp.recycle()
+                    }
+                    File(dir, "p%03d.txt".format(p)).writeText(
+                        outcome.pagesLines[p - 1].joinToString("\n") { it.text },
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("P6b", "ocr debug sample: ${e.message}")
+        }
+    }
+
+    /** 书名 → 快照/抽样目录名：非法字符压下划线，截 40 字，空名兜底 "book" */
+    private fun ocrBookKey(): String =
+        bookTitle.replace(Regex("[^\\u4e00-\\u9fffA-Za-z0-9]"), "_").take(40).ifBlank { "book" }
 
     /**
      * 视觉兜底主流程（OPT-F 起，双路）：
@@ -707,6 +920,21 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             parseNote = listOfNotNull(blindNote, figureNote, visionStatsNote)
                 .joinToString("；")
                 .ifEmpty { null }
+            // P6b S4 章节锚点对账（v1.2 P1-3）：行首「第X章」锚数 vs 检出章节数，
+            // 锚 ≥3 且检出 <70% 追加提示。点线行（目录条目）不计锚，行首锚定滤段中引用；
+            // OCR 拆行致锚少报 → 判据趋保守（少提示），UNMEASURED 待 S7 真书复核。
+            if (ocrImported) {
+                val anchorRe = Regex("^第[0-9零〇一二三四五六七八九十百千两]+章")
+                val dots = Regex("[…⋯·•‧]")
+                val anchors = text.lineSequence()
+                    .map { it.trim() }
+                    .filter { anchorRe.containsMatchIn(it) && !dots.containsMatchIn(it) }
+                    .count()
+                if (anchors >= 3 && result.size < anchors * 0.7) {
+                    parseNote = (parseNote?.plus("；") ?: "") +
+                        "书中有 $anchors 处「第X章」字样但只解析出 ${result.size} 章，可到章节列表核对"
+                }
+            }
         } catch (e: PatternSyntaxException) {
             error = "识别规则正则无效：${e.description ?: e.message ?: "语法错误"}"
         } catch (e: CustomRegexNoMatchException) {
