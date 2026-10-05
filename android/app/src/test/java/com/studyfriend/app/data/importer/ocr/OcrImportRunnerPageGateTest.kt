@@ -66,4 +66,39 @@ class OcrImportRunnerPageGateTest {
     fun `empty page records zero`() {
         assertEquals(0f, OcrImportRunner.PageGate.meanConf(emptyList()), 1e-6f)
     }
+
+    // ================= Outcome 逐页列表同长不变量（S6） =================
+
+    private fun outcome(
+        nLines: Int = 2,
+        nDims: Int = 2,
+        nMeans: Int = 2,
+        nConfs: Int = 2,
+    ) = OcrImportRunner.Outcome(
+        pagesLines = List(nLines) { emptyList() },
+        dims = List(nDims) { 100f to 200f },
+        fallbackPages = emptyList(),
+        pageMeanConfs = List(nMeans) { 0.9f },
+        pageLineConfs = List(nConfs) { emptyList() },
+    )
+
+    @Test
+    fun `outcome accepts equal length page lists`() {
+        assertEquals(2, outcome().pagesLines.size)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `outcome rejects mismatched lineConfs length`() {
+        outcome(nConfs = 3)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `outcome rejects mismatched dims length`() {
+        outcome(nDims = 1)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `outcome rejects mismatched meanConfs length`() {
+        outcome(nMeans = 5)
+    }
 }

@@ -62,7 +62,19 @@ class OcrImportRunner(
         /** 每页行级置信度（与 pagesLines 同序同长，碎片合并后 conf=min 口径）；
          *  兜底页空列表。离线校验快照（v1.3 P1-2）用 */
         val pageLineConfs: List<List<Float>>,
-    )
+    ) {
+        init {
+            // 逐页列表四方同长不变量（S6）：快照/告警按页索引取值，错位会越界或张冠李戴
+            require(
+                pagesLines.size == dims.size &&
+                    dims.size == pageMeanConfs.size &&
+                    pageMeanConfs.size == pageLineConfs.size,
+            ) {
+                "Outcome 逐页列表长度不一致：lines=${pagesLines.size} dims=${dims.size} " +
+                    "meanConfs=${pageMeanConfs.size} lineConfs=${pageLineConfs.size}"
+            }
+        }
+    }
 
     suspend fun run(): Outcome {
         // 并发互斥：tryLock 失败即提示，不排队（避免长时占内存）

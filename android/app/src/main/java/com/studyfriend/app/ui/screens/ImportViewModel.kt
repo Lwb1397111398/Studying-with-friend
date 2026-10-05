@@ -483,7 +483,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             put("page", idx + 1)
                             put("lineCount", lines.size)
                             put("confs", buildJsonArray {
-                                outcome.pageLineConfs[idx].forEach { add(JsonPrimitive(it)) }
+                                // 防御取值：Outcome 构造已 require 四方同长，此处再兜一层
+                                outcome.pageLineConfs.getOrNull(idx)?.forEach { add(JsonPrimitive(it)) }
                             })
                             put("text", lines.joinToString("\n") { it.text })
                         })
