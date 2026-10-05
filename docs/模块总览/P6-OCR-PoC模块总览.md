@@ -1,6 +1,6 @@
 # P6 OCR PoC 模块总览
 
-> **进度（2026-10-05）**：P6b 生产化进行中——生产管线已落地 `data/importer/ocr/`（OcrEngine/PpOcrEngine/OcrTextPostProcessor/OcrImportRunner 等），S4 起导入主路径接线，S5 起 PoC activity 已从 App 下架（模型 21MB 出 APK 走 GitHub Release ocr-models-v1 分发，AndroidManifest 仅留注记），详见 [M2 导入与解析](M2-导入与解析.md) 的 P6b 小节与 docs/plans/P6b-扫描件管线计划案.md。本文件保留 PoC 判据数据供 S7 E2E 参考，下文 OcrPocActivity 流程为历史记录（逻辑已移植 PpOcrEngine）。
+> **进度（2026-10-05，P6b 完成）**：P6b S1-S8 全部落地——生产管线 `data/importer/ocr/`（OcrEngine/PpOcrEngine/OcrTextPostProcessor/OcrImportRunner 等），导入主路径接线，PoC activity 已从 App 下架（模型 21MB 出 APK 走 GitHub Release ocr-models-v1 分发）。**E2E 判据结论**：①②③c 过、③③b 阻塞记档、④ No-Go 倾向不自动回退报老板拍板——根因=本文件 §「已知坑」中 PoC 数据（rapidocr PC 原型，median 0.9751）与生产 PP-OCRv5 mobile（median 0.895）置信度口径错位，**本文件的 PoC 判据数据不可外推到生产引擎**；详见 [M2 导入与解析](M2-导入与解析.md) 决策 33、docs/plans/P6b-落地报告.md。下文 OcrPocActivity 流程为历史记录（逻辑已移植 PpOcrEngine）。
 
 ## 模块职责（一句话）
 验证 PP-OCRv5 mobile（det+rec）在安卓端识别扫描书页面的可行性（P6a PoC），为 P6b 扫描件管线立项提供 Go/No-Go 数据。
