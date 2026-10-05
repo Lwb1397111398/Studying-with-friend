@@ -1,6 +1,6 @@
 # P6 OCR PoC 模块总览
 
-> **进度（2026-10-05，P6b 完成+画线复核收口）**：P6b S1-S8 全部落地——生产管线 `data/importer/ocr/`（OcrEngine/PpOcrEngine/OcrTextPostProcessor/OcrImportRunner 等），导入主路径接线，PoC activity 已从 App 下架（模型 21MB 出 APK 走 GitHub Release ocr-models-v1 分发）。**E2E 判据结论**：①②③c 过、③③b 阻塞记档、④ No-Go 倾向不自动回退报老板拍板——根因=本文件 §「已知坑」中 PoC 数据（rapidocr PC 原型，median 0.9751）与生产 PP-OCRv5 mobile（median 0.895）置信度口径错位，**本文件的 PoC 判据数据不可外推到生产引擎**；画线复核实证 **0.85 阈值是准的不下调**（质量悬崖恰压 0.85，pageDrafts 401 页草稿全量重算+12 页目视，M2 决策 34）；**P6c 质量提升已立项**（换模型+输入侧联动优化，交付文档 docs/plans/P6c-扫描件质量提升交付文档.md）。详见 [M2 导入与解析](M2-导入与解析.md) 决策 33/34、docs/plans/P6b-落地报告.md。下文 OcrPocActivity 流程为历史记录（逻辑已移植 PpOcrEngine）。
+> **进度（2026-10-05，P6c Phase 0 收口）**：P6b S1-S8 全部落地——生产管线 `data/importer/ocr/`（OcrEngine/PpOcrEngine/OcrTextPostProcessor/OcrImportRunner 等），导入主路径接线，PoC activity 已从 App 下架（模型 21MB 出 APK 走 GitHub Release ocr-models-v1 分发）。P6b E2E 判据结论：①②③c 过、③③b 阻塞记档、④ No-Go 倾向不自动回退报老板拍板；画线复核实证 **0.85 阈值是准的不下调**（M2 决策 34）。**P6c Phase 0 已破案**：手机 87% 兜底页率（401/461）根因=rec 输入硬拉伸 320×48 压垮长行（PC 复刻实验台实证：改 rec 动态宽后 17 页最难集 median 0.5697→0.9112、过闸 3→15/17；**全量 401 兜底页过闸 387（96.5%），全书不可用页率 87%→3.0%，远优于 ≤15% 目标**），修复方向=rec 动态宽（rapidocr 同款口径），Phase 1 拟改手机端 OcrEngine.kt rec 预处理，待老板闸门拍板（docs/plans/P6c-Phase0-报告.md）。详见 [M2 导入与解析](M2-导入与解析.md) 决策 33/34、docs/plans/P6b-落地报告.md。下文 OcrPocActivity 流程为历史记录（逻辑已移植 PpOcrEngine）。
 
 ## 模块职责（一句话）
 验证 PP-OCRv5 mobile（det+rec）在安卓端识别扫描书页面的可行性（P6a PoC），为 P6b 扫描件管线立项提供 Go/No-Go 数据。
@@ -35,6 +35,8 @@
 - adb shell/push 路径必须 `MSYS_NO_PATHCONV=1`（Git Bash 转换坑）。
 - 模拟器 x86 耗时≠ARM 真机（判据③正式判定留真机）；OCR 增量内存 ~208MB PSS（onnxruntime arena 不回收）。
 - PP-OCR v5 mobile 系统性把原书半角标点归一成全角（P6b 须做宽度映射后处理）；德文/英文小字弱；树状图页无法线性化（降级视觉兜底）。
+- **P6c 新增**：①对账 B（跨渲染源）绝对数值带 0.02-0.05 渲染噪声带（pymupdf vs Android Skia 尺寸差 2px、差>16 像素占比最高 10.49%），组间对比必须同渲染源；②unclip 路线首跑「行数骤减」是 rec 裁剪坐标缺陷致 CTC 空文本行被丢弃的假象（坐标修复后 median 0.9702、过闸 14/17，det_post_unclip 无缺陷）——跨坐标系传框必须乘缩放因子；③PC dyn 口径单页 9.1s（vs 硬拉伸 1.09s）是耗时上界参考，手机端耗时/内存 UNMEASURED，Phase 1 实测。
 
 ## 最后更新
+2026-10-05 · P6c Phase 0 收口：新增 PC 复刻实验台（.e2e/p6c/ 7 文件，不入库），实证 87% 兜底率根因=rec 硬拉伸 320×48；修复方向=rec 动态宽（G11：全量 401 兜底页过闸 387=96.5%，不可用页率 3.0%），报告 docs/plans/P6c-Phase0-报告.md
 2026-02-10 · P6a PoC 完成：8 页模拟器跑通（中位 1.24-1.40s/页）、判据①②④ Go（老板拍板新口径）、报告归档 docs/plans/P6a-PoC报告.md
