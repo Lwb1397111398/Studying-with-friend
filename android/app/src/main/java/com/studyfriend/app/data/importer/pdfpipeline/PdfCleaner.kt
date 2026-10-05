@@ -259,7 +259,7 @@ object PdfCleaner {
                     PageOut(
                         idx + 1, tocLike = true, rawChars = allText.length, puaCount = puaCount,
                         lineCount = 0, shortLineCount = 0,
-                        paras = kept.map { Para(it.text, size = it.size, y0 = it.y0) },
+                        paras = kept.map { Para(it.text, size = it.size, y0 = it.y0, sourceVersion = it.sourceVersion) },
                         firstLine = null, lastLine = null,
                     ),
                 )
@@ -275,6 +275,7 @@ object PdfCleaner {
                     Para(
                         joinTexts(footnoteLines.map { it.text }), footnote = true,
                         y0 = footnoteLines.first().y0,
+                        sourceVersion = footnoteLines.maxOf { it.sourceVersion },
                     ),
                 )
             }
@@ -306,12 +307,14 @@ object PdfCleaner {
             val first = cur.paras.removeAt(0)
             val last = prev.paras[prev.paras.size - 1]
             // size 取两侧 max（P3a）：字号守卫已保证首段非标题，此处防御性保留字号证据；
+            // sourceVersion 同取两侧 max（P6b：跨页并段含 OCR 行即整段按 OCR 口径选阈值）；
             // y0 保留主体段（prev 末段）原值——P4 图锚定按页内段 y0 序列定位，续接文本
             // 属于主体段，其几何锚点不变
             prev.paras[prev.paras.size - 1] = Para(
                 joinTexts(listOf(last.text, first.text)),
                 size = max(last.size, first.size),
                 y0 = last.y0,
+                sourceVersion = maxOf(last.sourceVersion, first.sourceVersion),
             )
         }
     }

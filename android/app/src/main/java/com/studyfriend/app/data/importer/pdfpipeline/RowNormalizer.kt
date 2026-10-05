@@ -24,13 +24,15 @@ object RowNormalizer {
     /** 聚类容差 = 0.5×字号 + 1.0pt（绝对余量 1.0pt 吸收同行碎片 y 抖动） */
     private const val TOL_ABS = 1.0f
 
-    /** 一次行分隔内收集的 span 信息（与 TextPosition 一一对应的折算值） */
+    /** 一次行分隔内收集的 span 信息（与 TextPosition 一一对应的折算值）。
+     *  sourceVersion（P6b）：行来源版本，normalize 透传到 PLine（组内取 max） */
     data class SpanInfo(
         val text: String,
         val x0: Float,
         val x1: Float,
         val y0: Float,
         val size: Float,
+        val sourceVersion: Int = 0,
     )
 
     fun normalize(spans: List<SpanInfo>, log: (String) -> Unit = {}): List<PLine> {
@@ -42,6 +44,7 @@ object RowNormalizer {
                 PLine(
                     text = valid.joinToString("") { it.text }.trim(),
                     x0 = -1f, x1 = -1f, y0 = -1f, size = -1f,
+                    sourceVersion = valid.maxOf { it.sourceVersion },
                 ),
             )
         }
@@ -98,7 +101,7 @@ object RowNormalizer {
             x0 = minOf(x0, s.x0)
             x1 = maxOf(x1, s.x1)
         }
-        return PLine(text.trim(), x0, x1, groupMinY(group), size)
+        return PLine(text.trim(), x0, x1, groupMinY(group), size, group.maxOf { it.sourceVersion })
     }
 
     /** 组字号：≥剔除线的 span 字符加权平均；全被剔（纯乱值组）退回行 refSize */

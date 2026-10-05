@@ -76,18 +76,23 @@ object ParagraphAssembler {
         var curMax = 0f
         // 段首行 y0（P4 图锚定数据源）：段首行进入 cur 时记录，flush 后重置
         var curY0 = -1f
+        // 段内行来源版本最大值（P6b）：0=全数字、1=含 OCR 行，flush 写入 Para，
+        // assembleText 据此选打标阈值（OCR 段放宽、数字段零改动）
+        var curSrcVer = 0
 
         fun flush() {
             val t = cur.toString().trim()
-            if (t.isNotEmpty()) paras.add(Para(t, size = curMax, y0 = curY0))
+            if (t.isNotEmpty()) paras.add(Para(t, size = curMax, y0 = curY0, sourceVersion = curSrcVer))
             cur.setLength(0)
             curMax = 0f
             curY0 = -1f
+            curSrcVer = 0
         }
 
         fun takeIn(line: PLine) {
             if (cur.isEmpty()) curY0 = line.y0
             curMax = max(curMax, line.size)
+            curSrcVer = maxOf(curSrcVer, line.sourceVersion)
             cur.append(line.text)
         }
 
@@ -100,6 +105,7 @@ object ParagraphAssembler {
             val joiner = if (first != null && isCjkLike(cur.last()) && isCjkLike(first)) "" else " "
             cur.append(joiner).append(line.text)
             curMax = max(curMax, line.size)
+            curSrcVer = maxOf(curSrcVer, line.sourceVersion)
         }
 
         for (line in lines) {

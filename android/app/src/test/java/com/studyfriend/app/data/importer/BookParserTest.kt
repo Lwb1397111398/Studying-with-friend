@@ -582,6 +582,36 @@ class BookParserTest {
     }
 
     @Test
+    fun p3a_ocrPathThresholdRelaxed_digitalUnchanged() {
+        // P6b S1 参数化（P6a 判据⑤触发条款，决策案「≥1.5/2pt 两档放宽」第一档）：
+        // bodySize=9 → 数字阈值 10.5、OCR 阈值 min(10.5, 9×1.15=10.35)=10.35。
+        // size=10.4：数字段不打标（零变化）、OCR 段打标（放宽生效）——同字号仅 sourceVersion 不同
+        val stats9 = DocStats(bodySize = 9f, left = 50f, right = 545f, pitchThreshold = null)
+        val digital = PLine("第一章 边界", x0 = 50f, x1 = 540f, y0 = 100f, size = 10.4f, sourceVersion = 0)
+        val ocr = digital.copy(sourceVersion = 1)
+        assertTrue(
+            "数字段阈值零改动：10.4 < 10.5 不打标",
+            assembleAwareText(listOf(digital), stats = stats9).lineSequence().none { it.startsWith("〔标题〕") },
+        )
+        assertTrue(
+            "OCR 段放宽生效：10.4 ≥ 10.35 打标",
+            assembleAwareText(listOf(ocr), stats = stats9).lineSequence().drop(1).first().startsWith("〔标题〕"),
+        )
+    }
+
+    @Test
+    fun p3a_ocrThresholdWiderArm_multiplicationVsAddition() {
+        // 「取更宽者」=两臂取小。bodySize=12：加法臂 13.5 < 乘法臂 13.8 → OCR 阈值应为 13.5；
+        // size=13.6 落在 (13.5, 13.8) 区间——若实现错取乘法臂（或 max），13.6<13.8 不打标，本测试失败
+        val stats12 = DocStats(bodySize = 12f, left = 50f, right = 545f, pitchThreshold = null)
+        val line = PLine("第一章 边界", x0 = 50f, x1 = 540f, y0 = 100f, size = 13.6f, sourceVersion = 1)
+        assertTrue(
+            "OCR 段阈值取加法臂 13.5（更宽者）：13.6 打标",
+            assembleAwareText(listOf(line), stats = stats12).lineSequence().drop(1).first().startsWith("〔标题〕"),
+        )
+    }
+
+    @Test
     fun p3a_cGrade_notGated() {
         // 单测 4：C 档序号小标题与正文同字号，无门槛照常成章（真书小节场景）
         val chapters = BookParser.parse("一、绪论\n\n正文内容。", styleAware = true)

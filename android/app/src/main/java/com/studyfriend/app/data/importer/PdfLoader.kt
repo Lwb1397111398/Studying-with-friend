@@ -17,6 +17,7 @@ import com.studyfriend.app.data.importer.pdfpipeline.PageRenderer
 import android.graphics.Rect
 import android.util.Log
 import com.studyfriend.app.data.importer.pdfpipeline.PLine
+import com.studyfriend.app.data.importer.pdfpipeline.TextSourceRow
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
@@ -62,6 +63,10 @@ class PdfExtractResult(
      * 不发〔标题〕标（字号证据只对纯正文页可信；真章首页无点线，不受影响）。
      * 浮点策略：threshold 只计算一次（单次加法无双精度累加）；bodySize=NaN 时
      * `size >= NaN` 恒 false（IEEE 754）=安全退化，比较运算符不得改为 `>`/`!=`。
+     * OCR 路径阈值参数化（P6b S1，决策案 P6a 判据⑤触发条款）：P6a 实测标题−正文
+     * 字号差 std=3.06pt>0.5pt，OCR 段（Para.sourceVersion ≥ PROD_OCR_V1）改用
+     * 「≥bodySize+1.5pt 与 ≥1.15×bodySize 取更宽者」=两阈值取小（更易打标）；
+     * 数字段阈值零改动（按段分支而非全局开关，杜绝误伤数字路径）。
      */
     fun assembleText(styleAware: Boolean = false): String {
         if (!merged) {
@@ -74,12 +79,14 @@ class PdfExtractResult(
         // BookParser 的目录区密度判定，无点线条目会漏成假章（真书探针实证）。
         // 脚注段打〔脚注〕前缀（BookParser.FOOTNOTE_MARK）：解析器剥掉后标
         // ROLE_FOOTNOTE，脚注不混进正文流（真书 E2E：脚注误混正文约 300 段）。
-        val threshold = stats.bodySize + 1.5f
+        val thresholdDigital = stats.bodySize + 1.5f
+        val thresholdOcr = minOf(thresholdDigital, stats.bodySize * 1.15f)
         return pages.joinToString("\n\n") { page ->
             val sep = if (page.tocLike) "\n" else "\n\n"
             val tocish = styleAware &&
                 page.paras.count { RE_TOC_TAIL.containsMatchIn(it.text) } >= TOC_TAIL_MIN
             val body = page.paras.joinToString(sep) {
+                val threshold = if (it.sourceVersion >= TextSourceRow.PROD_OCR_V1) thresholdOcr else thresholdDigital
                 val marked = when {
                     it.footnote -> BookParser.FOOTNOTE_MARK
                     styleAware && !tocish && it.size >= threshold -> BookParser.TITLE_SIZE_MARK
