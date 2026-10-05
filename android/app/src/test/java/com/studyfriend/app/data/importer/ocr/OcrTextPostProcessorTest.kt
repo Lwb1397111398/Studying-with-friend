@@ -106,6 +106,18 @@ class OcrTextPostProcessorTest {
         assertEquals(t, OcrTextPostProcessor.stripCitationLine(t))
     }
 
+    @Test
+    fun `rule b - explicit unicode classes match fullwidth space and digit`() {
+        // S7 E2E 平台差异回归：Android regex 不支持 UNICODE_CHARACTER_CLASS（类初始化即崩，
+        // 进程被杀），已改显式字符类 \s→[\s\u00A0\u3000] \d→[0-9\uFF10-\uFF19]。
+        // 本例锁全角空格/全角数字在显式类下与原 Unicode 语义一致（JVM 过=Android 过）。
+        // 全角空格脚注：删圈码保留圈码后的全角空格（group(1)+group(2) 口径）
+        assertEquals("　结果", OcrTextPostProcessor.stripCitationLine("①　结果"))
+        // 全角数字方括号引注（行首+句内）
+        assertEquals("结果", OcrTextPostProcessor.stripCitationLine("【１】结果"))
+        assertEquals("依契约履行", OcrTextPostProcessor.stripCitationLine("依契约[３]履行"))
+    }
+
     // ================= 规则 c：图形页分类 =================
 
     @Test

@@ -43,19 +43,21 @@ object OcrTextPostProcessor {
         lines.map { it.copy(text = normalizePunctLine(it.text)) }
 
     // ---- 规则 b：引注隐去（strip_citations.py 同构） ----
-    // Java Pattern.UNICODE_CHARACTER_CLASS 对齐 Python3 默认语义（\s \d 按 Unicode 匹配，
-    // 含全角空格/全角数字）；Kotlin RegexOption 无此枚举、Regex(Pattern) 构造器 internal，
-    // 故直接使用 java.util.regex.Pattern
+    // 空白/数字的 Unicode 语义用显式字符类手写（S7 E2E 平台差异修复）：原实现用
+    // Pattern.UNICODE_CHARACTER_CLASS 对齐 Python3（\s \d 按 Unicode 匹配），但 Android
+    // regex 不支持该 flag——类初始化即 IllegalArgumentException，进程崩溃（JVM 单测
+    // 全绿掩盖此差异，模拟器 E2E 实录）。显式类两端行为一致：
+    // \s → [\s\u00A0\u3000]（ASCII 空白 + 不换行空格 + 全角空格，OCR 行内实际会出现的
+    // 全集；Unicode 其余空白字符 OCR 输出不出现）；\d → [0-9\uFF10-\uFF19]（半角+全角数字）
+    private const val WS = "[\\s\\u00A0\\u3000]"
+    private const val DIGIT = "[0-9\\uFF10-\\uFF19]"
     private const val CIRCLED = "[\\u2460-\\u2473]" // ①-⑳
-    private val RE_CIP_LINE = rx("[IVX\\u2160-\\u2163]+\\.\\s*$CIRCLED")
-    private val RE_FN_HEAD = rx("^(\\s*)$CIRCLED(\\s+)")
+    private val RE_CIP_LINE = java.util.regex.Pattern.compile("[IVX\\u2160-\\u2163]+\\.(?:$WS)*$CIRCLED")
+    private val RE_FN_HEAD = java.util.regex.Pattern.compile("^($WS*)$CIRCLED($WS+)")
     private val RE_IN = java.util.regex.Pattern.compile(CIRCLED)
-    private val RE_BR_HEAD = rx("^(\\s*)[【\\[]\\d{1,3}[】\\]](\\s*)")
-    private val RE_BR_IN = java.util.regex.Pattern.compile("[【\\[]\\d{1,3}[】\\]]")
-    private val RE_TREE_RESIDUE = rx("^\\s*L(?=[\\u4e00-\\u9fff0-9（(])")
-
-    private fun rx(pattern: String): java.util.regex.Pattern =
-        java.util.regex.Pattern.compile(pattern, java.util.regex.Pattern.UNICODE_CHARACTER_CLASS)
+    private val RE_BR_HEAD = java.util.regex.Pattern.compile("^($WS*)[【\\[]$DIGIT{1,3}[】\\]]($WS*)")
+    private val RE_BR_IN = java.util.regex.Pattern.compile("[【\\[]$DIGIT{1,3}[】\\]]")
+    private val RE_TREE_RESIDUE = java.util.regex.Pattern.compile("^$WS*L(?=[\\u4e00-\\u9fff0-9（(])")
 
     /**
      * 单行引注隐去：CIP 著录行（I.①/II.① 结构）整行豁免；行首圈码脚注编号删圈码保空白；
