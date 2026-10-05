@@ -374,6 +374,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      * 引擎 close 由 Runner 的 finally 保证（v1.2 P2-3）。
      */
     private suspend fun runOcrPath(app: StudyApp, uri: Uri): PdfExtractResult {
+        // S7 E2E 实录：提取段满格 progress 残留会让 ImportScreen 的 p!=null 分支盖掉
+        // phase 文案，OCR 全程显示「提取 PDF 461/461 页」=卡死假象；先清让位 phase 进度
+        progress = null
         phase = "本地文字识别"
         val outcome = OcrImportRunner(
             app, uri, PpOcrEngine(),

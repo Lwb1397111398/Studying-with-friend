@@ -103,15 +103,26 @@ class OcrImportRunner(
             ensureNotVertical(renderer, total)
 
             // ---- Pass1：逐页渲染 + 识别 + 规则 a/b ----
+            // 分段计时（S7 E2E 判据④：渲染/推理/行内后处理分离观测，logcat tag OcrImport）
+            val pass1Start = System.currentTimeMillis()
+            var renderMs = 0L
+            var inferMs = 0L
+            var postMs = 0L
             val pagesOcrLines = ArrayList<List<OcrLine>>(total)
             for (page in 1..total) {
                 if (isCancelled()) throw CancelledImportException()
+                var t = System.currentTimeMillis()
                 val bmp = renderer.renderPageBitmap(page - 1)
-                val lines = try {
-                    engine.recognize(bmp)
+                renderMs += System.currentTimeMillis() - t
+                t = System.currentTimeMillis()
+                val lines: List<OcrLine>
+                try {
+                    lines = engine.recognize(bmp)
                 } finally {
                     bmp.recycle()
                 }
+                inferMs += System.currentTimeMillis() - t
+                t = System.currentTimeMillis()
                 // 像素 → pt（×72/dpi）+ 规则 a/b（行内，不依赖统计量）
                 val s = 72f / PdfPageRenderer.DPI
                 val inPt = lines.map {
@@ -120,9 +131,14 @@ class OcrImportRunner(
                 pagesOcrLines.add(
                     OcrTextPostProcessor.stripCitations(OcrTextPostProcessor.normalizePunct(inPt)),
                 )
+                postMs += System.currentTimeMillis() - t
                 val eta = ((total - page) * SECONDS_PER_PAGE / 60).roundToInt().coerceAtLeast(1)
                 onProgress(page, total, eta)
             }
+            android.util.Log.w(
+                "OcrImport",
+                "Pass1 done: pages=$total renderMs=$renderMs inferMs=$inferMs postMs=$postMs",
+            )
 
             // ---- Pass2：docStats 主字号 → 规则 c/d → 页级分流 ----
             val allLines = pagesOcrLines.flatten()
@@ -138,6 +154,8 @@ class OcrImportRunner(
             val fallbacks = mutableListOf<FallbackPage>()
             val pageMeanConfs = mutableListOf<Float>()
             val pageLineConfs = mutableListOf<List<Float>>()
+            var fragmentLinesMerged = 0 // 规则 d 合并掉的碎片行数（判据③c 生产可观测）
+            val pass2Start = System.currentTimeMillis()
             val pagesLines = pagesOcrLines.mapIndexed { idx, lines ->
                 val pageNo = idx + 1
                 if (OcrTextPostProcessor.classifyPage(lines) == OcrTextPostProcessor.PageType.DIAGRAM) {
@@ -155,11 +173,19 @@ class OcrImportRunner(
                     } else {
                         pageMeanConfs.add(PageGate.meanConf(lines))
                         val merged = OcrTextPostProcessor.mergeFragments(lines, bodySize)
+                        fragmentLinesMerged += lines.size - merged.size
                         pageLineConfs.add(merged.map { it.confidence })
                         merged.map { it.toPLine() }
                     }
                 }
             }
+            android.util.Log.w(
+                "OcrImport",
+                "Pass2 done: pages=$total fallbacks=${fallbacks.size} " +
+                    "byReason=${fallbacks.groupingBy { it.reason }.eachCount()} " +
+                    "fragmentLinesMerged=$fragmentLinesMerged " +
+                    "pass2Ms=${System.currentTimeMillis() - pass2Start}",
+            )
             return Outcome(
                 pagesLines = pagesLines,
                 dims = renderer.pageDims(),
@@ -182,12 +208,18 @@ class OcrImportRunner(
         }
         val sample = OcrVerticalDetector.samplePages(total)
         val sampleRatios = sample.map { ratioOf(it) }
+        android.util.Log.w("OcrImport", "vertical prefilter: samplePages=$sample ratios=$sampleRatios")
         if (!OcrVerticalDetector.needsFullScan(sampleRatios)) return
         val allRatios = (1..total).map { p ->
             if (isCancelled()) throw CancelledImportException()
             ratioOf(p)
         }
-        if (!OcrVerticalDetector.fullScanSuspicious(allRatios)) return
+        val fullSuspicious = OcrVerticalDetector.fullScanSuspicious(allRatios)
+        android.util.Log.w(
+            "OcrImport",
+            "vertical full scan: pages=$total maxRatio=${allRatios.maxOrNull()} suspicious=$fullSuspicious",
+        )
+        if (!fullSuspicious) return
         // AI 目视抽 3 页确认（SUSPECT 带内前 3 页）；视觉不可用/失败 → 放行（确认不了不拒）
         val suspectPages = (1..total).filter { allRatios[it - 1] > OcrVerticalDetector.SUSPECT_RATIO }
         val verdicts = aiVerticalCheck(suspectPages.take(3)) { pageNo ->
