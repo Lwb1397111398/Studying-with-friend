@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.int
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -183,6 +184,31 @@ class OcrTextPostProcessorTest {
             OcrTextPostProcessor.PageType.BODY,
             OcrTextPostProcessor.classifyPage(listOf(notTall)),
         )
+    }
+
+    // ---- P6c 小计划 C：findTallBox/tallBoxAspect 单源判定 API（classifyPage 共用表达式） ----
+
+    @Test
+    fun `findTallBox - tall box hits`() {
+        val tall = line("竖排标题", 100f, 100f, 130f, 220f) // w=30pt h=120pt h/w=4.0
+        assertEquals(tall, OcrTextPostProcessor.findTallBox(listOf(tall)))
+        assertEquals(4.0f, OcrTextPostProcessor.tallBoxAspect(listOf(tall))!!.first, 1e-4f)
+        assertEquals(30f, OcrTextPostProcessor.tallBoxAspect(listOf(tall))!!.second, 1e-4f)
+    }
+
+    @Test
+    fun `findTallBox - wide box misses`() {
+        val body = line("正文行", 100f, 100f, 400f, 130f) // h/w=0.1
+        assertNull(OcrTextPostProcessor.findTallBox(listOf(body)))
+        assertNull(OcrTextPostProcessor.tallBoxAspect(listOf(body)))
+    }
+
+    @Test
+    fun `findTallBox - boundary at threshold misses`() {
+        // w=12.3pt 恰等、h/w=3.0f 恰等均不触发（严格大于语义，与 classifyPage 同源锁定）
+        val boundary = line("边界框", 100f, 100f, 112.3f, 136.9f) // w=12.3pt h/w=3.0
+        assertNull(OcrTextPostProcessor.findTallBox(listOf(boundary)))
+        assertNull(OcrTextPostProcessor.tallBoxAspect(listOf(boundary)))
     }
 
     // ================= 规则 d：碎片行合并 =================

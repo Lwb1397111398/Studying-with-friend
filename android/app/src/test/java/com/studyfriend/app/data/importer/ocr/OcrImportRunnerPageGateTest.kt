@@ -2,6 +2,7 @@ package com.studyfriend.app.data.importer.ocr
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** 页级分流判定单测（P6b S4）：置信度阈值/低置信行占比的通过与兜底边界 */
@@ -107,5 +108,41 @@ class OcrImportRunnerPageGateTest {
     @Test(expected = IllegalArgumentException::class)
     fun `outcome rejects mismatched meanConfs length`() {
         outcome(nMeans = 5)
+    }
+
+    // ================= Pass2 诊断日志格式（P6c 小计划 C） =================
+
+    @Test
+    fun `pass2DoneLine contains all fallback page numbers`() {
+        // fallbackPages 明细须逐页列出——B 报告 F7 缺口（21/22 可推定）由此行闭环
+        val text = OcrImportRunner.pass2DoneLine(
+            total = 47,
+            fallbacks = listOf(
+                OcrImportRunner.FallbackPage(3, "DIAGRAM"),
+                OcrImportRunner.FallbackPage(9, "LOW_CONF"),
+                OcrImportRunner.FallbackPage(41, "DIAGRAM"),
+            ),
+            fragmentLinesMerged = 12,
+            pass2Ms = 45678L,
+        )
+        assertTrue(text.startsWith("Pass2 done: pages=47 fallbacks=3 "))
+        assertTrue(text.contains("byReason={DIAGRAM=2, LOW_CONF=1}"))
+        assertTrue(text.contains("fallbackPages=3,9,41"))
+        assertTrue(text.contains("fragmentLinesMerged=12"))
+        assertTrue(text.endsWith("pass2Ms=45678"))
+    }
+
+    @Test
+    fun `pass2DoneLine with no fallback keeps fields present`() {
+        val text = OcrImportRunner.pass2DoneLine(22, emptyList(), 0, 100L)
+        assertTrue(text.contains("fallbackPages= fragmentLinesMerged=0"))
+    }
+
+    @Test
+    fun `tallBoxLine format locks two decimal hw and one decimal width`() {
+        assertEquals(
+            "tallBox page=41 hw=4.00 w=30.0pt",
+            OcrImportRunner.tallBoxLine(41, 4.0f, 30.0f),
+        )
     }
 }

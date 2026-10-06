@@ -105,4 +105,44 @@ class VisionTranscriberTest {
             server.stop()
         }
     }
+
+    // ================= P6c C3a：竖排判定解析（否定短语优先） =================
+
+    @Test
+    fun `vertical verdict - negation phrase wins over substring`() {
+        // C3a 实锤回归：横排仿真书模型答「不是竖排」，旧正序匹配 contains("是竖排")
+        // 在「不是竖排」里命中 → 误判 true → 3 页全中触发竖排拒绝
+        assertEquals(false, parseVerticalVerdict("不是竖排"))
+        assertEquals(
+            false,
+            parseVerticalVerdict("不是竖排。这本书文字从左到右排列"),
+        )
+    }
+
+    @Test
+    fun `vertical verdict - horizontal and english forms`() {
+        assertEquals(false, parseVerticalVerdict("横排"))
+        assertEquals(false, parseVerticalVerdict("这是横排书页"))
+        assertEquals(false, parseVerticalVerdict("HORIZONTAL"))
+    }
+
+    @Test
+    fun `vertical verdict - affirmative forms`() {
+        assertEquals(true, parseVerticalVerdict("是竖排"))
+        assertEquals(true, parseVerticalVerdict("这张书页是竖排（从上到下、从右到左阅读）"))
+        assertEquals(true, parseVerticalVerdict("VERTICAL"))
+    }
+
+    @Test
+    fun `vertical verdict - unparseable returns null for pass-through`() {
+        // null=确认不了不拒绝（放行），由调用方 OcrImportRunner 处理
+        assertNull(parseVerticalVerdict("无法判断"))
+        assertNull(parseVerticalVerdict(""))
+    }
+
+    @Test
+    fun `vertical verdict - mixed layout counts as horizontal`() {
+        // 混合排版归横排：竖排拒绝链只针对整书竖排，误放行代价远小于误拒
+        assertEquals(false, parseVerticalVerdict("正文横排，页边有竖排批注"))
+    }
 }

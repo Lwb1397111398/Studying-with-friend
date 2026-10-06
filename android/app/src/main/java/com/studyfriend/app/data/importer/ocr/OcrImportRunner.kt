@@ -48,6 +48,24 @@ class OcrImportRunner(
         /** 估字号系数：行框高 × 0.68（rapidocr 实测正文行框高≈1.47×字号；生产引擎 det
          *  扩张口径不同，S7 E2E 以真书 docStats 众数校准。系数只作整体缩放，众数不受影响） */
         const val SIZE_FROM_HEIGHT = 0.68f
+
+        /** Pass2 完成诊断行（P6c 小计划 C 追加 fallbackPages 页码明细，闭环 B 报告 F7 缺口）。
+         *  纯函数抽出，单测锁定格式（OcrImportRunnerPageGateTest）。 */
+        internal fun pass2DoneLine(
+            total: Int,
+            fallbacks: List<FallbackPage>,
+            fragmentLinesMerged: Int,
+            pass2Ms: Long,
+        ): String =
+            "Pass2 done: pages=$total fallbacks=${fallbacks.size} " +
+                "byReason=${fallbacks.groupingBy { it.reason }.eachCount()} " +
+                "fallbackPages=${fallbacks.joinToString(",") { it.pageNo.toString() }} " +
+                "fragmentLinesMerged=$fragmentLinesMerged " +
+                "pass2Ms=$pass2Ms"
+
+        /** DIAGRAM 页 tallBox 量化行（h/w 与 w 两个一级量化，补 bbox 缺口）。纯函数，单测锁定格式。 */
+        internal fun tallBoxLine(pageNo: Int, hw: Float, w: Float): String =
+            "tallBox page=$pageNo hw=${"%.2f".format(hw)} w=${"%.1f".format(w)}pt"
     }
 
     /** 兜底页清单条目：reason ∈ DIAGRAM / LOW_CONF */
@@ -191,11 +209,19 @@ class OcrImportRunner(
             }
             android.util.Log.w(
                 "OcrImport",
-                "Pass2 done: pages=$total fallbacks=${fallbacks.size} " +
-                    "byReason=${fallbacks.groupingBy { it.reason }.eachCount()} " +
-                    "fragmentLinesMerged=$fragmentLinesMerged " +
-                    "pass2Ms=${System.currentTimeMillis() - pass2Start}",
+                pass2DoneLine(
+                    total, fallbacks, fragmentLinesMerged,
+                    System.currentTimeMillis() - pass2Start,
+                ),
             )
+            // DIAGRAM 页 tallBox 量化（P6c 小计划 C）：与 classifyPage 共用 findTallBox 单源判定
+            fallbacks.filter { it.reason == "DIAGRAM" }.forEach { f ->
+                val box = OcrTextPostProcessor.tallBoxAspect(pagesOcrLines[f.pageNo - 1])
+                if (box != null) android.util.Log.w(
+                    "OcrImport",
+                    tallBoxLine(f.pageNo, box.first, box.second),
+                )
+            }
             return Outcome(
                 pagesLines = pagesLines,
                 dims = renderer.pageDims(),

@@ -119,11 +119,7 @@ class VisionTranscriber(
         } catch (e: Exception) {
             return null
         }
-        return when {
-            raw.contains("是竖排") || raw.contains("VERTICAL") -> true
-            raw.contains("不是竖排") || raw.contains("横排") || raw.contains("HORIZONTAL") -> false
-            else -> null
-        }
+        return parseVerticalVerdict(raw)
     }
 
     private fun parseTranscription(raw: String): PageTranscription? = TranscriptionJson.parse(raw)
@@ -148,4 +144,14 @@ class VisionTranscriber(
                 "要求：只输出 JSON，不要任何解释或代码围栏；忠实原文，不增删、不改写、不翻译，" +
                 "无法辨认的字用□；忽略页眉、页脚、页码。"
     }
+}
+
+/** 竖排判定解析（纯函数供 JVM 单测；P6c C3a 实测修复）：否定短语必须先判——
+ *  「不是竖排」包含子串「是竖排」，正序匹配会把横排书误判为竖排进而误拒导入
+ *  （实录：仿真书横排页回答「不是竖排」被判 true，3 页全中触发竖排拒绝）。
+ *  混合排版（同页横竖并存）归横排：竖排拒绝链只针对整书竖排（古籍），误放行代价远小于误拒。 */
+internal fun parseVerticalVerdict(raw: String): Boolean? = when {
+    raw.contains("不是竖排") || raw.contains("横排") || raw.contains("HORIZONTAL") -> false
+    raw.contains("是竖排") || raw.contains("VERTICAL") -> true
+    else -> null
 }

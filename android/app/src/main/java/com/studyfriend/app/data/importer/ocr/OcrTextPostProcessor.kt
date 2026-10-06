@@ -85,20 +85,31 @@ object OcrTextPostProcessor {
     private const val MIN_TALL_WIDTH_PT = 12.3f // = 24px@140dpi；竖排根节点实测 33.6/35.5pt
 
     /**
+     * 首个竖排框（w>MIN_TALL_WIDTH_PT 且 h/w>TALL_ASPECT，入参 pt 口径 OcrLine）；无则 null。
+     * classifyPage 与 OcrImportRunner 的 DIAGRAM 诊断日志共用本函数——判定表达式单源，防漂移。
+     */
+    fun findTallBox(lines: List<OcrLine>): OcrLine? =
+        lines.firstOrNull { l ->
+            val w = l.x1 - l.x0
+            val h = l.y1 - l.y0
+            w > MIN_TALL_WIDTH_PT && h / w > TALL_ASPECT
+        }
+
+    /** 诊断量化：首个竖排框 (h/w, w)（pt 口径）；无竖排框返回 null。供 OcrImportRunner 日志。 */
+    fun tallBoxAspect(lines: List<OcrLine>): Pair<Float, Float>? =
+        findTallBox(lines)?.let { ((it.y1 - it.y0) / (it.x1 - it.x0)) to (it.x1 - it.x0) }
+
+    /**
      * 页型判定：存在竖排框（高宽比 > 3、宽 > 12.3pt）→ DIAGRAM。
      * 行首 L 残迹只记日志（观察特征，不参与判定——样本薄，误判风险大于收益）。
      */
     fun classifyPage(lines: List<OcrLine>, log: (String) -> Unit = {}): PageType {
-        var tallCount = 0
         var lResidue = 0
         for (l in lines) {
-            val w = l.x1 - l.x0
-            val h = l.y1 - l.y0
-            if (w > MIN_TALL_WIDTH_PT && h / w > TALL_ASPECT) tallCount++
             if (RE_TREE_RESIDUE.matcher(l.text).find()) lResidue++
         }
         if (lResidue > 0) log("treeResidue L-lines=$lResidue（观察特征，不判定）")
-        return if (tallCount > 0) PageType.DIAGRAM else PageType.BODY
+        return if (findTallBox(lines) != null) PageType.DIAGRAM else PageType.BODY
     }
 
     // ---- 规则 d：碎片行合并（行高 < 主字号×0.5 的框并入 y 中心最近邻） ----
