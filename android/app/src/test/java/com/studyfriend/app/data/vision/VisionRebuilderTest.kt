@@ -95,7 +95,10 @@ class VisionRebuilderTest {
                     bookId = 0, idx = 0, title = "全文",
                     readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
                 ) to listOf(
-                    ParagraphEntity(chapterId = 0, idx = 0, text = "Original text layer paragraph one.", role = DbValues.ROLE_BODY),
+                    // pageNo=1（P6c C3a 修复适配）：真实 PDF 书段落带页码（P3b-2 起
+                    // BookParser PAGE_MARK 链路），重建底稿按页重组依赖该字段
+                    ParagraphEntity(chapterId = 0, idx = 0, text = "Original text layer paragraph one.",
+                        role = DbValues.ROLE_BODY, pageNo = 1),
                 ),
             ),
         )
@@ -122,7 +125,7 @@ class VisionRebuilderTest {
         )
         val rebuilt = VisionRebuilder.rebuildIfSafe(db, context, bookId)
         assertTrue("无 AI 消费的书应重建", rebuilt)
-        // 书内容已换成视觉文本；重建按同一 uri 重提取+缓存回填，段落应来自缓存
+        // 书内容已换成视觉文本；重建从库底稿重组+缓存回填，段落应来自缓存
         val chapterId = BookRepository(db).chapters(bookId)[0].id
         val paras = BookRepository(db).paragraphs(chapterId)
         assertTrue(

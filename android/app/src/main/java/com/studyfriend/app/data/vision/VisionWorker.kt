@@ -69,6 +69,13 @@ class VisionWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     VisionCache.write(applicationContext, uri, item.pageNo, t)
                     dao.updateStatus(item.id, DbValues.VQ_DONE, item.attempts, System.currentTimeMillis())
                 } else {
+                    // 页级失败可见性（C3a 实录 F4）：transcribePage 内部吞模型异常静默
+                    // 返 null，页失败此前零日志；渲染级异常仍走上方原有 Log.w
+                    Log.w(
+                        TAG,
+                        "page ${item.pageNo} transcription null " +
+                            "(attempt ${item.attempts + 1}/$MAX_PAGE_ATTEMPTS)",
+                    )
                     val attempts = item.attempts + 1
                     dao.updateStatus(
                         item.id,
@@ -86,11 +93,15 @@ class VisionWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             renderer?.close()
         }
 
-        // 全部页到终态（含 FAILED 定格）→ 尝试把已转写内容重建进书
+        // 全部页到终态（含 FAILED 定格）→ 尝试把已转写内容重建进书；
+        // 仍有 PENDING（本轮有页转写失败但未达 attempts 上限）→ retry 自动重排：
+        // 否则这些页要等下次冷启动/设置保存才被再消化（C3a 实录 F3：页 5 卡 6 分钟）。
+        // 收敛性：每轮失败 attempts+1，达 MAX_PAGE_ATTEMPTS 定格 FAILED，终态必达
         if (dao.byBook(bookId).none { it.status == DbValues.VQ_PENDING }) {
             VisionRebuilder.rebuildIfSafe(db, applicationContext, bookId)
+            return Result.success()
         }
-        return Result.success()
+        return Result.retry()
     }
 
     companion object {

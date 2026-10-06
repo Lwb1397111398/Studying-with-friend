@@ -167,6 +167,15 @@ interface ParagraphDao {
 
     @Query("DELETE FROM paragraphs WHERE chapterId = :chapterId")
     suspend fun deleteByChapter(chapterId: Long)
+
+    /** 重建底稿（P6c C3a 立案修复）：按页取全书段落，页内顺序=章序+段序。
+     *  SQLite ASC 排序 NULL 最前——TXT 书（pageNo 可空）的空页号行会排最前，
+     *  调用方（VisionRebuilder）检测到空页号即放弃重建（视觉队列只来自 PDF 导入） */
+    @Query(
+        """SELECT p.* FROM paragraphs p JOIN chapters c ON p.chapterId = c.id
+        WHERE c.bookId = :bookId ORDER BY p.pageNo, c.idx, p.idx""",
+    )
+    suspend fun byBookForRebuild(bookId: Long): List<ParagraphEntity>
 }
 
 @Dao
