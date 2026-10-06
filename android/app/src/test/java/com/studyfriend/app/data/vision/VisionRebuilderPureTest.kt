@@ -1,15 +1,13 @@
 package com.studyfriend.app.data.vision
 
-import com.studyfriend.app.data.importer.PdfExtractResult
-import com.studyfriend.app.data.importer.pdfpipeline.DocStats
-import com.studyfriend.app.data.importer.pdfpipeline.PageOut
-import com.studyfriend.app.data.importer.pdfpipeline.Para
+import com.studyfriend.app.data.db.ParagraphEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 重建纯函数（P6c C3a 立案修复）：目录页推断 + 覆盖守卫 + 组装路径格式锁定 */
+/** 重建纯函数（P6c R1 方向 A 结构保全）：目录页推断 + 覆盖守卫 + D1/D2 页归属 */
 class VisionRebuilderPureTest {
 
     @Test
@@ -87,28 +85,35 @@ class VisionRebuilderPureTest {
         assertTrue(VisionRebuilder.coverageOk(100, 0))
     }
 
+    // ---- D1/D2 页归属（R1 方向 A 拍板值，计划案 §2.3）----
+
+    private fun row(chapterId: Long, text: String, pageNo: Int) = ParagraphEntity(
+        chapterId = chapterId, idx = 0, text = text,
+        role = "BODY", pageNo = pageNo,
+    )
+
     @Test
-    fun assemble_viaPdfExtractResult_formatLocked() {
-        // 重建组装路径（PageOut+DocStats(NaN,0,0,null)+alreadyMerged=true）输出格式
-        // 与 assembleText 本尊逐字节一致：〔页N〕页标、〔脚注〕前缀、目录页单 \n 连块、
-        // 普通页 \n\n 分块、空页跳过（尾随 \n\n 为 assembleText 对空页的原生行为，
-        // BookParser splitBlocks 已滤空块）；同时实证 DocStats NaN/null 参数安全
-        // （评审第 1 轮意见 2）
-        val pages = listOf(
-            PageOut(1, true, 20, 0, 2, 0,
-                mutableListOf(Para("目 录"), Para("第一章 担保法概述 4")), null, null),
-            PageOut(2, false, 40, 0, 2, 0,
-                mutableListOf(Para("正文第一段，讲担保物权。"), Para("脚注内容", footnote = true)), null, null),
-            PageOut(3, false, 0, 0, 0, 0, mutableListOf(), null, null),
+    fun pageOwnerLast_straddlePage_returnsLastRowChapter() {
+        // D1：页内末行所在章吃下整页（章首跨页时后章不吃掉前章开头）
+        val rows = listOf(
+            row(10L, "前章在页内的最后一行", 5),
+            row(11L, "后章在本页开头的行", 5),
         )
-        val text = PdfExtractResult(
-            pages = pages, stats = DocStats(Float.NaN, 0f, 0f, null),
-            scanned = false, alreadyMerged = true,
-        ).assembleText()
-        assertEquals(
-            "〔页1〕\n目 录\n第一章 担保法概述 4\n\n" +
-                "〔页2〕\n正文第一段，讲担保物权。\n\n〔脚注〕脚注内容\n\n",
-            text,
-        )
+        assertEquals(11L, VisionRebuilder.pageOwnerLast(rows))
+    }
+
+    @Test
+    fun orphanOwner_floor_thenCeil() {
+        // D2：孤儿页（底稿无该页行，如视觉新见的目录页）floor 优先、ceil 兜底
+        val owners = mapOf(2 to 10L, 6 to 11L)
+        assertEquals(10L, VisionRebuilder.orphanOwner(owners, 3)) // floor：页3 → ≤3 最近页2
+        assertEquals(10L, VisionRebuilder.orphanOwner(owners, 2)) // 恰等：页2 本身
+        assertEquals(11L, VisionRebuilder.orphanOwner(owners, 7)) // ceil 兜底：页7 > 最大有字页6
+    }
+
+    @Test
+    fun orphanOwner_emptyOwners_returnsNull() {
+        // 不可达路径（rows 非空守卫先行），防御式兜底返回 null
+        assertNull(VisionRebuilder.orphanOwner(emptyMap(), 1))
     }
 }

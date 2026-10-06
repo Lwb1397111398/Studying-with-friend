@@ -175,4 +175,104 @@ class VisionRebuilderTest {
         val paras = BookRepository(db).paragraphs(BookRepository(db).chapters(bookId)[0].id)
         assertEquals(listOf("Original text layer paragraph one."), paras.map { it.text })
     }
+
+    /** 两章底稿（R1 方向 A 主用例）：甲章=页1 两段+页2 一段，乙章=页3 一段；
+     *  每段 3 字便于核对字符守恒 */
+    private suspend fun seedTwoChapterBook(): Pair<Long, String> {
+        val uri = Uri.fromFile(pdfFile).toString()
+        val bookId = BookRepository(db).importBook(
+            BookEntity(
+                title = "两章测试书", author = "", sourceType = DbValues.SRC_PDF,
+                filePath = uri, status = DbValues.BOOK_READY, totalChapters = 2,
+                overviewJson = null, createdAt = 1, updatedAt = 1,
+            ),
+            listOf(
+                ChapterEntity(
+                    bookId = 0, idx = 0, title = "甲章",
+                    readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
+                ) to listOf(
+                    ParagraphEntity(chapterId = 0, idx = 0, text = "甲一一",
+                        role = DbValues.ROLE_BODY, pageNo = 1),
+                    ParagraphEntity(chapterId = 0, idx = 1, text = "甲一二",
+                        role = DbValues.ROLE_BODY, pageNo = 1),
+                    ParagraphEntity(chapterId = 0, idx = 2, text = "甲二一",
+                        role = DbValues.ROLE_BODY, pageNo = 2),
+                ),
+                ChapterEntity(
+                    bookId = 0, idx = 1, title = "乙章",
+                    readState = DbValues.READ_NOT, gist = null, keyTermsJson = null,
+                ) to listOf(
+                    ParagraphEntity(chapterId = 0, idx = 0, text = "乙三一",
+                        role = DbValues.ROLE_BODY, pageNo = 3),
+                ),
+            ),
+        )
+        db.visionQueueDao().insertAll(
+            listOf(
+                VisionQueueEntity(bookId = bookId, uri = uri, pageNo = 2,
+                    originChars = 30, status = DbValues.VQ_DONE, attempts = 0, updatedAt = 1),
+                VisionQueueEntity(bookId = bookId, uri = uri, pageNo = 3,
+                    originChars = 30, status = DbValues.VQ_DONE, attempts = 0, updatedAt = 1),
+            ),
+        )
+        return bookId to uri
+    }
+
+    @Test
+    fun rebuild_preservesChapters_andPlacesVisionByOwner() = runBlocking {
+        val (bookId, uri) = seedTwoChapterBook()
+        // 页2 视觉转写：正文段+脚注；页3 视觉转写：目录页（3 条目 ≥ TOC_INFER_MIN）
+        VisionCache.write(
+            context, uri, 2,
+            PageTranscription(body = listOf("甲二视觉段"), footnotes = listOf("甲二脚注")),
+        )
+        VisionCache.write(
+            context, uri, 3,
+            PageTranscription(
+                // 「目 录」不匹配 RE_TOC_ENTRY；3 条章目 ≥ TOC_INFER_MIN 才判 tocLike
+                body = listOf(
+                    "目 录", "第一章 概述 .... 4", "第二章 保证 .... 6", "第三章 抵押 .... 8",
+                ),
+                footnotes = emptyList(),
+            ),
+        )
+        val rebuilt = VisionRebuilder.rebuildIfSafe(db, context, bookId)
+        assertTrue("无 AI 消费的两章书应重建", rebuilt)
+
+        // 章结构保全：2 章原顺序原 title（replaceBookContent 按 idx 重编号，列表序=原序）
+        val chapters = BookRepository(db).chapters(bookId)
+        assertEquals(listOf("甲章", "乙章"), chapters.map { it.title })
+        assertEquals(2, db.bookDao().get(bookId)!!.totalChapters)
+
+        // D1 页归属：页2 视觉段归甲章（该页末行 甲二一 属甲章）；页1 底稿行原地保留
+        val parasA = BookRepository(db).paragraphs(chapters[0].id)
+        assertEquals(listOf("甲一一", "甲一二", "甲二视觉段", "甲二脚注"), parasA.map { it.text })
+        assertEquals(
+            listOf(DbValues.ROLE_BODY, DbValues.ROLE_BODY, DbValues.ROLE_BODY, DbValues.ROLE_FOOTNOTE),
+            parasA.map { it.role },
+        )
+        assertEquals(listOf(1, 1, 2, 2), parasA.map { it.pageNo })
+
+        // D2 页归属：页3 是孤儿页？否——底稿有 乙三一 → D1 归乙章；3 条章目判 tocLike → ROLE_TOC
+        val parasB = BookRepository(db).paragraphs(chapters[1].id)
+        assertEquals(
+            listOf("目 录", "第一章 概述 .... 4", "第二章 保证 .... 6", "第三章 抵押 .... 8"),
+            parasB.map { it.text },
+        )
+        assertEquals(
+            listOf(DbValues.ROLE_TOC, DbValues.ROLE_TOC, DbValues.ROLE_TOC, DbValues.ROLE_TOC),
+            parasB.map { it.role },
+        )
+        assertEquals(listOf(3, 3, 3, 3), parasB.map { it.pageNo })
+
+        // 无空段、旧底稿行（被替换页）不残留
+        val allParas = parasA + parasB
+        assertTrue("不应有空段", allParas.none { it.text.isBlank() })
+        assertFalse("被替换页底稿行不应残留", allParas.any { it.text == "甲二一" || it.text == "乙三一" })
+
+        // 字符守恒台账（构造值必然成立）：底稿 12 − 替换页底稿 6 + 视觉 51(5+4+3+13+13+13) = 57
+        assertEquals(57, allParas.sumOf { it.text.length })
+        // 队列不动（保留 DONE 供进度展示）
+        assertEquals(2, db.visionQueueDao().byBook(bookId).size)
+    }
 }
