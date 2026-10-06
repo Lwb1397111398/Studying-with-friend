@@ -6,6 +6,7 @@ import ai.onnxruntime.OrtSession
 import android.graphics.Bitmap
 import java.io.File
 import java.nio.FloatBuffer
+import kotlin.math.ceil
 
 /**
  * 单行识别结果。坐标为输入位图像素坐标（PdfPageRenderer 140dpi 渲染图，y 自顶向下），
@@ -38,7 +39,7 @@ interface OcrEngine : AutoCloseable {
  * PP-OCRv5 mobile det+rec 生产引擎（P6a PoC 逻辑移植，OcrPocActivity 下架后以此为准）：
  * det 预处理 limit 960/32 取整/(x/255−0.5)/0.5 → det 推理 → 后处理（prob>0.3、
  * 8 连通 BFS、轴对齐框、扩张 25%、均值≥0.5 过滤）→ 框按 y 桶 24px+x 排序（阅读序）
- * → rec 批 8（48×320 拉伸）→ CTC greedy 解码（class 0=blank，dict[class−1]）。
+ * → rec 批 8（高 48 等比缩放、批内定宽右侧补零，P6c Phase 1 动态宽）→ CTC greedy 解码（class 0=blank，dict[class−1]）。
  * 简化口径声明（P6a 判据③基于此）：det 后处理无 unclip/透视变换，轴对齐框+固定比例扩张。
  */
 class PpOcrEngine(private val log: (String) -> Unit = {}) : OcrEngine {
@@ -90,33 +91,42 @@ class PpOcrEngine(private val log: (String) -> Unit = {}) : OcrEngine {
         detOut.close()
         detIn.close()
 
-        // ---- rec：批 8，48x320 拉伸，CTC greedy 解码 + 字符置信度均值 ----
+        // ---- rec：批 8，高 48 等比缩放 + 批内定宽右侧补零（P6c Phase 1 动态宽，
+        //      对齐 PC replica_ocr.py rec_pre_dyn/norm_pad_dyn 口径），CTC greedy 解码 ----
         val sx = bitmap.width.toFloat() / W; val sy = bitmap.height.toFloat() / H
-        val recW = 320; val recH = 48
+        val recH = 48
         val out = mutableListOf<OcrLine>()
         for (chunk in boxes.chunked(REC_BATCH)) {
-            val data = FloatArray(chunk.size * 3 * recH * recW)
-            val cpx = IntArray(recH * recW)
+            // 阶段一：逐框算裁剪矩形与等比目标宽（不缩放；坐标 coerce 与旧版逐行同）
+            val rects = ArrayList<IntArray>(chunk.size) // [x0,y0,x1,y1] 原图像素坐标
+            val rws = IntArray(chunk.size)
             chunk.forEachIndexed { bi, box ->
                 val x0 = (box[0] * sx).toInt().coerceIn(0, bitmap.width - 2)
                 val y0 = (box[1] * sy).toInt().coerceIn(0, bitmap.height - 2)
                 val x1 = (box[2] * sx).toInt().coerceIn(x0 + 1, bitmap.width - 1)
                 val y1 = (box[3] * sy).toInt().coerceIn(y0 + 1, bitmap.height - 1)
-                val crop = Bitmap.createBitmap(bitmap, x0, y0, x1 - x0, y1 - y0)
-                val rs = Bitmap.createScaledBitmap(crop, recW, recH, true)
-                rs.getPixels(cpx, 0, recW, 0, 0, recW, recH)
+                rects.add(intArrayOf(x0, y0, x1, y1))
+                rws[bi] = OcrRecPre.cropRecWidth(x1 - x0, y1 - y0)
+            }
+            // 定批宽（PC replica:257-258 同式：int(48 * max(320/48, 批内最大宽高比))）
+            val cropWs = IntArray(chunk.size) { rects[it][2] - rects[it][0] }
+            val cropHs = IntArray(chunk.size) { rects[it][3] - rects[it][1] }
+            val batchW = OcrRecPre.batchRecWidth(cropWs, cropHs)
+            // 阶段二：逐框裁剪 → 一步缩放到 (min(rw,batchW),48) → 归一化填左、右侧补零
+            val data = FloatArray(chunk.size * 3 * recH * batchW)
+            chunk.forEachIndexed { bi, _ ->
+                val rect = rects[bi]
+                val crop = Bitmap.createBitmap(bitmap, rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1])
+                val tgtW = minOf(rws[bi], batchW) // rw>batchW 的 ≤2px 下采样，对齐 PC norm_pad_dyn min 语义
+                val rs = Bitmap.createScaledBitmap(crop, tgtW, recH, true)
+                val cpx = IntArray(recH * tgtW)
+                rs.getPixels(cpx, 0, tgtW, 0, 0, tgtW, recH)
                 if (rs !== crop) rs.recycle(); crop.recycle()
-                val off = bi * 3 * recH * recW
-                for (i in cpx.indices) {
-                    val p = cpx[i]
-                    data[off + i] = (((p shr 16 and 0xFF) / 255f) - 0.5f) / 0.5f
-                    data[off + recH * recW + i] = (((p shr 8 and 0xFF) / 255f) - 0.5f) / 0.5f
-                    data[off + 2 * recH * recW + i] = (((p and 0xFF) / 255f) - 0.5f) / 0.5f
-                }
+                OcrRecPre.fillNormalized(cpx, tgtW, batchW, data, bi)
             }
             val t = OnnxTensor.createTensor(
                 e, FloatBuffer.wrap(data),
-                longArrayOf(chunk.size.toLong(), 3, recH.toLong(), recW.toLong()),
+                longArrayOf(chunk.size.toLong(), 3, recH.toLong(), batchW.toLong()),
             )
             val o = r.run(mapOf("x" to t))
             val outT = o[0] as OnnxTensor
@@ -233,5 +243,44 @@ object OcrCtc {
             out.add(sb.toString() to if (confCnt > 0) confSum / confCnt else 0f)
         }
         return out
+    }
+}
+
+/** rec 动态宽预处理纯函数（P6c Phase 1，对齐 PC replica_ocr.py rec_pre_dyn/norm_pad_dyn 口径）：
+ *  根因修复——旧固定 320×48 硬拉伸把长行压约 4 倍致 CTC 全 blank、conf 崩（PC 全量 401 页实证） */
+object OcrRecPre {
+    private const val REC_H = 48
+    private const val REC_MIN_W = 320 // PC 口径：批宽下限 320（宽高比下限 320/48）
+
+    /** 单框 rec 输入宽：高 48 等比缩放后的宽 = ceil(cropW*48/cropH)，最小 1（PC rec_pre_dyn:128 同式） */
+    fun cropRecWidth(cropW: Int, cropH: Int): Int =
+        maxOf(1, ceil(cropW * REC_H.toDouble() / cropH).toInt())
+
+    /** 批内统一定宽 = int(48 * max(320/48, 批内最大宽高比))，下限 320（PC replica:257-258 同式）；
+     *  coerceAtLeast 防 float 舍入把 48*(320f/48f) 截断成 319 */
+    fun batchRecWidth(cropWs: IntArray, cropHs: IntArray): Int {
+        var maxRatio = REC_MIN_W.toFloat() / REC_H
+        for (i in cropWs.indices) {
+            val r = cropWs[i].toFloat() / cropHs[i]
+            if (r > maxRatio) maxRatio = r
+        }
+        return maxOf(REC_MIN_W, (REC_H * maxRatio).toInt())
+    }
+
+    /** 把已缩放到 (rw×48) 的 ARGB 像素归一化 ((c/255−0.5)/0.5) 填入批次 data 第 bi 行，
+     *  平面布局 [3][48][batchW]，内容靠左、右侧补零（PC norm_pad_dyn:137-138 同构，0f 即归一化零点）；
+     *  @param rw 必须已由调用方 minOf 截断（rw ≤ batchW）；漏截断时 require 即抛，
+     *  错误信息提示回查调用方 minOf——宁抛异常不做静默越界写 */
+    fun fillNormalized(px: IntArray, rw: Int, batchW: Int, data: FloatArray, bi: Int) {
+        require(rw in 1..batchW) { "rw=$rw 超出批宽 batchW=$batchW（调用方漏做 minOf 截断？）" }
+        val plane = REC_H * batchW
+        val off = bi * 3 * plane
+        for (y in 0 until REC_H) for (x in 0 until rw) {
+            val p = px[y * rw + x]
+            val di = off + y * batchW + x
+            data[di] = (((p shr 16 and 0xFF) / 255f) - 0.5f) / 0.5f
+            data[plane + di] = (((p shr 8 and 0xFF) / 255f) - 0.5f) / 0.5f
+            data[2 * plane + di] = (((p and 0xFF) / 255f) - 0.5f) / 0.5f
+        }
     }
 }
