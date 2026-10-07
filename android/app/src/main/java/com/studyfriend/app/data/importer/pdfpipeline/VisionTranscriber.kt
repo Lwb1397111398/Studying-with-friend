@@ -49,7 +49,8 @@ object TranscriptionJson {
 class VisionTranscriber(
     private val baseUrl: String,
     private val apiKey: String,
-    private val model: String,
+    /** 模型名公开只读：Worker 多模型轮转的日志与可观测性用（R3） */
+    val model: String,
 ) {
 
     /**

@@ -334,7 +334,9 @@ print('D4 PASS:', s['pearson_r'], s['mobile_fallback_pages'])
 
 ### 5. 遗留状态更新
 
-§10 表「22 页 DIAGRAM 视觉增强补齐」→ **已闭环**（本节 + 设备端 bookId=5 全本队列 27/47 DONE 落档，余 20 页待续跑；缓存机制经实测会被系统清理，重建依赖缓存——续跑后重建前勿清缓存）。
+§10 表「22 页 DIAGRAM 视觉增强补齐」→ **已闭环**（本节 + 设备端 bookId=5 全本队列 47/47 DONE 全清，2026-10-07 落档；缓存机制经实测会被系统清理，重建依赖缓存——续跑后重建前勿清缓存）。
+
+mfzz（bookId=1，146 队列项×历史批次累计 209 行）→ 2026-10-07 收口：DONE 208 / FAILED 1（pageNo 531，龙猫推理超载 finish=length，宿主机等价复现 MEASURED，文字层 535 字兜底不丢），`rebuild bookId=1 pages=769 chars=535628→535628 chapters=12 (preserved)`。多视觉模型轮转（R3，老板 2026-10-07 指令）已落地：备用视觉组配置 + Worker「渲染单协程+Channel 竞争分发+N 模型协程」流水线 + 前台化阈值 FOREGROUND_MIN_PAGES=8（API 35 模拟器 FGS dataSync 校验失败会连带 worker cancel，真机 FGS 正常性待验）——详见小计划 D §7。
 
 ## 11. 取证清单（.e2e/p6c/b_evidence/，不入库）
 

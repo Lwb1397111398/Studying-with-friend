@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 应用自更新（M7）：覆盖安装下载好的新 APK 需要声明；首次安装时系统会让用户确认 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- 视觉转写前台服务（R3）：Worker 前台化规避 JobScheduler 10 分钟超时
+         （超时被杀每次记一笔，24h 窗口超 10 次配额耗尽、调度全停——实测实录） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- largeHeap（r12-P0-4）：630 页大书导入时 PDFBox 对象图 + 全量文本结构贴线
          192MB growth limit 飞行，五跑真机 java.lang.OutOfMemoryError 崩溃实证；
@@ -31,6 +38,12 @@
         </activity>
 
         <!-- P6b S5：PoC 专用 OcrPocActivity 已下架（生产路径 OcrImportRunner，E2E 走 S7 模拟器） -->
+
+        <!-- R3：WorkManager 前台服务载体升级为 dataSync 类型（VisionWorker.setForeground 需要） -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
 
         <!-- 应用自更新（M7）：把缓存目录里下载好的 APK 安全地共享给系统安装程序 -->
         <provider

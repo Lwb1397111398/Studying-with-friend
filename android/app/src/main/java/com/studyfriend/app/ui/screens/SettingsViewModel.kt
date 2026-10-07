@@ -58,6 +58,13 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     var hasVisionKey by mutableStateOf(false)
         private set
 
+    /** 备用视觉组（R3 多模型轮转）：主模型限流时自动接力，多路并行提速；三键齐才参与 */
+    var vision2BaseUrl by mutableStateOf("")
+    var vision2Model by mutableStateOf("")
+    var vision2KeyInput by mutableStateOf("")
+    var hasVision2Key by mutableStateOf(false)
+        private set
+
     /** 扫描书本地识别（P6b S4）：开关即点即存；模型就绪与否只读展示 */
     var ocrEnabled by mutableStateOf(true)
         private set
@@ -80,6 +87,9 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             visionModel = s.visionModel
             visionBaseUrl = s.visionBaseUrl
             hasVisionKey = s.hasVisionKey
+            vision2BaseUrl = s.vision2BaseUrl
+            vision2Model = s.vision2Model
+            hasVision2Key = s.hasVision2Key
             ocrEnabled = s.ocrEnabled
             ocrModelsReady = OcrModelStore.modelsPresent(getApplication<StudyApp>())
         }
@@ -95,6 +105,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 val temp = AiClient.parseTemperature(tempText)
                 repo.save(baseUrl, model, temp, keyInput.takeIf { it.isNotBlank() })
                 repo.saveVision(visionEnabled, visionModel, visionBaseUrl, visionKeyInput.takeIf { it.isNotBlank() })
+                repo.saveVision2(vision2BaseUrl, vision2Model, vision2KeyInput.takeIf { it.isNotBlank() })
                 if (keyInput.isNotBlank()) {
                     hasKey = true
                     keyInput = ""
@@ -102,6 +113,10 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 if (visionKeyInput.isNotBlank()) {
                     hasVisionKey = true
                     visionKeyInput = ""
+                }
+                if (vision2KeyInput.isNotBlank()) {
+                    hasVision2Key = true
+                    vision2KeyInput = ""
                 }
                 tempText = temp.toString()
                 // OPT-F：视觉配置变了（开关/Key/模型），队列里有待转写页的书立即重调度
@@ -183,6 +198,23 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 error = "清除视觉 Key 失败：" + (e.message ?: "未知错误")
+            }
+        }
+    }
+
+    /** 清除备用视觉 Key（R3）：备用组三键缺一即退出轮转，回退单模型 */
+    fun clearVision2Key() {
+        if (busy || testing) return
+        viewModelScope.launch {
+            try {
+                repo.clearVision2Key()
+                hasVision2Key = false
+                vision2KeyInput = ""
+                message = "已清除备用视觉 Key，备用组退出轮转"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = "清除备用视觉 Key 失败：" + (e.message ?: "未知错误")
             }
         }
     }

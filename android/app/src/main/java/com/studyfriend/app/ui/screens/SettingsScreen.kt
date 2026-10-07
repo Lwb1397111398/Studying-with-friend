@@ -145,6 +145,40 @@ fun SettingsScreen(vm: SettingsViewModel, updateVm: UpdateViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                 )
+
+                // 备用视觉组（R3 多模型轮转）：主模型限流时自动接力，多路并行提速
+                Text(
+                    "备用视觉模型（可选）：主模型限流/失败时自动接力转写，" +
+                        "多个模型并行消化队列。地址、模型名、Key 三项都填才启用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = vm.vision2BaseUrl,
+                    onValueChange = { vm.vision2BaseUrl = it },
+                    label = { Text("备用视觉 API 地址") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = vm.vision2KeyInput,
+                    onValueChange = { vm.vision2KeyInput = it },
+                    label = { Text("备用视觉 API Key") },
+                    placeholder = { Text(if (vm.hasVision2Key) "已保存（输入以更换）" else "必填（备用组不共用主 Key）") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    trailingIcon = {
+                        if (vm.hasVision2Key) TextButton(onClick = { vm.clearVision2Key() }) { Text("清除") }
+                    },
+                )
+                OutlinedTextField(
+                    value = vm.vision2Model,
+                    onValueChange = { vm.vision2Model = it },
+                    label = { Text("备用视觉模型名") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
             }
 
             // 扫描书本地识别（P6b S4）：手机本地 OCR 引擎识别扫描版 PDF；开关即点即存

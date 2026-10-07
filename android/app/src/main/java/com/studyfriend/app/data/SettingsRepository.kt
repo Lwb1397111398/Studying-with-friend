@@ -27,6 +27,11 @@ data class SettingsSnapshot(
     val visionBaseUrl: String,
     /** 是否已存视觉专属 Key（明文不出库） */
     val hasVisionKey: Boolean,
+    /** 备用视觉组（R3 多模型轮转）：空 = 未配置备用；三键齐（地址/模型/专属 Key）才参与轮转 */
+    val vision2BaseUrl: String,
+    val vision2Model: String,
+    /** 是否已存备用视觉专属 Key（明文不出库；备用组不回退主 Key——异家 Key 打异家 URL 无意义） */
+    val hasVision2Key: Boolean,
     /** 应用自更新（M7）：是否已存 GitHub 只读令牌（明文不出库） */
     val hasGithubToken: Boolean,
     /** 发现新版本自动弹窗检查；默认开 */
@@ -63,6 +68,9 @@ class SettingsRepository(
                 ?.takeIf { it.isNotBlank() } ?: DEFAULT_VISION_MODEL,
             visionBaseUrl = db.settingDao().get(KEY_VISION_BASE)?.value.orEmpty(),
             hasVisionKey = db.settingDao().get(KEY_VISION_KEY_ENC)?.value != null,
+            vision2BaseUrl = db.settingDao().get(KEY_VISION2_BASE)?.value.orEmpty(),
+            vision2Model = db.settingDao().get(KEY_VISION2_MODEL)?.value.orEmpty(),
+            hasVision2Key = db.settingDao().get(KEY_VISION2_KEY_ENC)?.value != null,
             hasGithubToken = db.settingDao().get(KEY_GITHUB_TOKEN_ENC)?.value != null,
             updateAutoCheck = db.settingDao().get(KEY_UPDATE_AUTO)?.value != "false",
             updateApiBase = db.settingDao().get(KEY_UPDATE_API_BASE)?.value.orEmpty(),
@@ -125,6 +133,34 @@ class SettingsRepository(
     /** 清除视觉专属 Key（之后视觉回退用主 Key） */
     suspend fun clearVisionKey() {
         db.settingDao().delete(KEY_VISION_KEY_ENC)
+    }
+
+    /**
+     * 备用视觉组（R3 多模型轮转）：随"保存"按钮落库，模式同 [saveVision]。
+     * null = 保持不变；Key 只在非空时加密写入。三键齐才参与轮转（见 buildVisionTranscribers）。
+     */
+    suspend fun saveVision2(
+        baseUrl: String? = null,
+        model: String? = null,
+        keyPlain: String? = null,
+    ) {
+        db.withTransaction {
+            if (baseUrl != null) {
+                db.settingDao().upsert(SettingEntity(KEY_VISION2_BASE, baseUrl.trim()))
+            }
+            if (!model.isNullOrBlank()) {
+                db.settingDao().upsert(SettingEntity(KEY_VISION2_MODEL, model.trim()))
+            }
+            if (!keyPlain.isNullOrBlank()) {
+                val payload = store.encrypt(keyPlain.trim())
+                db.settingDao().upsert(SettingEntity(KEY_VISION2_KEY_ENC, payload))
+            }
+        }
+    }
+
+    /** 清除备用视觉 Key（备用组三键缺一即退出轮转） */
+    suspend fun clearVision2Key() {
+        db.settingDao().delete(KEY_VISION2_KEY_ENC)
     }
 
     // ---- 扫描书本地识别（P6b S4）：开关 / 用户反馈计数 / OCR 版本标记 ----
@@ -205,16 +241,28 @@ class SettingsRepository(
         decryptVisionKeyOrNull() ?: decryptKeyOrNull()
 
     /**
-     * 组装视觉转写器（OPT-F）：开关开且有可用 Key 才建，null = 视觉不可用。
-     * 导入同步路径与后台队列 Worker 共用这一个入口；地址/模型专属优先、留空回退主配置。
+     * 组装视觉转写器列表（R3 多模型轮转）：开关开且至少一组可用才非空。
+     * 主组：专属 Key 优先、留空回退主 Key（同一家时两处不用重复填）；
+     * 备用组：地址/模型/专属 Key 三键齐才入列（异家 Key 不回退主 Key）。
+     * 导入同步路径与探针取首个；后台队列 Worker 用全列表做多模型并行轮转。
      */
-    suspend fun buildVisionTranscriber(): VisionTranscriber? {
+    suspend fun buildVisionTranscribers(): List<VisionTranscriber> {
         val snap = load()
-        if (!snap.visionEnabled) return null
-        val key = resolveVisionKeyOrNull() ?: return null
-        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
-        return VisionTranscriber(base, key, snap.visionModel)
+        if (!snap.visionEnabled) return emptyList()
+        val list = mutableListOf<VisionTranscriber>()
+        resolveVisionKeyOrNull()?.let { key ->
+            val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
+            list += VisionTranscriber(base, key, snap.visionModel)
+        }
+        val key2 = decryptVision2KeyOrNull()
+        if (key2 != null && snap.vision2BaseUrl.isNotBlank() && snap.vision2Model.isNotBlank()) {
+            list += VisionTranscriber(snap.vision2BaseUrl, key2, snap.vision2Model)
+        }
+        return list
     }
+
+    /** 单转写器入口（导入同步路径/目录探针共用，取轮转列表首个） */
+    suspend fun buildVisionTranscriber(): VisionTranscriber? = buildVisionTranscribers().firstOrNull()
 
     /**
      * 组装目录探针（P3b-1）：与 [buildVisionTranscriber] 同源快照（开关/Key/专属地址
@@ -248,6 +296,20 @@ class SettingsRepository(
         }
     }
 
+    /** 解备用视觉专属 Key，逻辑同 [decryptVisionKeyOrNull] */
+    suspend fun decryptVision2KeyOrNull(): String? {
+        val payload = db.settingDao().get(KEY_VISION2_KEY_ENC)?.value ?: return null
+        if (isStructurallyCorrupt(payload)) {
+            db.settingDao().delete(KEY_VISION2_KEY_ENC)
+            return null
+        }
+        return try {
+            store.decrypt(payload)
+        } catch (e: SecretCryptoException) {
+            null
+        }
+    }
+
     suspend fun decryptKeyOrNull(): String? {
         val payload = db.settingDao().get(KEY_ENC)?.value ?: return null
         if (isStructurallyCorrupt(payload)) {
@@ -268,6 +330,10 @@ class SettingsRepository(
         const val KEY_VISION_MODEL = "vision_model"
         const val KEY_VISION_BASE = "vision_base"
         const val KEY_VISION_KEY_ENC = "vision_key_enc"
+        // 备用视觉组（R3 多模型轮转）
+        const val KEY_VISION2_BASE = "vision2_base"
+        const val KEY_VISION2_MODEL = "vision2_model"
+        const val KEY_VISION2_KEY_ENC = "vision2_key_enc"
         // 扫描书本地识别（P6b S4）
         const val KEY_OCR_ENABLED = "ocr_enabled"
         const val KEY_OCR_FEEDBACK_TOTAL = "ocr_feedback_total"
