@@ -36,7 +36,7 @@ class UpdateException(message: String, cause: Throwable? = null) : Exception(mes
  *
  * 约定：云端工作流每次构建发布时，把机器可读元数据写进发布说明第一行的 HTML 注释
  * `<!-- studyfriend-update versionCode=15 versionName=0.1.15 -->`（GitHub 页面渲染时不可见），
- * 资产里第一个 .apk 就是安装包。私有仓库查 Releases 必须带只读令牌，否则 API 返回 404。
+ * 资产里第一个 .apk 就是安装包。仓库公开后匿名即可读 Releases；token 参数保留给私有仓库场景。
  */
 object UpdateChecker {
 
@@ -55,7 +55,7 @@ object UpdateChecker {
         currentVersionCode: Int,
     ): UpdateCheckResult {
         val (body, apk) = fetchReleaseJson(apiBase, repo, token)
-            ?: throw UpdateException(noReleaseMessage(token))
+            ?: throw UpdateException(noReleaseMessage())
         val meta = parseUpdateMeta(body)
             ?: throw UpdateException("远端版本信息无法识别：发布说明里缺少版本元数据（需要重新跑一次云端构建）")
         val asset = apk ?: throw UpdateException("远端发布里没有找到 APK 安装包")
@@ -97,7 +97,7 @@ object UpdateChecker {
             conn.readTimeout = 120000
             val code = conn.responseCode
             if (code !in 200..299) {
-                throw UpdateException("下载失败（HTTP $code）${if (code in 400..404) "，可能是令牌无效或已过期" else ""}")
+                throw UpdateException("下载失败（HTTP $code）：请稍后再试")
             }
             val total = conn.contentLengthLong
             conn.inputStream.use { input ->
@@ -155,13 +155,9 @@ object UpdateChecker {
     fun stripMetaComment(body: String): String =
         body.replace(Regex("""<!--\s*studyfriend-update[^>]*-->"""), "").trim()
 
-    /** 人话版 404 提示：私有仓库没令牌、和真没发过版本，用户需要区分 */
-    fun noReleaseMessage(token: String?): String =
-        if (token.isNullOrBlank()) {
-            "获取更新失败：仓库未公开且未配置令牌。请在下方填入 GitHub 只读访问令牌（点「如何获取令牌？」看步骤）"
-        } else {
-            "仓库还没有发布过任何版本（若仓库是私有的，请检查令牌是否有效）"
-        }
+    /** 人话版 404 提示：404 = 没有任何发布（GitHub 对匿名也返回 404） */
+    fun noReleaseMessage(): String =
+        "仓库还没有发布过任何版本（推送代码后等云端构建完成，再点「检查更新」）"
 
     /**
      * GET /repos/{repo}/releases/latest，返回 (body, 第一个 .apk 资产)。
@@ -191,7 +187,7 @@ object UpdateChecker {
                     return body to apk
                 }
                 404 -> return null
-                401 -> throw UpdateException("GitHub 令牌无效或已过期，请重新生成并保存")
+                401 -> throw UpdateException("GitHub 拒绝了请求（401）：请稍后再试")
                 403 -> throw UpdateException("GitHub 请求被限流，请稍后再试")
                 else -> throw UpdateException("GitHub 返回异常状态（HTTP $code）")
             }

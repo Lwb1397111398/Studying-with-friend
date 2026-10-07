@@ -32,9 +32,6 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
 
     var autoCheck by mutableStateOf(true)
         private set
-    var hasToken by mutableStateOf(false)
-        private set
-    var tokenInput by mutableStateOf("")
     var checking by mutableStateOf(false)
         private set
     /** 设置页状态行；statusError = true 时红色显示 */
@@ -57,14 +54,11 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
     /** 缺「安装未知应用」权限：已打开系统设置页，回来后点「安装更新」重试 */
     var needsInstallPermission by mutableStateOf(false)
         private set
-    var guideOpen by mutableStateOf(false)
-        private set
 
     init {
         viewModelScope.launch {
             val s = repo.load()
             autoCheck = s.updateAutoCheck
-            hasToken = s.hasGithubToken
         }
     }
 
@@ -107,7 +101,8 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
                 UpdateChecker.fetchLatest(
                     apiBase = s.updateApiBase.ifBlank { UpdateChecker.DEFAULT_API_BASE },
                     repo = UpdateChecker.REPO,
-                    token = repo.decryptGithubTokenOrNull(),
+                    // 仓库已公开，匿名即可读 Releases；不再让用户配令牌
+                    token = null,
                     currentVersionCode = BuildConfig.VERSION_CODE,
                 )
             }
@@ -124,36 +119,6 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
             if (!silent) setStatus(e.message ?: "检查更新失败", error = true)
         } finally {
             checking = false
-        }
-    }
-
-    fun saveToken() {
-        if (tokenInput.isBlank()) return
-        viewModelScope.launch {
-            try {
-                repo.saveGithubToken(tokenInput)
-                hasToken = true
-                tokenInput = ""
-                setStatus("令牌已保存（加密存储），可以点「检查更新」试试")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                setStatus("令牌保存失败：${e.message ?: "未知错误"}", error = true)
-            }
-        }
-    }
-
-    fun clearToken() {
-        viewModelScope.launch {
-            try {
-                repo.clearGithubToken()
-                hasToken = false
-                setStatus("已清除 GitHub 令牌")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                setStatus("清除令牌失败：${e.message ?: "未知错误"}", error = true)
-            }
         }
     }
 
@@ -180,11 +145,10 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
             progress = 0
             needsInstallPermission = false
             try {
-                val token = repo.decryptGithubTokenOrNull()
                 val ctx = getApplication<Application>()
                 val dest = File(ctx.cacheDir, "updates/update-${release.versionCode}.apk")
                 withContext(Dispatchers.IO) {
-                    UpdateChecker.downloadApk(release.apkUrl, token, dest, release.apkSize) { pct ->
+                    UpdateChecker.downloadApk(release.apkUrl, null, dest, release.apkSize) { pct ->
                         progress = pct
                     }
                 }
@@ -224,14 +188,6 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
         available = null
         needsInstallPermission = false
         downloadError = null
-    }
-
-    fun openGuide() {
-        guideOpen = true
-    }
-
-    fun closeGuide() {
-        guideOpen = false
     }
 
     private fun setStatus(text: String, error: Boolean = false) {

@@ -69,35 +69,4 @@ fun UpdateDialog(vm: UpdateViewModel) {
             ) { Text(if (vm.downloading) "后台继续" else "以后再说") }
         },
     )
-
-    TokenGuideDialog(vm)
-}
-
-/** GitHub 只读令牌申请步骤（面向第一次配置的老板，逐步点出来） */
-@Composable
-private fun TokenGuideDialog(vm: UpdateViewModel) {
-    if (!vm.guideOpen) return
-    AlertDialog(
-        onDismissRequest = { vm.closeGuide() },
-        title = { Text("如何获取 GitHub 令牌？") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    "用电脑或手机浏览器打开 github.com 并登录后：\n" +
-                        "\n1. 点右上角头像 → Settings（设置）\n" +
-                        "2. 左侧最底部 → Developer settings（开发者设置）\n" +
-                        "3. Personal access tokens → Fine-grained tokens → Generate new token\n" +
-                        "4. Repository access 选「Only select repositories」，勾选 Studying-with-friend\n" +
-                        "5. Permissions → Repository permissions → Contents 设为 Read-only\n" +
-                        "6. Expiration 有效期选 1 年（到期后重新生成换一个即可）\n" +
-                        "7. 点 Generate token，复制生成的一长串（github_pat_ 开头），回到设置页粘贴并点「保存令牌」\n" +
-                        "\n这个令牌只有「读取」权限，只用于下载更新包；换手机后需要重新填一次。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { vm.closeGuide() }) { Text("知道了") }
-        },
-    )
 }

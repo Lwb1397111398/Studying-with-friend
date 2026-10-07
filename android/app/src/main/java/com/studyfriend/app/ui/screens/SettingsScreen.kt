@@ -257,24 +257,7 @@ fun SettingsScreen(vm: SettingsViewModel, updateVm: UpdateViewModel) {
                     onClick = { updateVm.checkNow() },
                     enabled = !updateVm.checking && !updateVm.downloading,
                 ) { Text(if (updateVm.checking) "检查中…" else "检查更新") }
-                TextButton(onClick = { updateVm.openGuide() }) { Text("如何获取令牌？") }
             }
-            OutlinedTextField(
-                value = updateVm.tokenInput,
-                onValueChange = { updateVm.tokenInput = it },
-                label = { Text("GitHub 访问令牌（私有仓库更新用）") },
-                placeholder = { Text(if (updateVm.hasToken) "已保存（输入以更换）" else "github_pat_…") },
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                trailingIcon = {
-                    if (updateVm.hasToken) TextButton(onClick = { updateVm.clearToken() }) { Text("清除") }
-                },
-            )
-            OutlinedButton(
-                onClick = { updateVm.saveToken() },
-                enabled = updateVm.tokenInput.isNotBlank(),
-            ) { Text("保存令牌") }
             updateVm.status?.let {
                 Text(
                     it,
