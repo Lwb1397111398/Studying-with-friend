@@ -36,13 +36,22 @@ class UpdateException(message: String, cause: Throwable? = null) : Exception(mes
  *
  * 约定：云端工作流每次构建发布时，把机器可读元数据写进发布说明第一行的 HTML 注释
  * `<!-- studyfriend-update versionCode=15 versionName=0.1.15 -->`（GitHub 页面渲染时不可见），
- * 资产里第一个 .apk 就是安装包。仓库公开后匿名即可读 Releases；token 参数保留给私有仓库场景。
+ * 资产里第一个 .apk 就是安装包。仓库公开后匿名即可读 Releases（token 参数保留给私有仓库场景）；
+ * 查询固定走 releases/tags/latest，不走 releases/latest（会被其他 Release 抢走，见 UPDATE_TAG 注释）。
  */
 object UpdateChecker {
 
     const val DEFAULT_API_BASE = "https://api.github.com"
     /** 更新源仓库：与 git remote 一致；改仓库名时这里要同步 */
     const val REPO = "Lwb1397111398/Studying-with-friend"
+
+    /**
+     * App 更新固定发在 tag `latest` 的 Release（CI 每次 --clobber 覆盖它）。
+     * 按 tag 取而不是 releases/latest：后者返回「发布时间最新」的 Release，
+     * 仓库里任何其他 Release（如 2026-10-05 的 ocr-models-v1 模型包）发布更晚就会把它抢走，
+     * 导致 App 解析不到版本元数据（2026-10-07 实际发生）。
+     */
+    const val UPDATE_TAG = "latest"
 
     /**
      * 查询最新发布并与当前版本比较（versionCode 大于当前才算有更新）。
@@ -155,7 +164,7 @@ object UpdateChecker {
     fun stripMetaComment(body: String): String =
         body.replace(Regex("""<!--\s*studyfriend-update[^>]*-->"""), "").trim()
 
-    /** 人话版 404 提示：404 = 没有任何发布（GitHub 对匿名也返回 404） */
+    /** 人话版 404 提示：按 tag 取不到 = latest Release 还没建过 */
     fun noReleaseMessage(): String =
         "仓库还没有发布过任何版本（推送代码后等云端构建完成，再点「检查更新」）"
 
@@ -164,7 +173,7 @@ object UpdateChecker {
      * 没有任何发布时 GitHub 返回 404 → 返回 null；其余失败抛 [UpdateException]。
      */
     private fun fetchReleaseJson(apiBase: String, repo: String, token: String?): Pair<String, RemoteAsset?>? {
-        val conn = open("$apiBase/repos/$repo/releases/latest", token)
+        val conn = open("$apiBase/repos/$repo/releases/tags/$UPDATE_TAG", token)
         try {
             conn.connectTimeout = 15000
             conn.readTimeout = 30000

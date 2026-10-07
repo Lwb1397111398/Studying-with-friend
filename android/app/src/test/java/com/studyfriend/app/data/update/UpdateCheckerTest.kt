@@ -223,7 +223,7 @@ private class FakeGitHub {
         val path = requestLine.split(" ").getOrNull(1).orEmpty()
         val out = socket.getOutputStream()
         when {
-            path.endsWith("/releases/latest") -> {
+            path.endsWith("/releases/tags/latest") -> {
                 latestRequests.incrementAndGet()
                 authHeader = headers["authorization"]
                 userAgent = headers["user-agent"]
