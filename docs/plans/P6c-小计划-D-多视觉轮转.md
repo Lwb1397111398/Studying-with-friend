@@ -61,9 +61,10 @@
 | 判据 | 结果 | 证据 |
 | --- | --- | --- |
 | D1 编译+测试 | ✓ | 四文件（SettingsRepository/VisionWorker/SettingsViewModel/SettingsScreen）+ AndroidManifest 三权限（FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC / POST_NOTIFICATIONS）+ SystemForegroundService dataSync 声明，编译绿、既有 JVM 测试无新增红 |
-| D2 双模型加载 | ✓（部分） | logcat `VisionWorker: models=[sensenova-6.8-flash-lite, LongCat-2.5-Preview]`（06:27:27，逐字 MEASURED）；**两模型交替转写页日志 UNMEASURED**——本批队列只剩最后 1 页，无双页并行负载，下一批队列补证 |
-| D3 队列终态 | ✓ | mfzz vision_queue 终态 DONE 208 / FAILED 1（唯一 FAILED=pageNo 531，见下立案）；bookId=5 已 47/47 全清 |
-| D4 rebuild | ✓ | `VisionRebuilder: rebuild bookId=1 pages=769 chars=535628→535628 chapters=12 (preserved)`（06:32:43）后 `Worker result SUCCESS` |
+| D2 双模型加载 | ✓ | logcat `VisionWorker: models=[sensenova-6.8-flash-lite, LongCat-2.5-Preview]`（历次 run 逐字 MEASURED） |
+| D2+ 双模型并行/交替 | ✓（6 页重置重转实测） | 同一 run（07:31:06 pending=6）内交替完成：商汤 page 3/7/22 + 龙猫 page 5（chars=667），4 页墙钟 3 分 52 秒；`page N done [模型]` 交替日志 MEASURED。**轮转救场活案例**：page 18 两轮被龙猫领走均 180s×2 推理超时，第三轮被商汤领走 111s 成（chars=651）——单模型会像 page 531 一样烧穿 attempts，轮转给了换模型翻盘的机会 |
+| D3 队列终态 | ✓ | mfzz（bookId=1）146 行终态 **DONE 145 / FAILED 1**（唯一 FAILED=pageNo 531，见下立案；208 是全库口径=mfzz 146+bookId=5 47+mini 16，此前文档口径已修正）；bookId=5 47/47 全清 |
+| D4 rebuild | ✓ | `rebuild bookId=1 pages=769 chars=535628→535628 chapters=12 (preserved)`（06:32:43）；并行实测后再次 `535628→535523 chapters=12 (preserved)`（07:58:50，page 17/18 新转写入库），Worker result SUCCESS |
 | D5 单模型回退 | ✓（结构性） | `buildVisionTranscriber() = buildVisionTranscribers().firstOrNull()`（SettingsRepository.kt:265），不填备用组即单元素列表 |
 
 ### page 531 立案（唯一 FAILED 页，根因已定案）
@@ -77,5 +78,6 @@
 ### 成本对账（申报）
 
 - LLM 调用次数：不变（页级一次转写；重试语义与改前一致）。
-- 单页实测：龙猫 26s/页（MEASURED）vs 商汤 16~70s 不稳；**双路并行墙钟减半为 UNMEASURED**（本批无并行负载，流水线机制上渲染 ~1s/页不构成瓶颈）。
+- 单页实测：龙猫 26s/页（MEASURED）vs 商汤 16~70s 不稳。
+- **并行实测（6 页重置重转，2026-10-07）**：07:31 run 同一窗口 4 页（商汤×3+龙猫×1）墙钟 3 分 52 秒——同页集串行粗估 8 分钟级，**约 2 倍提速（样本 1 轮 6 页，方向性结论 MEASURED、倍数精度 UNMEASURED）**；Page 18 案例实证轮转语义：某模型连续超时只卡自己协程，另一模型领页即翻盘。
 - 新增依赖：无。
