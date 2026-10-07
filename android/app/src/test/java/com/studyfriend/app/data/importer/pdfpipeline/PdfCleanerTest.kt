@@ -148,6 +148,58 @@ class PdfCleanerTest {
     }
 
     @Test
+    fun clean_ocrTocPage_parenPageNums_tocLike() {
+        // P6c-D 扫描书实录（shpc p8 简 目）：OCR 目录页页码带括号「（1）」「(355)」，
+        // 点线被 OCR 认成「●●」「..」独立行——旧纯数字页码口径整页 0 命中 → 目录
+        // 条目全混进正文（DB 实录 role=TOC 0 条）。括号页码 + 点线碎行判据须兜住
+        val page = listOf(
+            line("简 目", y0 = 80f, x1 = 200f),
+            line("第一章 风险社会、保护国家与损害赔偿制度 ……………………（1）", y0 = 110f, x1 = 540f),
+            line("第一节 风险社会与保护国家 …………………………………… (1)", y0 = 140f, x1 = 540f),
+            line("第二章 损害赔偿法的规范体系、目的、归责原则及发展趋势", y0 = 170f, x1 = 540f),
+            line("..", y0 = 180f, x1 = 540f),
+            line("(21)", y0 = 190f, x0 = 290f, x1 = 320f),
+            line("第二节美国法上的惩罚性赔偿 (359)", y0 = 220f, x1 = 540f),
+            line("主要参考文献· (409)", y0 = 250f, x1 = 540f),
+            line("索引", y0 = 280f, x1 = 200f),
+            line(".7", y0 = 290f, x1 = 540f),
+            line("(427)", y0 = 300f, x0 = 290f, x1 = 320f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertTrue("OCR 目录页（括号页码/点线碎行形态）须判为目录页", out[0].tocLike)
+        assertTrue(out[0].paras.any { it.text.contains("（1）") })
+    }
+
+    @Test
+    fun clean_ocrTocPage_noDotsHeadingForm_tocLike() {
+        // P6c-D 扫描书实录（shpc p10 详目）：点线整行被 OCR 吃掉，条目只剩
+        // 「第X节/第X款 标题 (页码)」形态——第三判据（标题样+尾页码）兜住
+        val page = listOf(
+            line("详 目", y0 = 80f, x1 = 200f),
+            line("第二节美国法上的惩罚性赔偿 (359)", y0 = 110f, x1 = 540f),
+            line("第三节中国台湾地区法上的惩罚性赔偿 (375)", y0 = 140f, x1 = 540f),
+            line("第四节结论.美国惩罚性赔偿的继受与本土化的发展 (403)", y0 = 170f, x1 = 540f),
+            line("第一节 填补性损害赔偿与惩罚性赔偿…… (355)", y0 = 200f, x1 = 540f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertTrue("无点线目录条目（标题样+括号页码）须判为目录页", out[0].tocLike)
+    }
+
+    @Test
+    fun clean_bodyPageHeadingLikeCitations_notTocLike() {
+        // 防误伤回归：正文页引用「第X节」字样+数字收尾的行不足 3 行，且无点线页码行，
+        // 不得判为目录页（P6c-D 第三判据的护栏）
+        val page = listOf(
+            line("关于第一节的规定见第 3 条。", y0 = 100f, x1 = 500f),
+            line("依第二节所述方法计算如下：", y0 = 130f, x1 = 500f),
+            line("损害赔偿的数额合计为 359。", y0 = 160f, x1 = 500f),
+            line("以上构成请求权基础的全部内容。", y0 = 190f, x1 = 500f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertFalse(out[0].tocLike)
+    }
+
+    @Test
     fun clean_footerSmallLines_collectedAsFootnotePara() {
         val page = listOf(
             line("正文大段内容讲完了。", y0 = 300f, x1 = 520f),

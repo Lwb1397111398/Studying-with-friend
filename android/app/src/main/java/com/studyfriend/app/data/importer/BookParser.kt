@@ -42,8 +42,23 @@ object BookParser {
 
     // 目录条目形态：点线/省略号 + 页码结尾（"第一章 导论……1"），不是标题。
     // 点线字符族含 … · . 以及 PDF 提取常见的实心圆点 •(U+2022)/‧(U+2027)（OPT-C C2）
+    // P6c-D 扫描书适配：加全角句点「．」与 OCR 圆点认读「●」（shpc 目录页点线被 OCR
+    // 认成「●●」「..」独立行）；页码放宽括号形态——OCR 目录页实录「……（1）」「……(355)」
+    // 带括号页码是主流，纯数字口径整页 0 命中 → 目录区识别/探针取样全链漏（DB 实录
+    // shpc role=TOC 0 条、条目混进「序言」章）。
     // internal：TocChapterCalibrator 锚点/章名匹配同样要排除目录页点线条目（P3b-2）
-    internal val RE_TOC_LINE = Regex("[…·.•‧]{2,}\\s*\\d+\\s*$")
+    internal val RE_TOC_LINE = Regex("[…·.•‧．●]{2,}\\s*[（(]?\\d{1,4}[）)]?\\s*$")
+
+    /** 孤页码行的括号形态（P6c-D）：OCR 目录页页码常独立成行且带括号「(355)」「（1）」 */
+    internal val RE_PAGE_ONLY_PAREN = Regex("[（(]\\d{1,4}[）)]")
+
+    /**
+     * 目录条目形态三（P6c-D 扫描书第三判据）：行首「第X章/节/目/款」标题样 + 行尾页码
+     * （点线可有可无——OCR 目录条目点线常被吃掉：「第二节美国法上的惩罚性赔偿 (359)」）。
+     * 与 PdfCleaner.RE_TOC_HEADING_LINE 同源同防误伤口径（正文引用不以独立行+页码收尾）。
+     */
+    internal val RE_TOC_HEADING_LINE =
+        Regex("^第[一二三四五六七八九十百千零〇两]+[章节节目款回].{0,60}?[（(]?\\d{1,4}[）)]?\\s*$")
 
     // 页眉护栏（OPT-C C2）：行尾"CJK 字 + 页码"（如页眉"第一章 私法绪论 3"）不是标题。
     // 只拦内置 A/B 档命中（C 档样式数字内嵌不受影响；custom 路径 = 用户手工重切，不拦）
@@ -105,6 +120,18 @@ object BookParser {
     private val RE_PAGE_MARK = Regex("^〔页(\\d+)〕$")
 
     /**
+     * 目录页整页标记（P6c-E）：PdfExtractResult.assembleText 给 PdfCleaner 判定的
+     * tocLike 页 body 前插独立行「〔目录〕」。本解析器预处理剥标并记 blockTocMark，
+     * 标记块整块走 tocEntries 条目重组、且不产标题命中——不再用 isTocBlock 占比
+     * 重判：OCR 目录页点线漂移成行首「..」「●●」、页码独立成行、「第九章」误读成
+     * 「第力章」，isTocLikeLine 整页只命中孤立页码行，0.5 占比必不过（shpc 60 页
+     * E2E 实录：3 个 tocLike 页仅救出 2 个孤页码段，其余条目 softMerge 成正文）。
+     * 前级 PdfCleaner 三判据已验目录页，此处信任不重判。TXT 路径不经过
+     * assembleText 不受影响；与〔标题〕/〔脚注〕/〔页N〕同属管线协议前缀族。
+     */
+    const val TOC_BLOCK_MARK = "〔目录〕"
+
+    /**
      * TOC 连续区（块下标闭区间）。锚点路径记录锚点行坐标（区内唯一可产标题命中的行）；
      * anchorLine = -1 表示无锚点、按密度兜底划区。
      */
@@ -131,7 +158,21 @@ object BookParser {
         // P3b-2 预处理：剥〔页N〕页边界标记并记每块页号（须在 trim/正则/目录识别之前，
         // 理由同〔标题〕前缀——标记行不得参与 isTocBlock 强行占比与标题候选判定）。
         // 无标记的块顺延继承最近一次标记的页号（同页后续段落各自成块、无标记）。
-        val (blocksMarked, blockPages) = stripPageMarks(blocks0)
+        val (blocksPageMarked, blockPagesRaw) = stripPageMarks(blocks0)
+        // P6c-E 预处理：剥〔目录〕页级标记并记 blockTocMark（须在目录识别/标题候选之前，
+        // 理由同〔页N〕——标记行不得参与 isTocBlock 占比与标题候选判定）。剥标后空块
+        // （标记孤块）丢弃，页号/标记数组同步收缩。
+        val blockTocMarkRaw = BooleanArray(blocksPageMarked.size)
+        val strippedToc = blocksPageMarked.mapIndexed { bi, lines ->
+            if (lines.firstOrNull()?.trim() == TOC_BLOCK_MARK) {
+                blockTocMarkRaw[bi] = true
+                lines.drop(1)
+            } else lines
+        }
+        val keptBlocks = strippedToc.indices.filter { strippedToc[it].isNotEmpty() }
+        val blocksMarked = keptBlocks.map { strippedToc[it] }
+        val blockPages = keptBlocks.map { blockPagesRaw[it] }
+        val blockTocMark = BooleanArray(keptBlocks.size) { blockTocMarkRaw[keptBlocks[it]] }
         // P3a 预处理：剥〔标题〕前缀并记 big 行。逐行检查（目录页 \n 连接多段成块，
         // 前缀可能在块中间行）；必须发生在 trim/正则/锚点匹配之前，否则「〔标题〕目 录」
         // 匹配不上锚点、目录区识别失效。styleHints 与 blocks 同构（每块每行一一对应）。
@@ -152,7 +193,7 @@ object BookParser {
             }
         }
         val tocRegion = detectTocRegion(blocks, custom)
-        val hits = findTitleHits(blocks, custom, tocRegion, styleHints)
+        val hits = findTitleHits(blocks, custom, tocRegion, styleHints, blockTocMark)
         if (hits.isEmpty()) {
             // §2.3：自定义规则零命中要明确报错，而不是静默滑进盲切兜底
             if (custom != null) {
@@ -216,16 +257,25 @@ object BookParser {
                 else -> {
                     // 脚注段（管线协议前缀）：剥前缀、标 FOOTNOTE，AI 与阅读主流程跳过
                     val firstLine = lines.firstOrNull()?.trim().orEmpty()
-                    if (firstLine.startsWith(FOOTNOTE_MARK)) {
-                        curParas.add(
-                            ParsedPara(firstLine.removePrefix(FOOTNOTE_MARK), DbValues.ROLE_FOOTNOTE, blockPage),
-                        )
-                    } else if (isTocBlock(lines)) {
-                        // 目录区外的散条目块（目录尾页没盖进 tocRegion，E2E 实证漏进
-                        // 第一章开头）：仍按条目重组标 ROLE_TOC，不混进正文
-                        curParas.addAll(tocEntries(lines, -1, blockPage))
-                    } else {
-                        for (para in parasOf(lines, curRole, blockPage)) curParas.add(para)
+                    when {
+                        firstLine.startsWith(FOOTNOTE_MARK) -> {
+                            curParas.add(
+                                ParsedPara(firstLine.removePrefix(FOOTNOTE_MARK), DbValues.ROLE_FOOTNOTE, blockPage),
+                            )
+                        }
+                        blockTocMark[bi] -> {
+                            // P6c-E：tocLike 页整块条目重组——前级 PdfCleaner 三判据已验
+                            // 目录页，不再 isTocBlock 占比重判（OCR 碎行占比必不过，E2E 实录）
+                            curParas.addAll(tocEntries(lines, -1, blockPage))
+                        }
+                        isTocBlock(lines) -> {
+                            // 目录区外的散条目块（目录尾页没盖进 tocRegion，E2E 实证漏进
+                            // 第一章开头）：仍按条目重组标 ROLE_TOC，不混进正文
+                            curParas.addAll(tocEntries(lines, -1, blockPage))
+                        }
+                        else -> {
+                            for (para in parasOf(lines, curRole, blockPage)) curParas.add(para)
+                        }
                     }
                 }
             }
@@ -249,10 +299,12 @@ object BookParser {
         for (c in chapters) {
             for (p in c.paras) {
                 if (p.text.lineSequence().any {
-                        it.trimStart().startsWith(TITLE_SIZE_MARK) || RE_PAGE_MARK.containsMatchIn(it.trim())
+                        it.trimStart().startsWith(TITLE_SIZE_MARK) ||
+                            it.trim() == TOC_BLOCK_MARK ||
+                            RE_PAGE_MARK.containsMatchIn(it.trim())
                     }
                 ) {
-                    throw IllegalStateException("P3a/P3b 标记泄漏: ${p.text.take(20)}")
+                    throw IllegalStateException("P3a/P3b/P6c-E 标记泄漏: ${p.text.take(20)}")
                 }
             }
         }
@@ -296,12 +348,18 @@ object BookParser {
             val t = raw.trim()
             if (t.isEmpty()) continue
             nonEmpty++
-            val dotLike = RE_TOC_LINE.containsMatchIn(t) || RE_PAGE_ONLY.matches(t)
+            val dotLike = isTocLikeLine(t)
             if (dotLike) dot++
             if (dotLike || RE_HEADINGISH.containsMatchIn(t) || t in FIXED_WORDS) strong++
         }
         return dot >= 1 && nonEmpty > 0 && strong.toDouble() / nonEmpty >= 0.5
     }
+
+    /** 目录条目行判定（isTocBlock/密度兜底/tocEntries 触发三处共用）：点线页码/孤页码/标题样页码 */
+    private fun isTocLikeLine(t: String): Boolean =
+        RE_TOC_LINE.containsMatchIn(t) ||
+            RE_PAGE_ONLY.matches(t) || RE_PAGE_ONLY_PAREN.matches(t) ||
+            RE_TOC_HEADING_LINE.containsMatchIn(t)
 
     /** 从锚点行（目录/目次/Contents）或密度兜底起划区，连续 isTocBlock 块并入 */
     private fun detectTocRegion(blocks: List<List<String>>, custom: Regex?): TocRegion? {
@@ -315,9 +373,7 @@ object BookParser {
             }
         }
         for ((bi, lines) in blocks.withIndex()) {
-            val dots = lines.count {
-                RE_TOC_LINE.containsMatchIn(it.trim()) || RE_PAGE_ONLY.matches(it.trim())
-            }
+            val dots = lines.count { isTocLikeLine(it.trim()) }
             if (isTocBlock(lines) && dots >= TOC_FALLBACK_MIN_DOTS) {
                 return TocRegion(bi, extendRegion(blocks, bi), bi, -1)
             }
@@ -350,7 +406,9 @@ object BookParser {
             val t = raw.trim()
             if (t.isEmpty()) continue
             acc.add(t)
-            if (RE_TOC_LINE.containsMatchIn(t) || RE_PAGE_ONLY.matches(t)) flushAcc()
+            // 触发行与 isTocBlock 同源（P6c-D：括号页码独立行「(355)」也触发，防 OCR
+            // 目录页把「(355)」并进下一条目）
+            if (isTocLikeLine(t)) flushAcc()
         }
         flushAcc()
         return out
@@ -363,9 +421,12 @@ object BookParser {
         custom: Regex?,
         tocRegion: TocRegion?,
         styleHints: List<BooleanArray>? = null,
+        blockTocMark: BooleanArray = BooleanArray(blocks.size),
     ): List<TitleHit> {
         val hits = mutableListOf<TitleHit>()
         blocks.forEachIndexed { bi, lines ->
+            // 〔目录〕块整块不产标题命中（P6c-E）：目录条目行「第九章 xxx」会开假章
+            if (blockTocMark[bi]) return@forEachIndexed
             for ((li, line) in lines.withIndex()) {
                 // TOC 区内不产标题命中，仅锚点行本身例外（"目录"成章）
                 if (tocRegion != null && bi in tocRegion && !(bi == tocRegion.anchorBlock && li == tocRegion.anchorLine)) {

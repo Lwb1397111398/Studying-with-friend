@@ -24,6 +24,21 @@ import kotlin.math.max
 object ParagraphAssembler {
 
     private const val TITLE_FACTOR = 1.15f
+
+    /**
+     * OCR 行标题容差（P6c-D）：OCR 行字号=det 框高×0.68，框高噪声 std≈3pt（P6a 真书
+     * 实测标题−正文差 std 3.06pt），1.15×（≈1.6pt）容差被正文行高噪声击穿 → 大量正文行
+     * 误判标题 → 规则 2 flush + 规则 3 连环切 → 句中断段（shpc 461 页 DB 实录：正文页
+     * 内误断 1846 对、段长中位 33 字，断口「国家存⟂在的意义」「工．⟂作权财产权」）。
+     * 1.4× 仍保留真章标题识别（影印书章标题 ≥1.5× 正文）。数字路径零改动。
+     */
+    internal const val TITLE_FACTOR_OCR = 1.4f
+
+    /** 行所属来源是否 OCR（字号容差分支用）；混合段按行级判定，数字行不受影响 */
+    private fun isOcrLine(l: PLine): Boolean = l.sourceVersion >= TextSourceRow.PROD_OCR_V1
+
+    private fun titleFactorOf(l: PLine): Float =
+        if (isOcrLine(l)) TITLE_FACTOR_OCR else TITLE_FACTOR
     private const val TITLE_FOLD_FACTOR = 2.2f
     private const val Y_JUMP_FACTOR = 1.5f
     private const val INDENT_FACTOR = 0.8f
@@ -117,8 +132,8 @@ object ParagraphAssembler {
             }
             val dy = if (p.y0 >= 0f && line.y0 >= 0f) line.y0 - p.y0 else Float.NaN
             val first = line.text.firstOrNull()
-            val isTitle = line.size >= stats.bodySize * TITLE_FACTOR
-            val prevTitle = p.size >= stats.bodySize * TITLE_FACTOR
+            val isTitle = line.size >= stats.bodySize * titleFactorOf(line)
+            val prevTitle = p.size >= stats.bodySize * titleFactorOf(p)
             val strongNewSeg = endsSentence(p.text) && first != null &&
                 RE_STRONG_NEW_SEG.containsMatchIn(line.text.take(6))
             val topAligned = line.x0 >= 0f && line.x0 < stats.left + INDENT_FACTOR * stats.bodySize

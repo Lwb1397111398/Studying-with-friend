@@ -67,6 +67,9 @@ class PdfExtractResult(
      * 字号差 std=3.06pt>0.5pt，OCR 段（Para.sourceVersion ≥ PROD_OCR_V1）改用
      * 「≥bodySize+1.5pt 与 ≥1.15×bodySize 取更宽者」=两阈值取小（更易打标）；
      * 数字段阈值零改动（按段分支而非全局开关，杜绝误伤数字路径）。
+     * （P6c-D 注：此打标阈值维持 P6b 口径——打标只承担「给 A/B 命中补证据」职责，
+     * 误标有 OPT-D 三护栏兜底；组装层标题判定才承担断段责任，见
+     * ParagraphAssembler.TITLE_FACTOR_OCR 的 1.4× 与其取舍说明。）
      */
     fun assembleText(styleAware: Boolean = false): String {
         if (!merged) {
@@ -98,7 +101,13 @@ class PdfExtractResult(
             // BookParser.PAGE_MARK_PREFIX 协议）。BookParser 预处理剥标并把 N 记为随后
             // 段落的 pageNo（段首页码）。目录页也插（剥标发生在目录识别之前，不干扰
             // isTocBlock）；空页不插（无段落可归属，标记孤块反而成噪声）。
-            if (body.isEmpty()) body else "${BookParser.PAGE_MARK_PREFIX}${page.pageNum}〕\n$body"
+            // P6c-E：tocLike 页再插「〔目录〕」整页标记——BookParser 不再 isTocBlock
+            // 占比重判（OCR 目录页点线漂移/页码独立成行，0.5 占比必不过，shpc 60 页
+            // E2E 实录 3 个 tocLike 页仅救出 2 个孤页码段），剥标后整块直通 tocEntries
+            // 条目重组且不开假章。
+            if (body.isEmpty()) body
+            else "${BookParser.PAGE_MARK_PREFIX}${page.pageNum}〕\n" +
+                (if (page.tocLike) BookParser.TOC_BLOCK_MARK + "\n" else "") + body
         }
     }
 

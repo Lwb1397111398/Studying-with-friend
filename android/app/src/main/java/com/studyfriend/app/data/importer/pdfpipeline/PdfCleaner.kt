@@ -17,14 +17,30 @@ import kotlin.math.min
  */
 object PdfCleaner {
     // ---- 目录页判定 ----
-    /** 目录行：前导点线 + 尾页码（与 BookParser.RE_TOC_LINE 同源形态） */
-    private val RE_TOC_LINE = Regex("[…·.•‧]{2,}\\s*\\d+\\s*$")
+    /**
+     * 目录行：点线串 + 尾页码（与 BookParser.RE_TOC_LINE 同源形态）。
+     * P6c-D 扫描书适配：点线族加全角句点「．」与 OCR 把点线认成实心圆点的「●」；
+     * 页码放宽括号形态——OCR 目录页实录「……（1）」「……(355)」页码带括号是主流，
+     * 纯数字页码正则在 shpc 461 页目录上整页 0 命中 → tocLike 漏 → 目录条目全混正文
+     * （DB 实录 role=TOC 0 条）。
+     */
+    private val RE_TOC_LINE = Regex("[…·.•‧．●]{2,}\\s*[（(]?\\d{1,4}[）)]?\\s*$")
 
     /** 目录行形态二：纯点线串（不要求行尾页码）。真书《民法总则》实证：pdfbox 行
      *  切分把点线与页码拆成两行（「消灭时效完成的效力．．．」「557」各自成行），
      *  RE_TOC_LINE 整页 0-1 命中 → no tocLike 探针空转；点线行 ≥[TOC_MIN_HITS] 兜住。
-     *  字符集含全角句点「．」——《民法总则》目录大量使用全角点线。 */
-    private val RE_TOC_DOTS = Regex("[…·.•‧．]{2,}")
+     *  字符集含全角句点「．」与 OCR 圆点认读「●」——shpc 目录页点线被 OCR 认成
+     *  「●●」「..」独立行（DB 实录）。 */
+    private val RE_TOC_DOTS = Regex("[…·.•‧．●]{2,}")
+
+    /**
+     * 目录行形态三（P6c-D 扫描书第三判据）：行首「第X章/节/目/款」标题样 + 行尾页码
+     * （点线可有可无——OCR 目录条目点线常被吃掉：「第二节美国法上的惩罚性赔偿 (359)」）。
+     * 正文防误伤：行中「第X节」引用不以页码收尾、页码收尾行需独立成行，正文页 ≥3 行
+     * 命中几乎不存在（mzzz 例题省略号页的省略号行不是「第X节」开头，不受影响）。
+     */
+    private val RE_TOC_HEADING_LINE =
+        Regex("^第[一二三四五六七八九十百千零〇两]+[章节节目款回].{0,60}?[（(]?\\d{1,4}[）)]?\\s*$")
     private const val TOC_MIN_HITS = 3
 
     // ---- 页码形态 ----
@@ -217,12 +233,15 @@ object PdfCleaner {
             val puaCount = allText.count { isPua(it) }
 
             // 目录页先判（在页码删除之前——目录页的孤页码是条目触发器）。
-            // 双判据：点线+尾页码 ≥3；或纯点线行 ≥3 且至少 1 行点线+尾页码同行
+            // 三判据：①点线+尾页码 ≥3；②纯点线行 ≥3 且至少 1 行点线+尾页码同行
             // （页码被行切分拆走的目录页见 RE_TOC_DOTS；须有同行命中兜底——《民法总则》
             // E2E 实证正文例题页省略号行 ≥3 会被纯点线判据误判 tocLike，视觉幻觉条目
-            // 混入探针：目录页点线+页码同行 2-19 条恒 ≥1，正文页几乎为 0）
+            // 混入探针：目录页点线+页码同行 2-19 条恒 ≥1，正文页几乎为 0）；
+            // ③「第X章节款」标题样+尾页码行 ≥3（P6c-D 扫描书第三判据：OCR 目录条目
+            // 点线常被吃掉/页码带括号，①②在 shpc 461 页目录上整页 0 命中）。
             val tocLineHits = lines.count { RE_TOC_LINE.containsMatchIn(it.text) }
-            val tocLike = tocLineHits >= TOC_MIN_HITS ||
+            val tocHeadingHits = lines.count { RE_TOC_HEADING_LINE.containsMatchIn(it.text) }
+            val tocLike = tocLineHits >= TOC_MIN_HITS || tocHeadingHits >= TOC_MIN_HITS ||
                 (lines.count { RE_TOC_DOTS.containsMatchIn(it.text) } >= TOC_MIN_HITS && tocLineHits >= 1)
             val headerBand = max(HEADER_BAND_PT, pageHeight * HEADER_BAND_FACTOR)
             val footerBandStart = pageHeight * (1f - FOOTER_BAND_FACTOR)
@@ -331,7 +350,14 @@ object PdfCleaner {
         if (lastGeom.x1 < 0f || firstGeom.x0 < 0f) return false
         if (lastGeom.x1 < stats.right - 3f * stats.bodySize) return false
         if (firstGeom.x0 >= stats.left + 0.8f * stats.bodySize) return false
-        if (firstGeom.size >= stats.bodySize * 1.15f) return false
+        // 标题反证：新页首行大字 = 新段，不并。OCR 行字号=框高×0.68 噪声 std≈3pt（P6a 实测），
+        // 1.15×（≈1.6pt）容差被正文行高噪声击穿 → 跨页续接大批误失败（shpc 461 页 DB 实录
+        // 跨页误断 306 对），OCR 行同 ParagraphAssembler.TITLE_FACTOR_OCR 放宽到 1.4×
+        val firstTitleFactor =
+            if (firstGeom.sourceVersion >= TextSourceRow.PROD_OCR_V1) {
+                ParagraphAssembler.TITLE_FACTOR_OCR
+            } else 1.15f
+        if (firstGeom.size >= stats.bodySize * firstTitleFactor) return false
         return true
     }
 

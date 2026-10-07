@@ -7,6 +7,7 @@ import com.studyfriend.app.data.importer.pdfpipeline.PLine
 import com.studyfriend.app.data.importer.pdfpipeline.Para
 import com.studyfriend.app.data.importer.pdfpipeline.ParagraphAssembler
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
@@ -266,6 +267,28 @@ class BookParserTest {
         val chapters = BookParser.parse(toc + body)
         assertEquals(1, chapters.size)
         assertTrue(chapters[0].paras.any { it.role == DbValues.ROLE_TOC && it.text.contains("第一节") })
+    }
+
+    @Test
+    fun ocrTocBlock_parenPageNumsAndFragments_tocRegion() {
+        // P6c-D 扫描书实录（shpc p8-p16「简 目/详 目」）：锚点词不在 {目录,目次,Contents}，
+        // 点线被 OCR 打碎成「..」「●●」、页码带括号「（1）」「(355)」——旧口径密度兜底
+        // 0 命中 → 目录条目全混进「序言」章当 BODY（DB 实录 role=TOC 0 条）。
+        // 放宽后：标题样+括号页码行 + 点线碎行 + 括号孤页码行须把块划进 TOC 区
+        val toc = """
+            简 目
+            第一章 风险社会、保护国家与损害赔偿制度 ……………………（1）
+            第一节 风险社会与保护国家 …………………………………… (1)
+            第二节 风险的预防 ……………………………………………… (2)
+            第二章 损害赔偿法的规范体系、目的、归责原则及发展趋势
+            ..
+            (21)
+            第二节美国法上的惩罚性赔偿 (359)
+        """.trimIndent()
+        val body = "\n\n第一章 风险社会、保护国家与损害赔偿制度\n\n这是第一章正文。"
+        val chapters = BookParser.parse(toc + body)
+        assertEquals("简目块整体为 TOC 区（含简目锚点段），正文正常成章", 1, chapters.size)
+        assertTrue(chapters[0].paras.any { it.role == DbValues.ROLE_TOC && it.text.contains("第二节美国法上的惩罚性赔偿") })
     }
 
     @Test
@@ -857,5 +880,87 @@ class BookParserTest {
         val chapters = BookParser.parse(text)
         assertEquals("全文", chapters[0].title)
         assertEquals(listOf(1, 9), chapters[0].paras.map { it.pageNo })
+    }
+
+    // ---- P6c-E 〔目录〕页级标记（tocLike 页直通条目重组） ----
+
+    @Test
+    fun p6cE_tocMarkPage_entriesRegrouped_noFakeChapter() {
+        // shpc p20 E2E 实录形态：OCR 目录页点线漂移成行首「..」、页码独立成行、
+        // 「第九章」误读「第力章」——isTocLikeLine 整页只命中孤页码行，isTocBlock
+        // 0.5 占比必不过（实测 3 个 tocLike 页仅救出 2 个孤页码段）。〔目录〕标记
+        // 让整块直通 tocEntries 累积重组，且目录条目不开假章。
+        val tocPage = PageOut(
+            20, tocLike = true, rawChars = 300, puaCount = 0,
+            lineCount = 6, shortLineCount = 0,
+            paras = listOf(
+                Para("第力章惩罚性赔偿…"),
+                Para("(341)"),
+                Para("第一节填补性损害赔偿与惩罚性赔偿"),
+                Para(".. (355)"),
+                Para("第二节美国法上的惩罚性赔偿"),
+                Para("(359)"),
+            ),
+            firstLine = null, lastLine = null,
+        )
+        val bodyPage = PageOut(
+            31, tocLike = false, rawChars = 500, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(Para("第一章 私法绪论", size = 19f), Para("正文内容。")),
+            firstLine = null, lastLine = null,
+        )
+        val text = PdfExtractResult(listOf(tocPage, bodyPage), chainStats, scanned = false)
+            .assembleText(styleAware = true)
+        assertTrue("tocLike 页应打〔目录〕标记", text.contains(BookParser.TOC_BLOCK_MARK))
+        val chapters = BookParser.parse(text, styleAware = true)
+        // 无「第力章」假章：目录条目块不产标题命中。本例目录块 dotLike 恰达 3 行
+        // 构成密度兜底 tocRegion，条目按既有设计顺延并入下一命中章段落头部
+        assertEquals(listOf("第一章 私法绪论"), chapters.map { it.title })
+        val paras = chapters[0].paras
+        val tocParas = paras.filter { it.role == DbValues.ROLE_TOC }
+        assertTrue(tocParas.isNotEmpty())
+        // 目录页段落一律 ROLE_TOC（「第力章」误读行挂在条目段首，不丢内容）
+        assertTrue(tocParas.all { it.pageNo == 20 })
+        val joined = tocParas.joinToString("\n") { it.text }
+        assertTrue(joined.contains("第力章") && joined.contains("341"))
+        assertTrue(joined.contains("第一节") && joined.contains("355"))
+        assertTrue(joined.contains("第二节") && joined.contains("359"))
+        // 正文页不受影响
+        assertEquals(DbValues.ROLE_BODY, paras.last().role)
+    }
+
+    @Test
+    fun p6cE_nonTocPage_noMark_isTocBlockPathUnchanged() {
+        // 非 tocLike 页不打〔目录〕标；tocRegion 外的散条目块（dots=2 不足密度兜底
+        // 下限 3）仍走 isTocBlock 块级兜底（P6c-D 行为不变）。styleAware=false 口径：
+        // TXT 路径同样不受〔目录〕标记影响
+        val tocBlock = PageOut(
+            5, tocLike = false, rawChars = 200, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(Para("条目甲……3"), Para("条目乙……7")),
+            firstLine = null, lastLine = null,
+        )
+        val bodyPage = PageOut(
+            6, tocLike = false, rawChars = 100, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(Para("第一章 甲"), Para("正文。")),
+            firstLine = null, lastLine = null,
+        )
+        val text = PdfExtractResult(listOf(tocBlock, bodyPage), chainStats, scanned = false)
+            .assembleText(styleAware = false)
+        assertFalse(text.contains(BookParser.TOC_BLOCK_MARK))
+        val chapters = BookParser.parse(text)
+        // 散条目块在第一个标题命中前 → 落「开篇」章但 role=TOC 不混正文（P6c-D 既有行为）
+        assertEquals(listOf("开篇", "第一章 甲"), chapters.map { it.title })
+        assertEquals(DbValues.ROLE_TOC, chapters[0].paras[0].role)
+        assertEquals(DbValues.ROLE_BODY, chapters[1].paras.last().role)
+    }
+
+    @Test
+    fun p6cE_tocMarkLoneBlock_dropped_noLeak() {
+        // 防御：〔目录〕孤块（剥标后无内容）被丢弃，标记不泄漏进段文本
+        val chapters = BookParser.parse("〔页2〕\n〔目录〕\n\n〔页5〕\n第一章 甲\n\n正文。")
+        assertEquals(listOf("第一章 甲"), chapters.map { it.title })
+        assertTrue(chapters[0].paras.all { !it.text.contains(BookParser.TOC_BLOCK_MARK) })
     }
 }

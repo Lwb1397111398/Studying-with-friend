@@ -345,4 +345,60 @@ class ParagraphAssemblerTest {
         assertEquals(19f, paras[1].size, 0.01f)
         assertEquals(10f, paras[2].size, 0.01f)
     }
+
+    // ---------------------------------------------------------------- P6c-D OCR 标题容差
+
+    private fun ocrLine(
+        text: String,
+        x0: Float = 50f,
+        x1: Float = 540f,
+        y0: Float = 0f,
+        size: Float = 10f,
+    ) = PLine(text, x0, x1, y0, size, sourceVersion = TextSourceRow.PROD_OCR_V1)
+
+    @Test
+    fun ocr_noiseHeightBodyLine_notTitle_stillJoined() {
+        // P6c-D 断段主修复：OCR 行字号=框高×0.68 噪声 std≈3pt（P6a 实测），1.15×
+        // （≈1.6pt）容差被击穿 → 正文行误判标题连环切（DB 实录「国家存⟂在的意义」）。
+        // size=1.25×body 的 OCR 行不再判标题 → 连续 OCR 正文行续接成段
+        val lines = listOf(
+            ocrLine("处在一个风险社会人民最需要的是安全保障人民安全系国家存", y0 = 100f),
+            ocrLine("在的意义及目的此不仅是政治哲学的理念更是宪法上的国家义务", y0 = 114f),
+            ocrLine("宪法的任务在干保障人民的基本权利尤其是人身自由与生存权", y0 = 128f),
+        )
+        val s = stats.copy(pitchThreshold = 20f)
+        val paras = ParagraphAssembler.assemble(
+            lines.map { it.copy(size = 12.5f) }, // 1.25×bodySize：旧口径必误判标题
+            s,
+        )
+        assertEquals("OCR 行高噪声 1.25×body 须续接成一段（不误判标题）", 1, paras.size)
+    }
+
+    @Test
+    fun ocr_realChapterTitle_stillSplit() {
+        // 1.4× 容差保留真章标题识别：影印书章标题 ≥1.5× 正文
+        val lines = listOf(
+            ocrLine("正文第一段讲完了。", y0 = 100f),
+            ocrLine("第二章 损害赔偿法的规范体系", size = 15f, y0 = 130f), // 1.5×body
+            ocrLine("标题后的正文开始了。", y0 = 160f),
+        )
+        val s = stats.copy(pitchThreshold = 20f)
+        val paras = ParagraphAssembler.assemble(lines, s)
+        assertEquals(3, paras.size)
+        assertEquals("第二章 损害赔偿法的规范体系", paras[1].text)
+    }
+
+    @Test
+    fun digital_noiseHeightBodyLine_stillTitle_locked() {
+        // 数字路径行为零改动锁定：size=1.25×body 的数字行仍按旧 1.15× 口径判标题
+        val lines = listOf(
+            line("正文第一段讲完了。", y0 = 100f),
+            line("第二章 民法的法源", size = 12.5f, y0 = 130f),
+            line("标题后的正文开始了。", y0 = 160f),
+        )
+        val s = stats.copy(pitchThreshold = 20f)
+        val paras = ParagraphAssembler.assemble(lines, s)
+        assertEquals(3, paras.size)
+        assertEquals("第二章 民法的法源", paras[1].text)
+    }
 }
