@@ -406,3 +406,26 @@ print(f"{len(out)} 页统计完成")
 ## 7. out-of-scope
 
 真机联测、多书批量、DPI 200 实验、竖排假阳性专项、vision_queue FAILED 手动重试入口（既有遗留记档）、P6c Phase 2/3（总体计划另议）。
+
+## 8. 执行期偏差与事故登记（C3b 执行期间实录，随执行滚动追加）
+
+### 8.1 R2 模拟器快照回滚事故（10-06，已恢复）
+
+- **经过**：A2 收口后用 TaskStop 停后台 logcat 任务，进程树连带杀死 qemu；重启 JingBianAVD 后设备数据回滚至 10-05 15:09 Quickboot 保存点。
+- **损失**：books 5-8（旧 shpc id=5 7 章 2913 段、sample 三代 6/7/8）全丢；全部 vision 视觉缓存文件丢；A2 设备态、C1 视觉配置、主 OCR 配置全丢。宿主侧 `.e2e/p6c/` 证据文件零损失（a2.db 快照、c3b_before.db 回滚前库、日志全在）。
+- **恢复**：重装 APK → adb root + 修时钟 → C1 全量重配（见 8.2）。mfzz 视觉队列 146 页回到 PENDING，将重新消耗商汤额度（约 40min 机时，成本申报见 §5 追加）。
+- **教训**：后台任务一律用任务系统的显式后台（run_in_background），禁用 `(cmd &)` 子壳——TaskStop 会杀整棵进程树。
+
+### 8.2 C1 重配置两处缺陷与修复（10-06，已闭环）
+
+- **缺陷一（旧脚本假证据）**：`configure_app_vision.py` 保存后以「回显比对 PASS」作证据——实测证明输入框值留存只能证明填写、不能证明保存落库；且该脚本声称「权威断言在 DB 侧」但从未实现 DB 断言。
+- **缺陷二（根因）**：保存按钮位于 LazyColumn 页底，填写/开关/提示信息等状态变化会把按钮挤出视口或移位，脚本用旧 dump 坐标 tap 落空（对照实验：同页「检查更新」按钮 tap 有响应、按钮 enabled=true、焦点正常——排除机制性问题，实锤坐标失效）。
+- **修复**：`configure_app_full2.py` 三处闭环——①主+视觉八项全量重配（回滚后主配置同丢，旧脚本只填视觉四项）；②tap 前验证按钮完整落在 ScrollView 视口内（y+60<2060）；③tap 后以 message「已保存」出现为唯一点击生效证据，未出现则滚动重找重试。
+- **DB 断言（8 项全 PASS）**：vision_enabled=true、vision_base/vision_model=商汤识图档案值、vision_key_enc 密文落库（k1: 前缀，长度 87）、api_base/api_model=main 档案值、api_key_enc 密文落库、api_temp=0.3。键名实录：settings 表主配置键为 `api_base`/`api_model`/`api_key_enc`/`api_temp`（非 base_url/model）。
+- **实测坑（新增）**：Compose LazyColumn 语义树只含视口内组合项，「保存」按钮滚出视口即从 uiautomator dump 消失；页面底部 message 文本出现会改变页底节点布局——凡 tap 页底按钮必须 tap 前即时 dump 即时验证。
+
+### 8.3 C3b 闸门对象偏差（10-06，登记不改判据）
+
+- 原 C3b-1 保全闸门对象含旧 shpc id=5（7 章 2913 段）——已随 R2 回滚消失；回滚前状态有 `c3b_before.db` 留档为证。
+- 现存保全对象改为：mfzz id=1（6599 段 12 章）与 shpc-ocr id=4（1293 段 4 章）；after 闸门仍断言此二书段落文本零变化（判据 SQL 不变，仅 bookId 代入值改）。
+- J4/J5 判据数值（fallbacks=47 {LOW_CONF=25,DIAGRAM=22}）不变——同 APK 同书重导，确定性预期不受回滚影响。
