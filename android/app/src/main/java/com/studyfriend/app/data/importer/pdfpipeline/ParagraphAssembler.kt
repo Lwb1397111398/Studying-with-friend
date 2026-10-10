@@ -6,7 +6,7 @@ import kotlin.math.max
  * 行→段落组装（OPT-E，OPT-G P2 增强）。输入是清洗后的正文行（页眉/页码/脚注已摘除），
  * 按"字号、行距、缩进、句末标点"四类信号决定断段还是续接：
  * 1. 段首禁则标点：无条件并回（段落被误切的强信号）
- * 2. 标题行（字号 ≥ 正文×1.15）：独立成段；连续大字行且垂直间距紧 → 标题自身折行合并
+ * 2. 标题行（字号 ≥ 正文×1.15，或 OCR 行的编号形态标题 P6c-F）：独立成段；连续大字行且垂直间距紧 → 标题自身折行合并
  * 3. 标题后的正文：先把标题 flush 隔离
  * 4. y 回跳（dy < −1.5×字号）：新栏/页内结构变化
  * 4.5 深缩进标签块（≈2字缩进的短行）：列表/标签项独立成段（置于满行必接之前防被续接臂吞掉）
@@ -39,7 +39,24 @@ object ParagraphAssembler {
 
     private fun titleFactorOf(l: PLine): Float =
         if (isOcrLine(l)) TITLE_FACTOR_OCR else TITLE_FACTOR
+
+    /** 标题判据：字号路（数字路径主路）+ OCR 行编号形态路（P6c-F，见 [headingLikeOcr]） */
+    private fun titleLike(l: PLine, stats: DocStats): Boolean =
+        l.size >= stats.bodySize * titleFactorOf(l) ||
+            (headingTextRouteEnabled && isOcrLine(l) && headingLikeOcr(l.text))
+
+    /** 标题折行容差按行来源分支（OCR 大标题行距按字号算更远，见 TITLE_FOLD_FACTOR_OCR 标定） */
+    private fun titleFoldFactorOf(l: PLine): Float =
+        if (isOcrLine(l)) TITLE_FOLD_FACTOR_OCR else TITLE_FOLD_FACTOR
     private const val TITLE_FOLD_FACTOR = 2.2f
+
+    /**
+     * OCR 行标题折行容差（P6c-F）：大字号标题框的行间距按字号算是正文的 1.7 倍
+     * （shpc p31 章题两行 dy=58.8pt、字号 19pt → 3.1×字号；2.2× 判不成折行，
+     * 后半截「损害赔偿制度」掉进正文，章题被截成「第一章风险社会保护国家与」）。
+     * 同块下一段落的 dy=159pt=8.4×字号，4.5 的余量既够接折行又不会把下一块并进来。
+     */
+    private const val TITLE_FOLD_FACTOR_OCR = 4.5f
     private const val Y_JUMP_FACTOR = 1.5f
     private const val INDENT_FACTOR = 0.8f
     private const val SHORT_LINE_FACTOR = 1.5f
@@ -50,6 +67,10 @@ object ParagraphAssembler {
     /** 满行必接回退开关：P2 验收不达标时置 false 单独禁用该臂，近满行接/深缩进独立保留 */
     @JvmField
     internal var fullLineJoinEnabled = true
+
+    /** 标题文本形态路开关（P6c-F，见 [headingLikeOcr]）。默认开；离线回放台用它做 A/B 归因。 */
+    @JvmField
+    internal var headingTextRouteEnabled = true
 
     /**
      * 深缩进标签块开关，默认关闭。真书（王泽鉴《民法总则》重排版，630 页）实测：
@@ -71,10 +92,36 @@ object ParagraphAssembler {
     private val RE_STRONG_NEW_SEG = Regex("^[（(]?([一二三四五六七八九十]+|\\d{1,3})[、.．)）]|^[\\u2460-\\u2473]")
 
     /**
+     * 中文编号标题形态（P6c-F 扫描书）：「第X章/节/目/款/篇/编/卷/回」、「一、」或「（四）」起头。
+     * 不含「条」——正文里 '第18条第1项规定,…' 这类条文史是正文不是标题。
+     */
+    private val RE_CN_SECTION = Regex("^第[零〇一二三四五六七八九十百千两]+[章节目篇编卷回款]")
+    // 序号后的顿号在 OCR 里常被认成逗号（实录 '二,保护国家'），半角/全角逗号都收；
+    // 裸数字序号同理（实录 '2比例原则(释字第531号解释)' 独立成行被并进正文）
+    private val RE_NUM_LEAD = Regex("^[一二三四五六七八九十]+[、,，]")
+    private val RE_PAREN_NUM_LEAD = Regex("^[（(][零〇一二三四五六七八九十]+[）)]")
+    private val RE_DIGIT_LEAD = Regex("^[0-9]{1,2}[^0-9.．]")
+
+    /**
+     * 标题的文本形态路（仅 OCR 行）：OCR 行字号=框高×0.68，影印书的小节标题与正文框高
+     * 常相同（shpc 实测同为 15.5pt），字号路认不出 → 标题被并进上一段正文
+     * （实录 '…构成一个包括预防管制及救济的规范体系第三节损害赔偿制度'、
+     * '第一款州法与危险预万刑法对讳反国家共同生活秩序…'）。
+     * 判据=编号形态 + 全长 ≤24 字 + 不以句末标点收尾。数字路径不启用（字号可靠、行为已 E2E 锁定）。
+     */
+    private fun headingLikeOcr(t: String): Boolean =
+        t.length in 3..24 && !t.endsWith("。") && !t.endsWith("，") && !t.endsWith("、") &&
+            (RE_CN_SECTION.containsMatchIn(t) || RE_NUM_LEAD.containsMatchIn(t) ||
+                RE_PAREN_NUM_LEAD.containsMatchIn(t) || RE_DIGIT_LEAD.containsMatchIn(t))
+
+    /**
      * [hitStats] 规则命中计数器（可观测性）：非 null 时累计各臂命中次数（跨页累计，
      * 由调用方持有生命周期），供 E2E 验收归因（如满行必接在低满行率排版下命中率稀少）。
      * 以参数注入而非静态字段——并发 clean() 各自持 map，无交叉污染。
      * 生产路径传 null 零开销。
+     * 另含 P6c-F 两个质量信号：`q_breakPrevNotSentence`（上一行非句末却断段=句子被斩，
+     * 头号投诉的直接量化）与 `q_joinSentThenIndent`（上一行句末且本行缩进却续接=真段界
+     * 被抹平，防「为压低前者而把全书并成一段」的反向退化）。
      */
     fun assemble(
         lines: List<PLine>,
@@ -117,8 +164,8 @@ object ParagraphAssembler {
                 return
             }
             val first = line.text.firstOrNull()
-            val joiner = if (first != null && isCjkLike(cur.last()) && isCjkLike(first)) "" else " "
-            cur.append(joiner).append(line.text)
+            if (first != null) cur.append(lineJoiner(cur.last(), first)) // 与 softJoin 单源
+            cur.append(line.text)
             curMax = max(curMax, line.size)
             curSrcVer = maxOf(curSrcVer, line.sourceVersion)
         }
@@ -132,12 +179,16 @@ object ParagraphAssembler {
             }
             val dy = if (p.y0 >= 0f && line.y0 >= 0f) line.y0 - p.y0 else Float.NaN
             val first = line.text.firstOrNull()
-            val isTitle = line.size >= stats.bodySize * titleFactorOf(line)
-            val prevTitle = p.size >= stats.bodySize * titleFactorOf(p)
-            val strongNewSeg = endsSentence(p.text) && first != null &&
+            val prevSent = endsSentence(p.text)
+            val isTitle = titleLike(line, stats)
+            val prevTitle = titleLike(p, stats)
+            val strongNewSeg = prevSent && first != null &&
                 RE_STRONG_NEW_SEG.containsMatchIn(line.text.take(6))
             val topAligned = line.x0 >= 0f && line.x0 < stats.left + INDENT_FACTOR * stats.bodySize
+            // 上一行是否排到右缘（满行=该句被排版折断，句子未完的强证据）
+            val prevFull = p.x1 >= 0f && p.x1 >= stats.right - FULL_LINE_FACTOR * stats.bodySize
             if (strongNewSeg) hitStats.hit("guard_strongNewSeg")
+            val parasBefore = paras.size
             when {
                 // 1. 段首禁则标点：无条件并回
                 first != null && first in LEADING_NO_BREAK -> {
@@ -145,7 +196,7 @@ object ParagraphAssembler {
                 }
                 // 2. 标题行：折行合并或独立成段
                 isTitle -> {
-                    if (prevTitle && !dy.isNaN() && dy >= 0f && dy <= TITLE_FOLD_FACTOR * p.size) {
+                    if (prevTitle && !dy.isNaN() && dy >= 0f && dy <= titleFoldFactorOf(p) * p.size) {
                         hitStats.hit("2_titleFold"); appendJoined(line) // 标题自身折行
                     } else {
                         hitStats.hit("2_titleNew"); flush()
@@ -173,7 +224,7 @@ object ParagraphAssembler {
                 // 4.75 满行必接：段落末行几乎必然不满 → 上一行满行即未完，续接
                 //     （修复"满行+句末+顶格续行"被行距抖动/短行臂误断的段裂）
                 fullLineJoinEnabled && !strongNewSeg && topAligned &&
-                    p.x1 >= stats.right - FULL_LINE_FACTOR * stats.bodySize -> {
+                    prevFull -> {
                     hitStats.hit("4.75_fullLineJoin"); appendJoined(line)
                 }
                 // 4.875 近满行接：近满+句末+顶格续行 = 段中句号
@@ -184,10 +235,14 @@ object ParagraphAssembler {
                 }
                 // 5. 行距超过段落阈值（守卫：上一行句末、或本行缩进起新段，才许断——
                 //    E2E 实证：句中说一半的顶格续行遇行距抖动被误断，正文碎段重灾区）
+                //    P6c-F 缩进分支加「上一行不满行」前提：上一行已到右缘 = 该句是被排版
+                //    折断的，本行缩进不足以证明新段。shpc 真书引文块实录：满行「…应自解释
+                //    公布之日起,至迟于届满」+ 缩进短行「一年时失其效力。」被本臂斩成两段。
                 !dy.isNaN() && stats.pitchThreshold != null && dy > stats.pitchThreshold &&
                     (
                         endsSentence(p.text) ||
-                            line.x0 >= stats.left + INDENT_FACTOR * stats.bodySize
+                            (!prevFull &&
+                                line.x0 >= stats.left + INDENT_FACTOR * stats.bodySize)
                         ) -> {
                     hitStats.hit("5_pitch"); flush()
                     takeIn(line)
@@ -214,6 +269,16 @@ object ParagraphAssembler {
                     hitStats.hit("9_defaultJoin"); appendJoined(line)
                 }
             }
+            // 质量信号计数（P6c-F 离线回放台度量「过断/漏断」；生产传 null 零开销）：
+            // 断段但上一行非句末 = 句子被斩断的强信号（本管线头号投诉）；标题臂（2/3）造的
+            // 边界是正当断段，不计入，否则「认出更多小节标题」反而被量成「断得更多」。
+            // 续接但上一行句末且本行缩进 = 真段落边界被抹平的强信号（防「为压低前者而全并」）
+            val broke = paras.size > parasBefore
+            if (broke && !prevSent && !isTitle && !prevTitle) hitStats.hit("q_breakPrevNotSentence")
+            val leadingJoin = first != null && first in LEADING_NO_BREAK
+            if (!broke && !leadingJoin && prevSent && line.x0 >= 0f && !topAligned) {
+                hitStats.hit("q_joinSentThenIndent")
+            }
             prev = line
         }
         flush()
@@ -221,26 +286,70 @@ object ParagraphAssembler {
     }
 }
 
-/** 段末判定：中英句末标点、引号书名号收尾、圈码序号（①–⑳）、引注 [12]/〔3〕 收尾 */
+/**
+ * 段末判定：中英句末标点、引号书名号收尾、圈码序号（①–⑳）、引注 [12]/〔3〕 收尾。
+ *
+ * P6c-F 扫描书两处补强（shpc 60 页回放台实测）：
+ * 1. **半角 : ; 计入句末**——OCR 规则 a 把全角 ：； 转成半角（OcrTextPostProcessor.TO_HALF），
+ *    旧的句末集只有全角，这些行永远判不出句末 → 该断的段不断（'…兹举两个"司法院大法官"解释，
+ *    以供参照：' 后接引文块被并成一段）。数字路径原文是全角，补集同样适用，无副作用。
+ * 2. **行尾单角脚注编号=句子在此结束**——扫描书脚注号被 OCR 认成正文数字粘在行尾
+ *    （实录 '…以防治犯罪保障人民安全2'、'…预防危险的机能2'），末字符是数字时句末判据全废。
+ *    限「恰好 1 位数字 + 前一是 CJK/中日标点」，'…共计30'（两位）不受影响。
+ */
 fun endsSentence(t: String): Boolean {
     val s = t.trimEnd()
     if (s.isEmpty()) return false
     val last = s.last()
-    if (last in "。！？；：！?" || last == '…' || last == '”' || last == '』' || last == '」') return true
+    if (last in "。！？；：！?:" || last == '…' || last == '”' || last == '』' || last == '」') return true
     if (last.code in 0x2460..0x2473) return true
+    if (last in '0'..'9' && isTrailingFootnoteMark(s)) return true
     return RE_CITATION_END.containsMatchIn(s.takeLast(5))
+}
+
+/** 行尾脚注编号（1 位数字，前一个是 CJK 汉字或中日标点）——见 [endsSentence] 注 2 */
+private fun isTrailingFootnoteMark(s: String): Boolean {
+    if (s.length < 2) return false
+    if (s[s.length - 2] in '0'..'9') return false // 两位以上数字是实数（'共计30'），不是脚注号
+    val before = s[s.length - 2].code
+    return before in 0x3000..0x9FFF || before in 0xFF00..0xFFEF
 }
 
 private val RE_CITATION_END = Regex("[\\[〔]\\d{1,3}[\\]〕]$")
 
-/** 段落拼接：CJK 直连，非 CJK 之间补空格（保 ASCII 单词不被粘死） */
+/** 段落拼接分隔符的实现入口（规则见 [lineJoiner]） */
 fun softJoin(a: String, b: String): String {
     if (a.isEmpty()) return b
     if (b.isEmpty()) return a
-    val joiner = if (isCjkLike(a.last()) && isCjkLike(b.first())) "" else " "
-    return a + joiner + b
+    return a + lineJoiner(a.last(), b.first()) + b
+}
+
+/**
+ * 行间/碎片拼接的分隔符规则——[softJoin]、[ParagraphAssembler] 的 appendJoined 与
+ * OcrTextPostProcessor.mergeTwo（碎片框合并）三处共用单源，防「一处改了另一处漂移」。
+ *
+ * P6c-F 扫描书两条修正（真书 shpc 60 页回放台实录）：
+ * 1. **标点两侧不补空格**：规则 a 把 ，：（）； 转半角后，这些 ASCII 标点不再落旧判据的
+ *    「CJK」集合，于是中文标点后凭空插空格（实录 '制定广若十保护人民权益的特别民法, 其特色有三:'）。
+ * 2. **西文断词直连**：det 把一个德文长词切成两框（'echselseiligeAuf-' + 'fangordnungen'），
+ *    行末是连字符（- ‐ －，本就不算词字符）时两侧直连，还原成原词。
+ * 其余照旧：西文词之间、中英相邻都补一个空格（保 ASCII 单词不被粘死、跨语种可读）。
+ */
+internal fun lineJoiner(last: Char, first: Char): String {
+    val lw = isLatinWordChar(last)
+    val cw = isCjkWordChar(last)
+    if (!lw && !cw) return ""
+    val lw2 = isLatinWordChar(first)
+    val cw2 = isCjkWordChar(first)
+    if (!lw2 && !cw2) return ""
+    return if (lw || lw2) " " else ""
 }
 
 fun joinTexts(texts: List<String>): String = texts.fold("") { acc, t -> softJoin(acc, t) }
 
-private fun isCjkLike(c: Char): Boolean = c.code in 0x3000..0x9FFF || c.code in 0xFF00..0xFFEF
+/** 西文词字符：ASCII 字母数字 + 拉丁扩展（德文变音） */
+private fun isLatinWordChar(c: Char): Boolean =
+    c in '0'..'9' || c in 'A'..'Z' || c in 'a'..'z' || c.code in 0xC0..0xFF
+
+/** 汉字（不含中日标点区）——标点两侧一律直连，见 [lineJoiner] 的 P6c-F 注 1 */
+private fun isCjkWordChar(c: Char): Boolean = c.code in 0x4E00..0x9FFF

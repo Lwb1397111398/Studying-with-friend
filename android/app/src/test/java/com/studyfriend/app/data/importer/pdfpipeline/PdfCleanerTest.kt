@@ -213,6 +213,84 @@ class PdfCleanerTest {
         assertTrue(fn[0].text.contains("同上注"))
     }
 
+    /** OCR 行构造（sourceVersion=PROD_OCR_V1，P6c-F 脚注形态路只对 OCR 行开） */
+    private fun ocrLine(
+        text: String,
+        x0: Float = 50f,
+        x1: Float = 540f,
+        y0: Float = 100f,
+        size: Float = 10f,
+    ) = PLine(text, x0, x1, y0, size, TextSourceRow.PROD_OCR_V1)
+
+    @Test
+    fun clean_ocrFootnoteLeadText_sameSizeAsBody_collectedAsFootnote() {
+        // P6c-F 扫描书实录（shpc p35/p36）：OCR 脚注行框高×0.68 与正文同为 10.5pt，
+        // 字号路失效；圈码又被 OcrTextPostProcessor 规则 b 吃掉 → 脚注整块混进正文、
+        // 把正文句子从中间斩断。引注形态路认「参见/(1994)/拉丁为主」起头行，
+        // 命中后本条带其后的行整块续收（续行常是纯德文，再无特征可认）
+        val page = listOf(
+            ocrLine("工厂不依照本规则之规定申请设立登记，", y0 = 300f),
+            ocrLine("(T参见叶俊荣:《环境理性与制度抉择》,载《台大法学丛书》1999年第110期。", y0 = 700f),
+            ocrLine("Fahio.RisikoentscheidungimRechtsstaat(1994).", y0 = 726f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertEquals(1, out[0].paras.count { it.footnote })
+        assertEquals(1, out[0].paras.count { !it.footnote })
+        val body = out[0].paras.first { !it.footnote }
+        assertFalse("脚注不许混进正文段", body.text.contains("参见"))
+        assertTrue(out[0].paras.first { it.footnote }.text.contains("Risikoentscheidung"))
+    }
+
+    @Test
+    fun clean_ocrFootnoteLeadText_bodyLineAboveBlock_staysInBody() {
+        // 形态路只在「起点头」之后的条带行续收：条带内的正文行（无引注形态）照常保留
+        val page = listOf(
+            ocrLine("正文第一段讲到这里。", y0 = 300f),
+            ocrLine("须特别提出的是,私法亦具有保障人民安全的重要功能。", y0 = 650f),
+            ocrLine("①参见王泽鉴:《侵权行为法》第26页以下(2015)。", y0 = 700f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        val bodyText = out[0].paras.filter { !it.footnote }.joinToString("") { it.text }
+        assertTrue("条带内正文行必须留在正文流", bodyText.contains("须特别提出的是"))
+        assertEquals(1, out[0].paras.count { it.footnote })
+    }
+
+    @Test
+    fun clean_digitalPage_footnoteLeadRoute_staysOff() {
+        // 数字路径字号判据可靠、既有 E2E 行为锁定：同一行文本在 sourceVersion=0 时不走形态路
+        val page = listOf(
+            line("工厂不依照本规则之规定申请设立登记，", y0 = 300f),
+            line("(T参见叶俊荣:《环境理性与制度抉择》,1999年第110期。", y0 = 700f, size = 10f),
+        )
+        val out = PdfCleaner.clean(listOf(page), listOf(dim), stats)
+        assertEquals(0, out[0].paras.count { it.footnote })
+    }
+
+    @Test
+    fun crossPageMerge_prevPageEndsWithFootnotePara_stillMergesBodyTail() {
+        // P6c-F 实录：脚注段被追加在 paras 末尾，于是「页最后一个段」是脚注而不是正文，
+        // 旧的末段判据被脚注挡死 → p35 正文 '…申请设立登记,' 与 p36 首句续不上
+        val p1 = PageOut(
+            pageNum = 1, tocLike = false, rawChars = 40, puaCount = 0, lineCount = 2, shortLineCount = 0,
+            paras = listOf(
+                Para("工厂不依照本规则之规定申请设立登记，", size = 10f, y0 = 300f),
+                Para("参见王泽鉴。", footnote = true, size = 7f, y0 = 700f),
+            ),
+            firstLine = line("工厂不依照本规则之规定申请设立登记，", y0 = 300f),
+            lastLine = line("工厂不依照本规则之规定申请设立登记，", y0 = 300f),
+        )
+        val p2 = PageOut(
+            pageNum = 2, tocLike = false, rawChars = 20, puaCount = 0, lineCount = 1, shortLineCount = 0,
+            paras = listOf(Para("或违反其他工厂法令者,得予以停工。", size = 10f, y0 = 100f)),
+            firstLine = line("或违反其他工厂法令者,得予以停工。", y0 = 100f),
+            lastLine = line("或违反其他工厂法令者,得予以停工。", y0 = 100f),
+        )
+        PdfCleaner.crossPageMerge(listOf(p1, p2), stats)
+        assertEquals(2, p1.paras.size)
+        assertTrue(p1.paras[0].text.endsWith("得予以停工。"))
+        assertTrue("脚注段必须留在原位，不参与跨页并段", p1.paras[1].footnote)
+    }
+
     @Test
     fun clean_yiPunctuation_normalized_whenNoRealYiText() {
         val borrowed = "" + Char(0xA3AC) // 坏字体把"，"映射成彝文区 ꎬ

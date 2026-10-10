@@ -83,12 +83,66 @@ class ParagraphAssemblerTest {
 
     @Test
     fun lineGapBeyondPitch_openSentenceIndented_breaks() {
-        // 上句未完但本行缩进起新段（段中缩进强调句，罕见但存在）→ 缩进强信号仍断
-        val lines = bodyLines("一段话还没有说完，", startY = 100f) +
+        // 上句未完但本行缩进起新段（段中缩进强调句，罕见但存在）→ 缩进强信号仍断。
+        // P6c-F 补一个前提：上一行必须是**不满行**（满行=该句被排版折断，缩进不足以立新段，
+        // 见 lineGapFullPrev_openSentenceIndented_joins）
+        val lines = listOf(line("一段话还没有说完，", x1 = 300f, y0 = 100f)) +
             line("缩进的新段说。", x0 = 70f, y0 = 140f) // 70 ≥ 58 缩进
         val s = stats.copy(pitchThreshold = 20f)
         val paras = ParagraphAssembler.assemble(lines, s)
         assertEquals(2, paras.size)
+    }
+
+    @Test
+    fun lineGapFullPrev_openSentenceIndented_joins() {
+        // P6c-F 扫描书引文块实录（shpc p36）：满行「…应自解释公布之日起,至迟于届满」+
+        // 缩进短行「一年时失其效力。」是同一句被排版折断，行距 38.7>阈值 38 也不许断
+        val lines = listOf(line("应自解释公布之日起,至迟于届满", y0 = 100f)) + // x1=540=right 满行
+            line("一年时失其效力。", x0 = 70f, y0 = 140f)
+        val paras = ParagraphAssembler.assemble(lines, stats.copy(pitchThreshold = 20f))
+        assertEquals(1, paras.size)
+        assertEquals("应自解释公布之日起,至迟于届满一年时失其效力。", paras[0].text)
+    }
+
+    @Test
+    fun `ocrHeadingText_breaksOwnParagraph_evenAtBodyFontSize`() {
+        // P6c-F 标题文本形态路：影印书小节标题与正文框高相同（字号路 1.4× 认不出），
+        // 靠「第X节/款」+ ≤24 字 + 无句末标点独立成段（实录被并进上段的「第三节损害赔偿制度」）
+        val ocr = TextSourceRow.PROD_OCR_V1
+        val lines = listOf(
+            PLine("构成一个包括预防管制及救济的规范体系", 50f, 540f, 100f, 10f, ocr),
+            PLine("第三节损害赔偿制度", 90f, 300f, 140f, 10f, ocr),
+            PLine("须特别提出的是,私法亦具有保障人民安全的重要功能。", 50f, 540f, 180f, 10f, ocr),
+        )
+        val paras = ParagraphAssembler.assemble(lines, stats.copy(pitchThreshold = 200f))
+        assertEquals(3, paras.size) // 正文段 / 标题段 / 正文段
+        assertEquals("第三节损害赔偿制度", paras[1].text)
+    }
+
+    @Test
+    fun `ocrTitleFold_wrappedChapterTitle_joinsIntoOneTitle`() {
+        // P6c-F 章题折行（shpc p31）：大标题两行 dy=58.8pt=3.1×字号，旧 2.2× 判不成折行，
+        // 后半截掉进正文、章名被截成「第一章风险社会保护国家与」
+        val ocr = TextSourceRow.PROD_OCR_V1
+        val lines = listOf(
+            PLine("第一章风险社会、保护国家与", 100f, 700f, 331f, 19f, ocr),
+            PLine("损害赔偿制度", 263f, 641f, 390f, 17.8f, ocr),
+            PLine("第一节风险社会与保护国家", 138f, 743f, 549f, 12.5f, ocr),
+        )
+        val paras = ParagraphAssembler.assemble(lines, stats.copy(bodySize = 10.5f))
+        assertEquals(2, paras.size)
+        assertEquals("第一章风险社会、保护国家与损害赔偿制度", paras[0].text)
+    }
+
+    @Test
+    fun `endsSentence_halfWidthColonAndGluedFootnoteDigit_countAsSentenceEnd`() {
+        // P6c-F：规则 a 把 ：； 转半角后句末判据须认半角（否则该断的段不断）；
+        // 脚注上标被认成正文数字粘在行尾（'…保障人民安全2'）同理
+        assertTrue(endsSentence("兹举两个解释,以供参照:"))
+        assertTrue(endsSentence("以防治犯罪保障人民安全2"))
+        assertTrue(endsSentence("分六项简述如下；"))
+        assertFalse(endsSentence("共计30"))      // 数字串 2 位且前非 CJK：不剔
+        assertFalse(endsSentence("工厂不依照规定申请设立登记,")) // 逗号不是句末
     }
 
     @Test

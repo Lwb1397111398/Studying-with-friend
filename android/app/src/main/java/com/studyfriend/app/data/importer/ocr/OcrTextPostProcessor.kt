@@ -1,5 +1,7 @@
 package com.studyfriend.app.data.importer.ocr
 
+import com.studyfriend.app.data.importer.pdfpipeline.lineJoiner
+
 /**
  * OCR 行内后处理器（P6b S3）：四条规则全部为纯 JVM 函数（无 Android 依赖，JVM 单测直测）。
  * 在 pt 空间工作——OcrLine 的像素坐标须先经 OcrPageSource ×72/dpi 换算（S4）再进本对象。
@@ -158,8 +160,12 @@ object OcrTextPostProcessor {
 
     private fun mergeTwo(a: OcrLine, b: OcrLine): OcrLine {
         val (l, r) = if (a.x0 <= b.x0) a to b else b to a
+        // P6c-F：碎片框可能是同一西文词的兩半（det 横向切框），直连会把词粘死
+        //（shpc 实录 'erungsslrategienimIn-undAusland'）——与 softJoin 单源规则补白
+        val joiner = if (l.text.isEmpty() || r.text.isEmpty()) "" else
+            lineJoiner(l.text.last(), r.text.first())
         return OcrLine(
-            text = l.text + r.text,
+            text = l.text + joiner + r.text,
             x0 = minOf(a.x0, b.x0),
             y0 = minOf(a.y0, b.y0),
             x1 = maxOf(a.x1, b.x1),

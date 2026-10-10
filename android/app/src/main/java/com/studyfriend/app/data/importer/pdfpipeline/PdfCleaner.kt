@@ -211,21 +211,52 @@ object PdfCleaner {
         return t.startsWith("参见")
     }
 
+    /**
+     * 引注形态（P6c-F 扫描书 OCR 页的脚注块起点；只在底部条带内被判）。三路任一命中：
+     * 1. 行首 24 字内出现中文引注词族（参见/载《/判例/判决/台上字/最高法院/出版社/编印/页以下）
+     * 2. 行尾是年份括号注——德文/英文专著脚注的收尾形态（'(1994).' '（2000）'）
+     * 3. 拉丁为主的长行（≥16 字且字母数字占比 ≥50%）——整条外文脚注，无中文可认
+     * 起点命中后 [clean] 把本条带其后的行整块续收为脚注：块内续行常是纯德文，再无特征；
+     * 条带内起点之前的正文行在循环中已先行保留，不受影响（版式事实：脚注块恒为页底连续区）。
+     */
+    internal fun footnoteLeadText(t: String): Boolean {
+        if (t.length < 6) return false
+        if (RE_FN_LEAD_TEXT.containsMatchIn(t.take(24))) return true
+        if (RE_FN_YEAR_TAIL.containsMatchIn(t.takeLast(12))) return true
+        val latin = t.count { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' }
+        return t.length >= 16 && latin * 2 >= t.length
+    }
+
+    private val RE_FN_LEAD_TEXT = Regex(
+        "参见|载《|判例|判决|台上字|最高法院|出版社|编印|年第.{0,8}期|页以下|注[：:]",
+    )
+    private val RE_FN_YEAR_TAIL = Regex("[（(]\\d{4}[）)]?\\s*[.。]?\\s*$")
+
+    /**
+     * OCR 页脚注「引注形态路」开关（P6c-F）。默认开；离线回放台用它做同轮 A/B 归因
+     * （关掉=修复前，打开=修复后），口径同 [ParagraphAssembler.fullLineJoinEnabled]。
+     */
+    @JvmField
+    internal var ocrFootnoteLeadEnabled = true
+
     // ---------------------------------------------------------------- 清洗
 
     /**
      * 逐页清洗。dims 与 pagesLines 等长：(页宽, 页高)（旋转已折算，pt）。
      * 返回 PageOut 列表（paras 已组装；跨页续接由调用方再调 crossPageMerge）。
+     * [hitStats]（P6c-F）：非 null 时把 [ParagraphAssembler] 的命中/质量信号写进调用方的表，
+     * 供离线回放台量化「过断/漏断」；缺省 null 走内部临时表（生产行为不变，仍打印一行）。
      */
     fun clean(
         pagesLines: List<List<PLine>>,
         dims: List<Pair<Float, Float>>,
         stats: DocStats,
+        hitStats: MutableMap<String, Int>? = null,
     ): List<PageOut> {
         val out = mutableListOf<PageOut>()
         // 组装规则命中计数（可观测性）：println(stdout) 在 Android 进 logcat（tag=System.out），导入完成后输出一次；（不用 android.util.Log：PdfCleanerTest 为纯 JVM 单测，Log 未 mock）
         // 以参数注入 assemble（非静态字段），并发 clean() 各持一份不交叉污染
-        val hits = LinkedHashMap<String, Int>()
+        val hits = hitStats ?: LinkedHashMap<String, Int>()
         pagesLines.forEachIndexed { idx, lines ->
             val pageHeight = dims.getOrNull(idx)?.second ?: 842f
             // 清洗前全文统计（rawChars/puaCount 的口径，含将被删除的页眉页码）
@@ -248,6 +279,12 @@ object PdfCleaner {
 
             val kept = mutableListOf<PLine>()
             val footnoteLines = mutableListOf<PLine>()
+            // 扫描书页（P6c-F）：OCR 行的 size=框高×0.68，脚注与正文框高几乎相同（shpc 60 页
+            // 实测同为 15.5pt），字号路失效；圈码编号又被规则 b 吃掉或被认成 T/I/J/1 乱码，
+            // footnoteMarked 行首路也失效 → 脚注整块混进正文，把句子从中间斩断（老板头号投诉）。
+            // 故 OCR 页额外开「引注文本路 + 块续收」；数字页不开（既有 E2E 口径零改动）。
+            val ocrPage = lines.any { it.sourceVersion >= TextSourceRow.PROD_OCR_V1 }
+            var footnoteRun = false
             for (line in lines) {
                 val norm = stripControl(maybeYiNormalize(line.text))
                 if (norm.isBlank()) continue
@@ -261,11 +298,16 @@ object PdfCleaner {
                 ) continue
                 // 页码行（目录页不删）
                 if (!tocLike && RE_PAGE_NUM.matches(l.text)) continue
-                // 脚注：底部条带 + 显著小字号；或行首脚注编号符（文本路兜底，目录页不收）
+                // 脚注：底部条带 + 显著小字号；或行首脚注编号符（文本路兜底，目录页不收）；
+                // 或（OCR 页）引注形态起点——命中后本条带其后的行整块续收（块内续行常是
+                // 纯德文，再无特征可认；条带内块前的正文行在循环里已先行保留，不受影响）
                 if (!tocLike && l.y0 >= footerBandStart &&
-                    (l.size in 0.1f..(stats.bodySize * FOOTER_SIZE_FACTOR) || footnoteMarked(l.text))
+                    ((footnoteRun && ocrPage) || l.size in 0.1f..(stats.bodySize * FOOTER_SIZE_FACTOR) ||
+                        footnoteMarked(l.text) ||
+                        (ocrPage && ocrFootnoteLeadEnabled && footnoteLeadText(l.text)))
                 ) {
                     footnoteLines.add(l)
+                    footnoteRun = true
                     continue
                 }
                 kept.add(l)
@@ -323,13 +365,14 @@ object PdfCleaner {
             val prev = pages[i - 1]
             val cur = pages[i]
             if (!shouldCrossMerge(prev, cur, stats)) continue
+            val idx = lastBodyParaIdx(prev)
             val first = cur.paras.removeAt(0)
-            val last = prev.paras[prev.paras.size - 1]
+            val last = prev.paras[idx]
             // size 取两侧 max（P3a）：字号守卫已保证首段非标题，此处防御性保留字号证据；
             // sourceVersion 同取两侧 max（P6b：跨页并段含 OCR 行即整段按 OCR 口径选阈值）；
             // y0 保留主体段（prev 末段）原值——P4 图锚定按页内段 y0 序列定位，续接文本
             // 属于主体段，其几何锚点不变
-            prev.paras[prev.paras.size - 1] = Para(
+            prev.paras[idx] = Para(
                 joinTexts(listOf(last.text, first.text)),
                 size = max(last.size, first.size),
                 y0 = last.y0,
@@ -338,12 +381,23 @@ object PdfCleaner {
         }
     }
 
+    /**
+     * 页内最后一个「非脚注」段下标（P6c-F）。[clean] 把脚注段追加在 paras 末尾，
+     * 于是有脚注的页里「最后一个段」是脚注而不是正文——跨页续接若按末段取，
+     * 整页的正文续接会被脚注段挡死（shpc 60 页回放台实录：p35 正文止于
+     * '…工厂不依照本规则之规定电请设立登记,' 续页首句 '或不依照核定事项经营' 并不回来）。
+     * 无正文段（全脚注/空页）返回 -1。
+     */
+    internal fun lastBodyParaIdx(prev: PageOut): Int = prev.paras.indexOfLast { !it.footnote }
+
     /** 跨页续接判定（[crossPageMerge] 与 [crossPageMergeY0Preview] 共用；纯读，不改对象） */
     internal fun shouldCrossMerge(prev: PageOut, cur: PageOut, stats: DocStats): Boolean {
         if (prev.tocLike || cur.tocLike) return false
-        val last = prev.paras.lastOrNull() ?: return false
+        val lastIdx = lastBodyParaIdx(prev)
+        if (lastIdx < 0) return false
+        val last = prev.paras[lastIdx]
         val first = cur.paras.firstOrNull() ?: return false
-        if (last.footnote || first.footnote) return false
+        if (first.footnote) return false
         if (endsSentence(last.text)) return false
         val lastGeom = prev.lastLine ?: return false
         val firstGeom = cur.firstLine ?: return false

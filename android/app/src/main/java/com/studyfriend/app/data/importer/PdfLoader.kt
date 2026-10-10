@@ -324,9 +324,12 @@ object PdfLoader {
      * figures 恒空（OCR 模式跳过幸存图提取，扫描书整页图不进图库）。
      * 纯内存操作，不开 PDF——scanned=true 交调用方决定 OCR 兜底页入队。
      */
-    fun finalizeOcr(outcome: com.studyfriend.app.data.importer.ocr.OcrImportRunner.Outcome): PdfExtractResult {
+    fun finalizeOcr(
+        outcome: com.studyfriend.app.data.importer.ocr.OcrImportRunner.Outcome,
+        hitStats: MutableMap<String, Int>? = null,
+    ): PdfExtractResult {
         val stats = PdfCleaner.docStats(outcome.pagesLines, outcome.dims)
-        val pageOuts = PdfCleaner.clean(outcome.pagesLines, outcome.dims, stats)
+        val pageOuts = PdfCleaner.clean(outcome.pagesLines, outcome.dims, stats, hitStats)
         PdfCleaner.crossPageMergeY0Preview(pageOuts, stats) // P4 锚定口径预演（与 extract 同步执行）
         val landscapeRatio = if (outcome.dims.isEmpty()) 0f
         else outcome.dims.count { it.second > it.first }.toFloat() / outcome.dims.size

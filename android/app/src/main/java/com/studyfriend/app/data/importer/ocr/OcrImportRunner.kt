@@ -66,10 +66,84 @@ class OcrImportRunner(
         /** DIAGRAM 页 tallBox 量化行（h/w 与 w 两个一级量化，补 bbox 缺口）。纯函数，单测锁定格式。 */
         internal fun tallBoxLine(pageNo: Int, hw: Float, w: Float): String =
             "tallBox page=$pageNo hw=${"%.2f".format(hw)} w=${"%.1f".format(w)}pt"
+
+        /** OCR 行 → PLine：估字号 + sourceVersion=PROD_OCR_V1（P3a 阈值随版本分支的触发标记） */
+        internal fun OcrLine.toPLine(): PLine = PLine(
+            text = text,
+            x0 = x0,
+            x1 = x1,
+            y0 = y0,
+            size = max(1f, (y1 - y0) * SIZE_FROM_HEIGHT),
+            sourceVersion = TextSourceRow.PROD_OCR_V1,
+        )
+
+        /** [pass2] 产物（Pass2 纯逻辑的返回值，字段与 [Outcome] 对齐） */
+        /**
+         * Pass2 单源：bodySize → 逐页规则 c（diagram 分类）→ 页级分流 → 规则 d（碎片合并）。
+         * 生产 [runLocked] 与 JVM 离线回放台（OcrReplayBenchTest：拿 PC 复刻引擎导出的真书
+         * 行序列重跑整链）共用本函数——回放台的全部价值在于「跑的是生产判定」，故规则不许复制粘贴。
+         */
+        internal fun pass2(
+            pagesOcrLines: List<List<OcrLine>>,
+            dims: List<Pair<Float, Float>>,
+        ): Pass2 {
+            // 估字号先转一轮求 bodySize（碎片合并的参照）；页型判定在合并前
+            val bodySize = PdfCleaner.docStats(
+                pagesOcrLines.map { page -> page.map { it.toPLine() } },
+                dims,
+            ).bodySize
+
+            val fallbacks = mutableListOf<FallbackPage>()
+            val pageMeanConfs = mutableListOf<Float>()
+            val pageLineConfs = mutableListOf<List<Float>>()
+            val pageDrafts = mutableListOf<List<OcrLine>>()
+            var fragmentLinesMerged = 0 // 规则 d 合并掉的碎片行数（判据③c 生产可观测）
+            val pagesLines = pagesOcrLines.mapIndexed { idx, lines ->
+                val pageNo = idx + 1
+                if (OcrTextPostProcessor.classifyPage(lines) == OcrTextPostProcessor.PageType.DIAGRAM) {
+                    fallbacks.add(FallbackPage(pageNo, "DIAGRAM"))
+                    pageMeanConfs.add(0f)
+                    pageLineConfs.add(emptyList())
+                    pageDrafts.add(lines)
+                    emptyList() // diagram 页整页兜底，OCR 草稿不入库
+                } else {
+                    val reason = PageGate.decide(lines)
+                    if (reason != null) {
+                        fallbacks.add(FallbackPage(pageNo, reason))
+                        pageMeanConfs.add(0f)
+                        pageLineConfs.add(emptyList())
+                        pageDrafts.add(lines)
+                        emptyList()
+                    } else {
+                        pageMeanConfs.add(PageGate.meanConf(lines))
+                        val merged = OcrTextPostProcessor.mergeFragments(lines, bodySize)
+                        fragmentLinesMerged += lines.size - merged.size
+                        pageLineConfs.add(merged.map { it.confidence })
+                        pageDrafts.add(emptyList())
+                        merged.map { it.toPLine() }
+                    }
+                }
+            }
+            return Pass2(
+                pagesLines, fallbacks, pageMeanConfs, pageLineConfs, pageDrafts,
+                bodySize, fragmentLinesMerged,
+            )
+        }
     }
 
     /** 兜底页清单条目：reason ∈ DIAGRAM / LOW_CONF */
     data class FallbackPage(val pageNo: Int, val reason: String)
+
+    /** [pass2] 产物（Pass2 纯逻辑的返回值，字段与 [Outcome] 对齐） */
+    internal data class Pass2(
+        val pagesLines: List<List<PLine>>,
+        val fallbacks: List<FallbackPage>,
+        val pageMeanConfs: List<Float>,
+        val pageLineConfs: List<List<Float>>,
+        val pageDrafts: List<List<OcrLine>>,
+        val bodySize: Float,
+        val fragmentLinesMerged: Int,
+    )
 
     data class Outcome(
         val pagesLines: List<List<PLine>>,
@@ -169,53 +243,18 @@ class OcrImportRunner(
             if (allLines.isEmpty()) {
                 throw PdfImportException("扫描页面未能识别出任何文字，可能是拍摄/扫描质量太差")
             }
-            // 估字号先转一轮求 bodySize（碎片合并的参照）；页型判定在合并前
-            val bodySize = PdfCleaner.docStats(
-                pagesOcrLines.map { page -> page.map { it.toPLine() } },
-                renderer.pageDims(),
-            ).bodySize
-
-            val fallbacks = mutableListOf<FallbackPage>()
-            val pageMeanConfs = mutableListOf<Float>()
-            val pageLineConfs = mutableListOf<List<Float>>()
-            val pageDrafts = mutableListOf<List<OcrLine>>()
-            var fragmentLinesMerged = 0 // 规则 d 合并掉的碎片行数（判据③c 生产可观测）
+            val dims = renderer.pageDims()
             val pass2Start = System.currentTimeMillis()
-            val pagesLines = pagesOcrLines.mapIndexed { idx, lines ->
-                val pageNo = idx + 1
-                if (OcrTextPostProcessor.classifyPage(lines) == OcrTextPostProcessor.PageType.DIAGRAM) {
-                    fallbacks.add(FallbackPage(pageNo, "DIAGRAM"))
-                    pageMeanConfs.add(0f)
-                    pageLineConfs.add(emptyList())
-                    pageDrafts.add(lines)
-                    emptyList() // diagram 页整页兜底，OCR 草稿不入库
-                } else {
-                    val reason = PageGate.decide(lines)
-                    if (reason != null) {
-                        fallbacks.add(FallbackPage(pageNo, reason))
-                        pageMeanConfs.add(0f)
-                        pageLineConfs.add(emptyList())
-                        pageDrafts.add(lines)
-                        emptyList()
-                    } else {
-                        pageMeanConfs.add(PageGate.meanConf(lines))
-                        val merged = OcrTextPostProcessor.mergeFragments(lines, bodySize)
-                        fragmentLinesMerged += lines.size - merged.size
-                        pageLineConfs.add(merged.map { it.confidence })
-                        pageDrafts.add(emptyList())
-                        merged.map { it.toPLine() }
-                    }
-                }
-            }
+            val p2 = pass2(pagesOcrLines, dims)
             android.util.Log.w(
                 "OcrImport",
                 pass2DoneLine(
-                    total, fallbacks, fragmentLinesMerged,
+                    total, p2.fallbacks, p2.fragmentLinesMerged,
                     System.currentTimeMillis() - pass2Start,
                 ),
             )
             // DIAGRAM 页 tallBox 量化（P6c 小计划 C）：与 classifyPage 共用 findTallBox 单源判定
-            fallbacks.filter { it.reason == "DIAGRAM" }.forEach { f ->
+            p2.fallbacks.filter { it.reason == "DIAGRAM" }.forEach { f ->
                 val box = OcrTextPostProcessor.tallBoxAspect(pagesOcrLines[f.pageNo - 1])
                 if (box != null) android.util.Log.w(
                     "OcrImport",
@@ -223,12 +262,12 @@ class OcrImportRunner(
                 )
             }
             return Outcome(
-                pagesLines = pagesLines,
-                dims = renderer.pageDims(),
-                fallbackPages = fallbacks,
-                pageMeanConfs = pageMeanConfs,
-                pageLineConfs = pageLineConfs,
-                pageDrafts = pageDrafts,
+                pagesLines = p2.pagesLines,
+                dims = dims,
+                fallbackPages = p2.fallbacks,
+                pageMeanConfs = p2.pageMeanConfs,
+                pageLineConfs = p2.pageLineConfs,
+                pageDrafts = p2.pageDrafts,
             )
         }
     }
@@ -297,14 +336,4 @@ class OcrImportRunner(
             }
         }
     }
-
-    /** OCR 行 → PLine：估字号 + sourceVersion=PROD_OCR_V1（P3a 阈值随版本分支的触发标记） */
-    private fun OcrLine.toPLine(): PLine = PLine(
-        text = text,
-        x0 = x0,
-        x1 = x1,
-        y0 = y0,
-        size = max(1f, (y1 - y0) * SIZE_FROM_HEIGHT),
-        sourceVersion = TextSourceRow.PROD_OCR_V1,
-    )
 }
