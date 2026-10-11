@@ -27,6 +27,9 @@ __pycache__/
 # bookocr-kit 识别工程（书稿内容不进仓库）
 bookocr-kit/jobs/
 
+# bookocr-kit 本机 API 三键（base_url/key/model，不进仓库）
+bookocr-kit/apis.json
+
 # ZCode 会话本地产物（计划文件等）
 .zcode/
 bookocr-kit/_diag_*.py

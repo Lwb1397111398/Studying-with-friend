@@ -83,6 +83,8 @@ def main() -> None:
     src = KIT / "jobs" / "_selftest_src.pdf"
     JOB.parent.mkdir(exist_ok=True)
     doc = fitz.open()
+    tiny = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)  # 8x8 深色小图，供第 11 页嵌图
+    tiny.set_rect(tiny.irect, (90, 90, 90))
     for i in range(12):
         page = doc.new_page()
         if i == 0:
@@ -94,6 +96,11 @@ def main() -> None:
                            color=(0, 0, 0), fill=(0.2, 0.2, 0.2))
             page.insert_textbox(fitz.Rect(72, page.rect.height * 0.86, page.rect.width - 72, page.rect.height * 0.9),
                                 "图3-1 测试插图", fontname="china-s", fontsize=10)
+        if i == 10:  # 第 11 页：纯图版页（无文字层、整页大图）→ pull 应记 thin_pages
+            page.insert_image(fitz.Rect(page.rect.width * 0.1, page.rect.height * 0.1,
+                                        page.rect.width * 0.9, page.rect.height * 0.9),
+                              pixmap=tiny)
+            continue
         page.insert_textbox(fitz.Rect(72, 140, page.rect.width - 72, page.rect.height - 90),
                             filler(i + 1, 6), fontname="china-s", fontsize=11)
     doc.save(str(src))
@@ -104,11 +111,12 @@ def main() -> None:
     run(f"init _selftest --src {src} --batch 4")
     m = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
     check(m["npages"] == 12, "init 记录 12 页")
+    check(len(m["batches"]) == 3, "init 直接建批（每批 4 页 → 3 批，渲染前即可 pull）")
     run("prep _selftest")
     m = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
     check(len(m["pages"]) == 12, "prep 渲染 12 页")
-    check(len(m["batches"]) == 3, "每批 4 页 → 3 批")
     check((JOB / "images" / "0003.png").exists(), "页图 0003.png 落盘")
+    check((JOB / "images" / "0011.png").exists(), "页图 0011.png 落盘")
     run("prep _selftest")  # 幂等
     check("跳过" in run("prep _selftest"), "prep 重复跑安全")
 
@@ -183,10 +191,27 @@ def main() -> None:
     check(all(b["status"] == "done" for b in mp["batches"].values()),
           "pull 一次拔完 3 批全部 done（状态不被下一轮循环覆盖回退）")
     check("完成 3" in run("status _selftest_pull"), "pull 后 status 显示 3 批全完成")
+    check(mp["batches"]["b003"]["thin_pages"] == [11], "纯图版页记入 thin_pages（不再整批跳过）")
+    b3txt = (JOB2 / "batches" / "b003.txt").read_text(encoding="utf-8")
+    check("〔图版页〕" in b3txt and "〔图：第11页图版〕" in b3txt, "图版页占位写入正文")
+    o = run("patch _selftest_pull")
+    check("b003" in o and "0011.png" in o, "patch 输出图版页任务卡（只含 p11）")
+    mp = json.loads((JOB2 / "manifest.json").read_text(encoding="utf-8"))
+    check(mp["batches"]["b003"]["thin_pages"] == [], "patch 派出后 thin_pages 清空（防重派）")
+
+    print("== init 免渲染直 pull（懒渲染路线） ==")
+    run(f"init _selftest_pull2 --src {src} --batch 4")
+    JOB3 = KIT / "jobs" / "_selftest_pull2"
+    run("pull _selftest_pull2")  # 不跑 prep，直接拔
+    mp3 = json.loads((JOB3 / "manifest.json").read_text(encoding="utf-8"))
+    check(all(b["status"] == "done" for b in mp3["batches"].values()),
+          "init → pull 零渲染完成全批（文字层书不需要页图）")
+    check(len(list((JOB3 / "images").glob("*.png"))) == 0, "一张页图都没渲染（省时省盘）")
 
     print("== 清理 ==")
     shutil.rmtree(JOB, ignore_errors=True)
     shutil.rmtree(JOB2, ignore_errors=True)
+    shutil.rmtree(JOB3, ignore_errors=True)
     src.unlink(missing_ok=True)
     if FAILS:
         print(f"SELFTEST FAIL：{len(FAILS)} 项未过")
