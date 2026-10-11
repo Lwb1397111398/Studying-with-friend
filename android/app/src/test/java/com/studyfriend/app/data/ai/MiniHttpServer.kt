@@ -17,6 +17,13 @@ class MiniResponse(private val raw: OutputStream) {
         raw.flush()
     }
 
+    /** JSON 响应：200 + application/json（GET /models 等非流式端点用） */
+    fun json(body: String) {
+        raw.write("HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n".toByteArray())
+        raw.write(body.toByteArray(Charsets.UTF_8))
+        raw.flush()
+    }
+
     /** SSE：每块包成 data: 行（引号/反斜杠转义），最后 [DONE]；不关流由 server 统一关闭 */
     fun sse(chunks: List<String>) {
         raw.write("HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\n\r\n".toByteArray())

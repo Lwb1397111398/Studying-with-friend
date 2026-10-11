@@ -211,4 +211,69 @@ class AiClientTest {
             server.stop()
         }
     }
+
+    // ---------- listModels（「查找模型」拉服务商模型列表） ----------
+
+    @Test
+    fun listModels_parsesDataIds_getPathAndBearer() {
+        val paths = ConcurrentLinkedQueue<String>()
+        val auth = ConcurrentLinkedQueue<String>()
+        val server = MiniHttpServer { path, headers, _, resp ->
+            paths.add(path)
+            auth.add(headers["authorization"])
+            resp.json("""{"object":"list","data":[{"id":"b-model","object":"model"},{"id":"a-model"}]}""")
+        }
+        try {
+            val models = runBlocking { AiClient.listModels(server.baseUrl, "sk-abc") }
+            // 去尾斜杠的 base 拼上 /models；按字母排序
+            assertEquals(listOf("a-model", "b-model"), models)
+            assertEquals("/v1/models", paths.poll())
+            assertEquals("Bearer sk-abc", auth.poll())
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun listModels_toleratesBareArray_andModelField() {
+        val server = MiniHttpServer { _, _, _, resp ->
+            // 个别网关返回裸数组、字段用 model/name：宽松兼容
+            resp.json("""[{"model":"m1"},{"name":"m2"},{"id":123,"x":1}]""")
+        }
+        try {
+            val models = runBlocking { AiClient.listModels(server.baseUrl, "sk") }
+            assertEquals(listOf("m1", "m2"), models)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun listModels_garbageBody_returnsEmpty_notCrash() {
+        val server = MiniHttpServer { _, _, _, resp -> resp.json("<html>网关错误页</html>") }
+        try {
+            val models = runBlocking { AiClient.listModels(server.baseUrl, "sk") }
+            assertTrue(models.isEmpty())
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun listModels_401_friendlyMessage() {
+        val server = MiniHttpServer { _, _, _, resp -> resp.status(401, "Unauthorized") }
+        try {
+            val err = runBlocking {
+                try {
+                    AiClient.listModels(server.baseUrl, "sk")
+                    null
+                } catch (e: AiException) {
+                    e.message
+                }
+            }
+            assertEquals("API Key 无效或无权限", err)
+        } finally {
+            server.stop()
+        }
+    }
 }

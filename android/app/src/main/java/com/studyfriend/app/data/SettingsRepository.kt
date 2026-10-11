@@ -40,6 +40,11 @@ data class SettingsSnapshot(
     val updateApiBase: String,
     /** 扫描书本地识别（OCR）开关（P6b S4）：默认开；off = 扫描书走现状路径（回滚方案载体） */
     val ocrEnabled: Boolean,
+    /**
+     * 讲解模型（按用途选模型）：段落讲解与粗读批注是逐段调用、用量最大的任务，
+     * 可单独配便宜快速的模型；空 = 跟随主力模型（cfg.model）。
+     */
+    val noteModel: String,
 )
 
 /**
@@ -75,6 +80,7 @@ class SettingsRepository(
             updateAutoCheck = db.settingDao().get(KEY_UPDATE_AUTO)?.value != "false",
             updateApiBase = db.settingDao().get(KEY_UPDATE_API_BASE)?.value.orEmpty(),
             ocrEnabled = db.settingDao().get(KEY_OCR_ENABLED)?.value != "false",
+            noteModel = db.settingDao().get(KEY_NOTE_MODEL)?.value.orEmpty(),
         )
     }
 
@@ -161,6 +167,19 @@ class SettingsRepository(
     /** 清除备用视觉 Key（备用组三键缺一即退出轮转） */
     suspend fun clearVision2Key() {
         db.settingDao().delete(KEY_VISION2_KEY_ENC)
+    }
+
+    /**
+     * 讲解模型（按用途选模型）：传空白 = 清空回跟随主力模型；非空 = 指定讲解专用模型。
+     * 只有模型名，地址与 Key 永远跟主力服务商（讲解跑在主力配置的端点上）。
+     */
+    suspend fun saveNoteModel(model: String?) {
+        val trimmed = model?.trim().orEmpty()
+        if (trimmed.isEmpty()) {
+            db.settingDao().delete(KEY_NOTE_MODEL)
+        } else {
+            db.settingDao().upsert(SettingEntity(KEY_NOTE_MODEL, trimmed))
+        }
     }
 
     // ---- 扫描书本地识别（P6b S4）：开关 / 用户反馈计数 / OCR 版本标记 ----
@@ -334,6 +353,8 @@ class SettingsRepository(
         const val KEY_VISION2_BASE = "vision2_base"
         const val KEY_VISION2_MODEL = "vision2_model"
         const val KEY_VISION2_KEY_ENC = "vision2_key_enc"
+        // 讲解模型（按用途选模型）：段落讲解与粗读批注专用，空 = 跟随主力
+        const val KEY_NOTE_MODEL = "note_model"
         // 扫描书本地识别（P6b S4）
         const val KEY_OCR_ENABLED = "ocr_enabled"
         const val KEY_OCR_FEEDBACK_TOTAL = "ocr_feedback_total"
@@ -349,14 +370,6 @@ class SettingsRepository(
         const val DEFAULT_MODEL = "gpt-4o-mini"
         /** 视觉兜底默认模型（OPT-E）：龙猫 2.5 预览版，实测书页整页转写可用 */
         const val DEFAULT_VISION_MODEL = "LongCat-2.5-Preview"
-
-        /** 快捷预设（label, baseUrl, model）：设置页一键填入，保存前不落库 */
-        val PRESETS = listOf(
-            Triple("美团 · LongCat（推荐）", "https://api.longcat.chat/openai/v1", "LongCat-2.5-Preview"),
-            Triple("商汤 · GLM-5.2", "https://token.sensenova.cn/v1", "glm-5.2"),
-            Triple("商汤 · DeepSeek-V4", "https://token.sensenova.cn/v1", "deepseek-v4-flash"),
-            Triple("商汤 · Flash-Lite（快）", "https://token.sensenova.cn/v1", "sensenova-6.8-flash-lite"),
-        )
 
         /** 仅供测试/协议演示生成密钥；线上走 AndroidKeyStore */
         fun newProtocolKey(): SecretKey = SecretCrypto.newKey()

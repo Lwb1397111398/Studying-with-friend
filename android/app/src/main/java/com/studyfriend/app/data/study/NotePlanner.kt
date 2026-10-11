@@ -178,7 +178,9 @@ class NotePlanner(
         val plan = NoteTaggedParser.parse(
             chatTextFn(
                 ChatRequest(
-                    baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
+                    baseUrl = cfg.baseUrl, apiKey = key,
+                    // 讲解模型（按用途选模型）：讲解逐段调用用量最大，可单独配低成本模型；空 = 主力
+                    model = cfg.noteModel.ifBlank { cfg.model },
                     temperature = 0.5,
                     // 推理型模型的思考 token 计入 max_tokens：讲解卡主体长，预算须给足
                     maxTokens = 16_000,
@@ -199,7 +201,7 @@ class NotePlanner(
             keyPointsJson = json.encodeToString(ListSerializer(String.serializer()), n.keyPoints),
             memoryHook = n.memoryHook.ifBlank { null },
             questionsJson = json.encodeToString(ListSerializer(CheckQuestion.serializer()), n.checkQuestions),
-            model = cfg.model,
+            model = cfg.noteModel.ifBlank { cfg.model },
             promptVersion = NOTE_VERSION,
             createdAt = System.currentTimeMillis(),
         )

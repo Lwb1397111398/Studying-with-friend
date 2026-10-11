@@ -1,79 +1,78 @@
 # M3 AI客户端与设置 · 模块总览
 
-> 状态：✅ 完成（计划 96 分 → 实现 → 测试修复 4 个真问题 → 质检 91 分通过 → P1+5 条 P2 全部修复）
-> 验证：**64/64 单测全绿**，assembleDebug + assembleRelease 双绿
+> 状态：✅ 完成（M3 原始 91 分质检通过；2026-10-11 模型页重构收口）
+> 验证：全项目单测全绿（AiClientTest 14、SettingsRepoTest 9），assembleDebug 通过
 
-## 功能清单
+## 模块职责
 
-| 功能 | 说明 |
-| --- | --- |
-| 设置页 | API 地址（placeholder 提示"一般以 /v1 结尾"）/ 模型名 / 温度（0.0–1.0）/ API Key 密码框（打码显示、trailingIcon 清除） |
-| 扫描书本地识别开关（P6b S4/S5） | `ocrEnabled`（默认开）即点即存（`saveOcrEnabled`，键 `ocr_enabled`）；关闭后扫描版 PDF 回退纯视觉路径。开关下方展示模型就绪状态（`OcrModelStore.modelsPresent`=filesDir/ocr_models 三文件齐，VM init 读一次）；未就绪时显示「下载识别模型」按钮（`downloadOcrModels`：`ocrDownloadPct!=null` 防重入→解 GitHub 只读令牌→`OcrModelDownloader.downloadModels` IO 下载，`ocrDownloadPct` 驱动进度条，成功刷新就绪态+人话 message，失败报错，finally 清进度态）；另存 OCR 反馈计数（`ocr_feedback_total`+按书 `ocr_feedback_book_*`，≥3 次下次导入提示升级）与 `ocr_last_version`（引擎升级重导触发用，UI 延后） |
-| 视觉兜底配置 | 开关 + 视觉 API 地址 + 视觉 API Key（独立加密存 `vision_key_enc`）+ 视觉模型名；地址/Key 留空回退主配置（文本走 A 家、视觉兜底走 B 家时才填专属值）； OPT-E 引入。**OPT-F 起：点「保存」若视觉队列有待转写页，自动重调度全部队列任务（`reenqueueAllPending`，REPLACE）——新 Key/模型立即生效开跑；App 启动还有 `restorePending` 续跑兜底（进程死亡/重启不丢队列）** |
-| Key 加密存储 | AndroidKeyStore AES-256 密钥 + SecretCrypto 协议：12B 随机 IV + 128 位 GCM tag，payload = `Base64(iv||ct)` 存 settings 表 `api_key_enc`，明文 Key 永不落库 |
-| 密钥失效自愈 | 解密任何异常（换机/清数据/密文损坏）→ 删旧密文 + 中文提示重填；encrypt 同样包装为 SecretCryptoException |
-| URL 规范化 | trim → 去尾 `/` → 非 `/chat/completions` 结尾自动拼上；用户粘贴全路径/带尾斜杠都兼容 |
-| 温度解析 | 兼容中文逗号小数；非法/越界回退 0.3；load 时 coerceIn(0.0, 1.0) 双保险 |
-| SSE 流式 | OpenAI 兼容 `/chat/completions`，`stream:true`，onDelta 逐块回调（Compose mutableStateOf 线程安全直写） |
-| 取消 | 哨兵子协程 `awaitCancellation()` 在 finally 里 disconnect；取消型 IOException 还原为 CancellationException 不冒充网络错误；responseCode 后补 ensureActive 防"连接阶段取消"挂到读超时 |
-| 错误分层 | 401/403→"API Key 无效或无权限"、404→"接口路径不存在"、429→"请求太频繁或额度用尽"、其余带 HTTP 码+错误头 300 字节；网络/地址格式错误各有专属中文文案 |
-| JSON 剥壳与修复重试 | stripFence + 首个 `{`/`[` 配平扫描（inString/escaped 状态机）；chatJson 解析失败自动重试 1 次（追加"只输出 JSON"提示），再失败抛含原始输出片段的异常 |
-| 测试连接 | 发 ping（maxTokens=16）计时，实时显示首块预览；可取消；Key 输入框非空时优先用新 Key 测试（避免旧 Key 配新地址误导） |
-| 布局 | 平板单列居中 720dp，与 M2 两屏一致 |
+一句话：管 AI 的「连接」（OpenAI 兼容端点、Key 加密、SSE 流式、错误文案）和「配置面」（模型页 + 设置页）。
+
+## 功能清单（2026-10-11 模型页重构后）
+
+| 功能 | 所在页面 | 说明 |
+| --- | --- | --- |
+| 模型页（新） | ModelsScreen（设置页入口的二级页，Routes.MODELS） | 全部 AI 模型配置收拢一页：主力模型 / 讲解模型 / 视觉转写 + 备用视觉 / 本地 OCR。区块化展示，各区块 HorizontalDivider 分隔 |
+| 主力模型 | 模型页 | API 地址 / Key（加密）/ 模型名 / 温度 / 测试连接（流式 ping + 实时预览）。用于章末总结、全书总览、思维导图、粗读章级合并 |
+| 「查找模型」（新） | 模型页各模型输入框旁 | `AiClient.listModels`：GET `{base}/models`（Bearer）拉服务商模型列表 → 搜索弹窗点选回填。宽松解析 `data[].id`（兜底 `model`/`name` 字段、裸数组、只认字符串值），排序去重；解析不动返回空列表、401/404 等抛人话 AiException。**拉取失败仍可手填** |
+| 讲解模型（新，按用途选模型） | 模型页 | 开关「讲解单独用低成本模型」+ 专属模型名（可查找）。**只有模型名，地址/Key 永远跟主力服务商**；空 = 跟随主力。生效点：NotePlanner 段落讲解 + RoughReadPlanner 逐块批注（两个逐段高频任务）；章级合并/总结/总览始终主力（出题质量要求高）。落库 `ParaNoteEntity.model` 记实际用的模型 |
+| 视觉转写（OPT-E） | 模型页 | 开关即点即存 + 视觉模型名（可查找）+ 视觉专属地址/Key（留空回退主力）。扫描页/坏字页整页转写 |
+| 备用视觉（R3 轮转） | 模型页 | 地址/模型名/Key 三键齐才入轮转列表；不回退主力 Key（异家 Key 打异家 URL 无意义） |
+| 扫描书本地识别（P6b） | 模型页 | 从设置页迁入：开关 + 模型就绪态 + 「下载识别模型」按钮（~21MB，GitHub 令牌下载，进度条防重入） |
+| 设置页（瘦身） | SettingsScreen | 只剩：模型入口卡片（主力模型名 + Key 状态 + 讲解/视觉摘要，LaunchedEffect 每次进入刷新）、讲解详略三档、应用更新（M7）。**「快速填入」预设与平铺的视觉三组已删除（老板 2026-10-11 反馈：太乱）** |
+| Key 加密存储 | — | AndroidKeyStore AES-256 + SecretCrypto 协议（12B IV + 128 位 GCM tag，`Base64(iv||ct)`），明文 Key 永不落库 |
+| 密钥失效自愈 | — | 解密异常保留密文（keystore 可能暂时故障）；仅「结构性损坏」（k1:/s1: 标记但非合法 Base64）删除重填 |
+| URL 规范化 | — | trim → 去尾 / → 非 `/chat/completions` 结尾自动拼上；`normalizeModelsUrl` 同理拼 `/models` |
+| SSE 流式 | — | OpenAI 兼容 `/chat/completions`，`stream:true`，onDelta 逐块回调 |
+| 取消 | — | 哨兵子协程 `awaitCancellation()` + finally disconnect；取消型 IOException 还原 CancellationException |
+| 错误分层 | — | 401/403→Key 无效、404→路径不存在、429→太频繁/额度尽；错误 body 限读 300 字节 |
+| JSON 剥壳与修复重试 | — | stripFence + 配平扫描；chatJson 失败重试 1 次（空正文翻倍 maxTokens + 换提示） |
 
 ## 关键文件
 
 ```
-data/ai/SecretCrypto.kt       AES/GCM 协议（纯 JVM object，encrypt/decrypt/newKey）
-data/ai/JsonSlicer.kt         JSON 剥壳（配平扫描，JsonSliceException）
-data/ai/AiClient.kt           SSE 客户端（normalizeChatUrl/parseTemperature/chat/chatJson/extractDelta）
-data/ai/SecretStore.kt        SecretStore 接口 + KeyStoreSecretStore + FakeSecretStore（测试）
-data/SettingsRepository.kt    load/save/clearKey/decryptKeyOrNull + saveVision/clearVisionKey/decryptVisionKeyOrNull/resolveVisionKeyOrNull（hasKey/hasVisionKey 只给"是否已存"）
-data/db/Daos.kt               SettingDao.delete(key)（M3 新增）
-ui/screens/SettingsViewModel.kt  save/testConnection/cancelTest/clearKey，busy/testing 双向防抖
-ui/screens/SettingsScreen.kt  表单 UI + 实时流式预览 + 红/绿状态行
-ui/nav/AppNav.kt              SETTINGS 路由接线 SettingsViewModel
-test/.../MiniHttpServer.kt    手写 ServerSocket 迷你 HTTP（AGP --release 无 jdk.httpserver）
-test/.../JsonSlicerTest.kt    10 用例（围栏/噪声/嵌套/字符串内括号/转义/数组/异常）
-test/.../SecretCryptoTest.kt  6 用例（roundtrip/随机 IV/篡改/错钥/短 payload/非 Base64）
-test/.../AiClientTest.kt      9 用例（SSE 顺序/请求体断言/401/404/取消 5s/URL 规范化/温度/重试成功/两次失败）
-test/.../SettingsRepoTest.kt  4 用例（roundTrip/健康解密/失效删键/clearKey）
+data/ai/AiClient.kt            SSE 客户端 + listModels/normalizeModelsUrl/parseModelIds（查找模型底层）
+data/ai/SecretCrypto.kt        AES/GCM 协议（纯 JVM object）
+data/ai/JsonSlicer.kt          JSON 剥壳（配平扫描）
+data/ai/SecretStore.kt         接口 + KeyStoreSecretStore + FakeSecretStore（测试）
+data/SettingsRepository.kt     load/save/saveVision/saveVision2/saveNoteModel（新）/clear* /decrypt* /buildVisionTranscribers
+ui/screens/ModelsViewModel.kt  （新）模型页状态机：三组配置 + 查找模型弹窗（ModelPickerTarget 四目标）+ OCR 下载 + 测试连接
+ui/screens/ModelsScreen.kt     （新）模型页 UI：区块化 + ModelField（输入框+查找按钮）+ 搜索选择 AlertDialog
+ui/screens/SettingsViewModel.kt（瘦身）只剩讲解详略 + refreshSummary（模型入口摘要）
+ui/screens/SettingsScreen.kt   （瘦身）模型入口卡片 + 讲解详略 + 应用更新
+ui/nav/AppNav.kt               Routes.MODELS + composable 接线（modelsVm）
+data/study/NotePlanner.kt      讲解请求 model = cfg.noteModel.ifBlank { cfg.model }（落库同步记实际模型）
+data/study/RoughReadPlanner.kt runBlockOnce（逐块批注）用讲解模型；mergeOverview（章级）用主力
+test/.../MiniHttpServer.kt     迷你 HTTP（新增 MiniResponse.json() 供 listModels 用例）
+test/.../AiClientTest.kt       14 用例（+4：listModels 解析/裸数组容错/脏 body/401）
+test/.../SettingsRepoTest.kt   9 用例（-presets 用例，+noteModel 往返与清空回主力）
 ```
 
-## 设计决策（与踩坑）
+## 设计决策（新增部分）
 
-1. **取消必须用哨兵协程，不能用 `invokeOnCompletion` 默认重载**：后者 `onCancelling=false`，handler 要等 job **完全结束**才触发——正是要打断的阻塞读结束之后，为时已晚（finally 里 dispose 后甚至永不触发）。`onCancelling=true` 三参重载是 `@InternalCoroutinesApi`，故用公开惯用法：`launch { try { awaitCancellation() } finally { conn.disconnect() } }`，取消传播到哨兵的瞬间断开 socket。
-2. **JDK 实测**：`HttpURLConnection.disconnect()` 能在 8ms 内打断阻塞 read（T.java/T2.java 实验，100ms 快速断开也有效）——问题从来不在 JDK，在协程 handler 触发时机。
-3. **测试里 `CountDownLatch.await` 必须包 `withContext(Dispatchers.IO)`**：直接在 runBlocking 里阻塞等待会卡死 event loop，launch 的协程体（还在队列里）永远不执行——曾造成"chat=not-run"假象。改用 server 写头后 countDown，测试 await 后再 cancel，同时消除"cancel 抢在请求发出前"的竞态。
-4. **AGP --release 编译限制**：unit test 编译时 `com.sun.net.httpserver`（jdk.httpserver 模块）Unresolved → 手写 MiniHttpServer（HTTP/1.0 + Connection: close，EOF 结束）；SSE delta 的 content 必须转义（手拼 JSON 会因 content 含引号而产出非法行）。
-5. **全链路只用 java.util.Base64**（含 padding、无换行），禁止 android.util.Base64——协议两端一致是解密成功前提。
-6. **Robolectric 的 AndroidKeyStore 不可靠**：协议层用 JVM SecretCryptoTest 覆盖，失效路径用 FakeSecretStore；KeyStore 实现推 M7 真机冒烟（计划已载明）。
-7. **错误 body 限读 300 字节**（readErrorHead）：异常服务器返回大 body 时防 OOM——低内存机器的硬约束；errorStream 为 null 直接空串（原 `?: inputStream` 在非 2xx 下会抛 IOException 掩盖友好文案）。
-8. **取消异常传播约定**：VM 层 catch(Exception) 前必须先 `catch (e: CancellationException) { throw e }`（save/clearKey/testConnection 统一）；AiClient 的 catch 链 CancellationException → AiException → IOException（还原取消）→ Exception。
-9. **chatJson 重试只针对 JSON 解析失败**，网络错误不重试；重试请求附加第一次原始输出（截 2000 字）+ "只输出 JSON" 提示，再失败抛含原始输出片段（120 字）的异常供调试。
+10. **按用途拆模型，只拆一个角色**：盘点全项目 AI 任务——逐段类（段落讲解、粗读批注）量大、质量要求相对低；总结/总览/出题类量小、质量要求高（复习题源自章末总结）。故只拆「讲解模型」一个角色（note_model），总结/总览/章级合并固定主力，不再加复习专用模型（复习中心本身无 AI 调用，出题在 M5）。UI 开关默认关（跟随主力），老用户零感知。
+11. **查找模型用 GET /models 宽松解析**：OpenAI 兼容端点理论上都实现该接口，但中转站形状不一（裸数组、model/name 字段、数字 id）。策略：字符串值才收、排序去重、解析失败给空列表（VM 层转「服务商没返回模型列表，直接手填」）；HTTP 错误走 friendlyHttp 人话。**手填永远保留**——模型列表接口不是所有网关都有。
+12. **讲解模型只配模型名，不配地址/Key**：讲解跑在主力服务商端点上（cfg.baseUrl + decryptKeyOrNull）。拆独立服务商会让「服务商」升级为实体、需要迁移现有键，收益配不上复杂度；真要多服务商时再升级。
+13. **查找的 Key 取值优先级**：输入框里未保存的新 Key > 已存密文（主组）；视觉组专属 Key > 主力 Key（复用 resolveVisionKeyOrNull）；备用组只认自己的 Key（与轮转语义一致）。
+14. **picker 状态机**：`ModelPickerTarget` 四目标（MAIN/NOTE/VISION/VISION2），fetchModels 按目标解析端点、成功后 pickerModels 非空弹 AlertDialog（搜索框 + LazyColumn 380dp），pickModel 回填目标字段并提示「记得点保存」。NOTE 目标点选同时把 noteFollowMain 置 false。
 
-## 测试矩阵（M3 新增 29 用例，全项目 64/64 绿）
+## 测试矩阵（本轮新增）
 
-- JsonSlicer：直通 / json 围栏 / ``` 围栏 / 前后噪声 / 深嵌套 / 字符串内括号 / 转义反斜杠引号 / 数组 / 无 JSON 抛 / 未闭合抛
-- SecretCrypto：中文符号 roundtrip / 两次密文不同 / 篡改抛 / 错钥抛 / 短 payload 抛 / 非 Base64 抛
-- AiClient：SSE 顺序+全文 / 请求头与体（Bearer、stream、model、max_tokens）/ 401 / 404 / **取消 5s 返回（等 header 竞态消除）** / URL 规范化×3 / 温度解析×6 / 重试成功（calls=2、第二次含"只输出 JSON"）/ 两次失败抛含原文
-- SettingsRepo：save+load roundTrip（默认值/hasKey/密文不含明文/不传 Key 不清密文）/ 健康解密 / 失效删键 hasKey 归 false / clearKey / 视觉独立配置（专属地址+Key 往返、未配回退主 Key、开关即点即存不覆盖、清除后回退）
+- AiClient +4：listModels 正常解析（断言 GET path=/v1/models + Bearer 头 + 排序）/ 裸数组+model/name 字段+数字 id 不收 / HTML 脏 body 空列表不崩 / 401 人话
+- SettingsRepo +1：noteModel 默认空、save→load 往返、trim、空串/null 清空回主力
 
-## 质检记录
+## 已知坑与约束
 
-- 质检 91 分通过（计划符合 29/30、正确性 27/30、健壮性 17/20、可测试性 18/20），无 P0
-- 修复：P1 错误 body 无上界读取 → readErrorHead 限 300 字节；P2×5：VM 吞取消异常×2、errorStream 兜底分支、MalformedURLException 文案、load 温度 clamp、测试连接优先用未保存的新 Key、encrypt 异常包装
-- 修复后回归：64/64 全绿 + 双 APK 重建成功
-- 暂缓（记录在案）：VM 构造注入重构（与 ImportViewModel 模式统一后一并做）、key() 并发生成（busy 互斥已实际规避）、URL 带查询串（无需求）
+- MiniHttpServer 仅支持单请求短连接；listModels 用例沿用该设施（AGP --release 无 jdk.httpserver）。
+- 「查找模型」对未保存的地址也生效（fetchModels 直接用输入框值），用户可不保存先看列表；但模型选择后仍须点「保存」落库。
+- 视觉开关即点即存会触发 VisionScheduler.reenqueueAllPending（OPT-F）；讲解模型变更不影响队列（讲解是按需同步调用）。
+- 设置页入口摘要（refreshSummary）只在进入设置页时刷新；模型页改完 popBack 回来 LaunchedEffect 会重跑，无需额外事件总线。
 
 ## 对后续模块的接口承诺
 
-M4 段落讲解 / M5 章末总结将复用 `AiClient.chatJson(req, deserializer, onDelta)`：温度/maxTokens/messages 全可配、取消可传播（哨兵机制）、JSON 失败自动重试——批量队列只需管好自己的并发与限速。
+- 新增 AI 功能时按「用量×质量」决定挂哪个角色：逐段高频 → noteModel（讲解）；低频高质量 → cfg.model（主力）。取值写法统一 `cfg.noteModel.ifBlank { cfg.model }`。
+- 模型列表拉取复用 `AiClient.listModels(baseUrl, apiKey)`；VM 层照抄 ModelsViewModel.fetchModels 的目标解析模式即可加新角色。
 
-## M7 追加（应用自更新的设置面）
+## 最后更新
 
-- 设置页新增「应用更新」区块：当前版本（BuildConfig.VERSION_NAME）、手动「检查更新」、「自动检查更新」开关（即点即存）、GitHub 访问令牌输入（密码框 + 已存清除）+「保存令牌」+「如何获取令牌？」步骤指引弹窗。界面与状态机在 `UpdateViewModel/UpdateDialog`（详见 M7），本模块只提供存储面。
-- `SettingsRepository` 新增：`github_token_enc`（与 AI Key 同一套 SecretCrypto 加密落库）、`update_auto_check`（缺省开）、`update_last_check_ms`（24h 节流）、`update_api_base`（测试覆盖用隐藏键，默认空 = 官方 GitHub API）。
-- `SettingsSnapshot` 相应加 `hasGithubToken / updateAutoCheck / updateApiBase` 三字段。
-- 最后更新：2026-10-05 P6b S5 模型下载入口（设置页「下载识别模型」按钮+进度条+就绪态刷新，OcrModelDownloader 令牌下载，防重入）。
-- 2026-10-01（M7 接入）。
+- 2026-10-11 模型页重构：新建 ModelsScreen/ModelsViewModel（Routes.MODELS），设置页瘦身（删快速填入与平铺视觉三组），AiClient.listModels，note_model 讲解模型角色接入 NotePlanner/RoughReadPlanner，测试 14+9。
+- 2026-10-05 P6b S5 模型下载入口；2026-10-01 M7 接入。

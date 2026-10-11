@@ -57,6 +57,68 @@ object AiClient {
             if (it.endsWith("/chat/completions")) it else "$it/chat/completions"
         }
 
+    /** 模型列表地址：trim → 去尾 / → 不是 /models 结尾就拼上（粘贴了全路径也兼容） */
+    fun normalizeModelsUrl(raw: String): String =
+        raw.trim().trimEnd('/').let {
+            if (it.endsWith("/models")) it else "$it/models"
+        }
+
+    /**
+     * 拉取服务商模型列表（OpenAI 兼容 GET /models，Bearer 鉴权），供「查找模型」选择。
+     * 宽松解析：data[].id 为主，兜底 model/name 字段；根级裸数组也认；解析不动给空列表。
+     * 失败抛 AiException（人话文案），调用方提示后仍可手填模型名。
+     */
+    suspend fun listModels(baseUrl: String, apiKey: String): List<String> =
+        withContext(Dispatchers.IO) {
+            val conn = try {
+                URL(normalizeModelsUrl(baseUrl)).openConnection() as HttpURLConnection
+            } catch (e: IOException) {
+                throw AiException("API 地址格式不正确，请检查")
+            }
+            try {
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 30_000
+                conn.setRequestProperty("Authorization", "Bearer $apiKey")
+                conn.setRequestProperty("Accept", "application/json")
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    throw AiException(friendlyHttp(code, readErrorHead(conn)), httpCode = code)
+                }
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                parseModelIds(text).distinct().sorted()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: AiException) {
+                throw e
+            } catch (e: IOException) {
+                throw AiException("网络异常：${e.message ?: "连接失败"}")
+            } catch (e: Exception) {
+                throw AiException("拉取模型列表失败：${e.message ?: "未知错误"}")
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+    /** 模型 id 提取：任何形状不符都给空列表，不让单条脏数据毁掉整次拉取 */
+    private fun parseModelIds(text: String): List<String> = try {
+        val el = json.parseToJsonElement(text)
+        val arr: JsonArray = when {
+            el is JsonArray -> el
+            el is JsonObject && el["data"] is JsonArray -> el["data"] as JsonArray
+            else -> JsonArray(emptyList())
+        }
+        arr.mapNotNull { item ->
+            val o = item as? JsonObject ?: return@mapNotNull null
+            // 只认字符串值：数字 id 是脏数据，放进去没法发给 /chat/completions
+            listOf("id", "model", "name").firstNotNullOfOrNull { key ->
+                (o[key] as? JsonPrimitive)?.takeIf { it.isString && it.content.isNotBlank() }?.content
+            }
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
     /** 温度解析：兼容中文逗号小数；非法/越界回退默认 0.3 */
     fun parseTemperature(raw: String, fallback: Double = 0.3): Double =
         raw.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it in 0.0..1.0 } ?: fallback

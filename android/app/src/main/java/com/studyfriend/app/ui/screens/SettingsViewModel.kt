@@ -8,283 +8,54 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.SettingsRepository
-import com.studyfriend.app.data.importer.ocr.OcrModelDownloader
-import com.studyfriend.app.data.importer.ocr.OcrModelStore
-import com.studyfriend.app.data.update.UpdateChecker
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import com.studyfriend.app.data.ai.AiClient
-import com.studyfriend.app.data.ai.AiException
-import com.studyfriend.app.data.ai.AiMessage
-import com.studyfriend.app.data.ai.ChatRequest
-import com.studyfriend.app.data.vision.VisionScheduler
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/** 设置页：读写配置 + 测试连接（计划 M3 §1） */
+/**
+ * 设置页（瘦身版）：模型类配置全部移入「模型」页（ModelsScreen），这里只剩
+ * 讲解详略档位 + 应用更新（UpdateViewModel）+ 模型页入口的状态摘要。
+ */
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = SettingsRepository((app as StudyApp).database, (app as StudyApp).secretStore)
 
-    var baseUrl by mutableStateOf(SettingsRepository.DEFAULT_BASE)
-    var model by mutableStateOf(SettingsRepository.DEFAULT_MODEL)
-    var tempText by mutableStateOf("0.3")
-    var keyInput by mutableStateOf("")
-    var hasKey by mutableStateOf(false)
-        private set
-
-    var busy by mutableStateOf(false)
-        private set
-    var testing by mutableStateOf(false)
-        private set
-    var message by mutableStateOf<String?>(null)
-        private set
-    var error by mutableStateOf<String?>(null)
-        private set
-    var liveDelta by mutableStateOf("")
-        private set
+    /** 讲解详略三档：即选即存 */
     var detailLevel by mutableStateOf("标准")
         private set
 
-    /** 视觉兜底（OPT-E）：开关即点即存；模型/地址/Key 随"保存"按钮落库 */
-    var visionEnabled by mutableStateOf(true)
+    /** 模型入口摘要：主力模型名与 Key/讲解/视觉的生效状态，进设置页时刷新 */
+    var mainModel by mutableStateOf("")
         private set
-    var visionModel by mutableStateOf(SettingsRepository.DEFAULT_VISION_MODEL)
-
-    /** 视觉专属地址：空 = 跟主配置同一家（文本走 A 家、视觉兜底走 B 家时才填） */
-    var visionBaseUrl by mutableStateOf("")
-    var visionKeyInput by mutableStateOf("")
-    var hasVisionKey by mutableStateOf(false)
+    var keyReady by mutableStateOf(false)
         private set
-
-    /** 备用视觉组（R3 多模型轮转）：主模型限流时自动接力，多路并行提速；三键齐才参与 */
-    var vision2BaseUrl by mutableStateOf("")
-    var vision2Model by mutableStateOf("")
-    var vision2KeyInput by mutableStateOf("")
-    var hasVision2Key by mutableStateOf(false)
+    var noteSummary by mutableStateOf("跟随主力")
         private set
-
-    /** 扫描书本地识别（P6b S4）：开关即点即存；模型就绪与否只读展示 */
-    var ocrEnabled by mutableStateOf(true)
+    var visionSummary by mutableStateOf("关")
         private set
-    var ocrModelsReady by mutableStateOf(false)
-        private set
-    var ocrDownloadPct by mutableStateOf<Int?>(null)
-        private set  // null=未在下载；0-100=下载中
-
-    private var testJob: Job? = null
 
     init {
-        viewModelScope.launch {
-            val s = repo.load()
-            baseUrl = s.baseUrl
-            model = s.model
-            tempText = s.temperature.toString()
-            hasKey = s.hasKey
-            detailLevel = repo.detailLevel()
-            visionEnabled = s.visionEnabled
-            visionModel = s.visionModel
-            visionBaseUrl = s.visionBaseUrl
-            hasVisionKey = s.hasVisionKey
-            vision2BaseUrl = s.vision2BaseUrl
-            vision2Model = s.vision2Model
-            hasVision2Key = s.hasVision2Key
-            ocrEnabled = s.ocrEnabled
-            ocrModelsReady = OcrModelStore.modelsPresent(getApplication<StudyApp>())
-        }
+        refreshSummary()
+        viewModelScope.launch { detailLevel = repo.detailLevel() }
     }
 
-    fun save() {
-        if (busy || testing) return
+    /** 从模型页改完配置返回设置页时刷新摘要 */
+    fun refreshSummary() {
         viewModelScope.launch {
-            busy = true
-            error = null
-            message = null
             try {
-                val temp = AiClient.parseTemperature(tempText)
-                repo.save(baseUrl, model, temp, keyInput.takeIf { it.isNotBlank() })
-                repo.saveVision(visionEnabled, visionModel, visionBaseUrl, visionKeyInput.takeIf { it.isNotBlank() })
-                repo.saveVision2(vision2BaseUrl, vision2Model, vision2KeyInput.takeIf { it.isNotBlank() })
-                if (keyInput.isNotBlank()) {
-                    hasKey = true
-                    keyInput = ""
-                }
-                if (visionKeyInput.isNotBlank()) {
-                    hasVisionKey = true
-                    visionKeyInput = ""
-                }
-                if (vision2KeyInput.isNotBlank()) {
-                    hasVision2Key = true
-                    vision2KeyInput = ""
-                }
-                tempText = temp.toString()
-                // OPT-F：视觉配置变了（开关/Key/模型），队列里有待转写页的书立即重调度
-                val appCtx = getApplication<StudyApp>()
-                VisionScheduler.reenqueueAllPending(appCtx.database, appCtx)
-                message = "已保存"
+                val s = repo.load()
+                mainModel = s.model
+                keyReady = s.hasKey
+                noteSummary = if (s.noteModel.isBlank()) "跟随主力" else s.noteModel
+                visionSummary = if (s.visionEnabled) s.visionModel else "已关闭"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = "保存失败：${e.message ?: "未知错误"}"
-            } finally {
-                busy = false
+                // 摘要只是展示，读失败静默保留旧值（正常路径 load 不会抛）
             }
         }
     }
 
-    fun testConnection() {
-        if (testing || busy) return
-        testJob = viewModelScope.launch {
-            testing = true
-            error = null
-            message = null
-            liveDelta = ""
-            try {
-                // 用户改了 Key 还没保存时，优先用输入框里的新 Key 测试，避免拿旧 Key 配新地址误导
-                val key = keyInput.takeIf { it.isNotBlank() } ?: repo.decryptKeyOrNull()
-                if (key == null) {
-                    hasKey = false
-                    error = "API Key 已失效或未保存，请重新填写并保存"
-                    return@launch
-                }
-                val start = System.currentTimeMillis()
-                val reply = AiClient.chat(
-                    ChatRequest(
-                        baseUrl = baseUrl,
-                        apiKey = key,
-                        model = model,
-                        temperature = AiClient.parseTemperature(tempText),
-                        // 推理型模型会先输出思考 token：预算太小只能收到空正文
-                        maxTokens = 2048,
-                        messages = listOf(AiMessage("user", "ping")),
-                    ),
-                ) { delta -> liveDelta += delta }
-                message = if (reply.isBlank()) {
-                    "连接成功，但模型未返回正文（思考可能尚未结束），可正常使用 · ${System.currentTimeMillis() - start} ms"
-                } else {
-                    "连接成功 · ${reply.length} 字 · ${System.currentTimeMillis() - start} ms"
-                }
-            } catch (e: AiException) {
-                error = e.message
-            } catch (e: CancellationException) {
-                // 用户取消，不算错误
-            } catch (e: Exception) {
-                error = "测试失败：${e.message ?: "未知错误"}"
-            } finally {
-                testing = false
-            }
-        }
-    }
-
-    /** 快捷预设：只填输入框不落库，用户确认后再点"保存" */
-    fun applyPreset(baseUrlPreset: String, modelPreset: String) {
-        if (busy || testing) return
-        baseUrl = baseUrlPreset
-        model = modelPreset
-        message = "已填入「$modelPreset」预设，填好 Key 后点保存"
-    }
-
-    /** 视觉兜底开关（OPT-E）：即点即存，独立于"保存"按钮 */
-    fun clearVisionKey() {
-        if (busy || testing) return
-        viewModelScope.launch {
-            try {
-                repo.clearVisionKey()
-                hasVisionKey = false
-                visionKeyInput = ""
-                message = "已清除视觉专属 Key，视觉兜底回退用主 Key"
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "清除视觉 Key 失败：" + (e.message ?: "未知错误")
-            }
-        }
-    }
-
-    /** 清除备用视觉 Key（R3）：备用组三键缺一即退出轮转，回退单模型 */
-    fun clearVision2Key() {
-        if (busy || testing) return
-        viewModelScope.launch {
-            try {
-                repo.clearVision2Key()
-                hasVision2Key = false
-                vision2KeyInput = ""
-                message = "已清除备用视觉 Key，备用组退出轮转"
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "清除备用视觉 Key 失败：" + (e.message ?: "未知错误")
-            }
-        }
-    }
-
-    fun changeVisionEnabled(enabled: Boolean) {
-        if (enabled == visionEnabled) return
-        visionEnabled = enabled
-        viewModelScope.launch {
-            try {
-                repo.saveVision(enabled)
-                // OPT-F：开关切换后重调度（开了→拿到配置立即开跑；关了→Worker 读不到
-                // 转写器自动退避重试空转，不烧钱，无需取消任务）
-                val app = getApplication<StudyApp>()
-                VisionScheduler.reenqueueAllPending(app.database, app)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "保存视觉开关失败：${e.message ?: "未知错误"}"
-            }
-        }
-    }
-
-    /**
-     * 下载 OCR 模型（P6b S5）：GitHub Release ocr-models-v1 三件套 ~21MB →
-     * filesDir/ocr_models/，SHA-256 校验；令牌用 M7 设置页存的 GitHub 只读令牌
-     * （私有仓库拉资产必须带，没有则 API 404 报人话）。下载中禁止重复触发。
-     */
-    fun downloadOcrModels() {
-        if (ocrDownloadPct != null) return
-        ocrDownloadPct = 0
-        viewModelScope.launch {
-            try {
-                val token = repo.decryptGithubTokenOrNull()
-                withContext(Dispatchers.IO) {
-                    OcrModelDownloader.downloadModels(
-                        token = token,
-                        modelsDir = OcrModelStore.modelsDir(getApplication<StudyApp>()),
-                        onProgress = { done, total, pct ->
-                            ocrDownloadPct = (((done - 1) * 100 + pct) / total).coerceIn(0, 100)
-                        },
-                    )
-                }
-                ocrModelsReady = OcrModelStore.modelsPresent(getApplication<StudyApp>())
-                message = "识别模型下载完成，现在可以导入扫描书了"
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "模型下载失败：${e.message ?: "未知错误"}"
-            } finally {
-                ocrDownloadPct = null
-            }
-        }
-    }
-
-    /** 扫描书本地识别开关（P6b S4）：即点即存；下一次导入 PDF 时生效 */
-    fun changeOcrEnabled(enabled: Boolean) {
-        if (enabled == ocrEnabled) return
-        ocrEnabled = enabled
-        viewModelScope.launch {
-            try {
-                repo.saveOcrEnabled(enabled)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "保存扫描识别开关失败：${e.message ?: "未知错误"}"
-            }
-        }
-    }
-
-    /** 讲解详略三档（总计划 §1 目标 7）：即点即存，独立于"保存"按钮 */
+    /** 讲解详略三档（总计划 §1 目标 7）：即点即存，独立于保存按钮 */
     fun chooseDetailLevel(level: String) {
         if (level !in SettingsRepository.DETAIL_LEVELS || level == detailLevel) return
         detailLevel = level
@@ -294,27 +65,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = "保存详略档失败：${e.message ?: "未知错误"}"
-            }
-        }
-    }
-
-    fun cancelTest() {
-        testJob?.cancel()
-    }
-
-    fun clearKey() {
-        if (busy || testing) return
-        viewModelScope.launch {
-            try {
-                repo.clearKey()
-                hasKey = false
-                keyInput = ""
-                message = "已清除 API Key"
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "清除失败：${e.message ?: "未知错误"}"
+                // 档位保存失败不阻塞界面；下拉重进会回读库里的真实值
             }
         }
     }

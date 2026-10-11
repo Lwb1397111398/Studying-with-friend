@@ -255,7 +255,8 @@ class RoughReadPlanner(
         val req = ChatRequest(
             baseUrl = cfg.baseUrl,
             apiKey = key,
-            model = cfg.model,
+            // 逐块批注同属讲解类高频任务，跟讲解模型走；章级合并（mergeOverview）仍用主力
+            model = cfg.noteModel.ifBlank { cfg.model },
             temperature = 0.2,
             // 推理型模型的思考 token 计入 max_tokens：预算不足会被思考吃光、正文截断
             maxTokens = (block.paragraphs.size * 130 + 600).coerceIn(16_384, 32_768),

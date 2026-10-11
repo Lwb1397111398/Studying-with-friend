@@ -27,6 +27,8 @@ import com.studyfriend.app.ui.screens.ChapterAssetsScreen
 import com.studyfriend.app.ui.screens.ChapterListScreen
 import com.studyfriend.app.ui.screens.ImportScreen
 import com.studyfriend.app.ui.screens.ImportViewModel
+import com.studyfriend.app.ui.screens.ModelsScreen
+import com.studyfriend.app.ui.screens.ModelsViewModel
 import com.studyfriend.app.ui.screens.ReadScreen
 import com.studyfriend.app.ui.screens.ReviewScreen
 import com.studyfriend.app.ui.screens.SettingsScreen
@@ -40,6 +42,8 @@ object Routes {
     const val SHELF = "shelf"
     const val REVIEW = "review"
     const val SETTINGS = "settings"
+    // 模型页（设置页入口的二级页）：全部 AI 模型配置收拢于此
+    const val MODELS = "models"
     const val IMPORT = "import"
     const val TOC = "toc"
     const val BOOK = "book/{bookId}"
@@ -118,7 +122,15 @@ fun AppNav() {
             composable(Routes.REVIEW) { ReviewScreen() }
             composable(Routes.SETTINGS) {
                 val settingsVm: SettingsViewModel = viewModel()
-                SettingsScreen(vm = settingsVm, updateVm = updateVm)
+                SettingsScreen(
+                    vm = settingsVm,
+                    updateVm = updateVm,
+                    onOpenModels = { navController.navigate(Routes.MODELS) },
+                )
+            }
+            composable(Routes.MODELS) {
+                val modelsVm: ModelsViewModel = viewModel()
+                ModelsScreen(vm = modelsVm, onBack = { navController.popBackStack() })
             }
             composable(Routes.IMPORT) {
                 ImportScreen(vm = importVm, onNext = { navController.navigate(Routes.TOC) })

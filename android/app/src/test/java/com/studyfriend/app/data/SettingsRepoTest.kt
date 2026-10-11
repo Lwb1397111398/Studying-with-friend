@@ -139,13 +139,29 @@ class SettingsRepoTest {
     }
 
     @Test
-    fun presets_containLongCat_withCorrectUrlAndModel() {
-        val lc = SettingsRepository.PRESETS.firstOrNull { it.first.contains("LongCat") }
-        assertNotNull(lc)
-        assertEquals("https://api.longcat.chat/openai/v1", lc!!.second)
-        assertEquals("LongCat-2.5-Preview", lc.third)
-        // 验收 3：LongCat 必须居首位（全列表唯一推荐位）
-        assertEquals("美团 · LongCat（推荐）", SettingsRepository.PRESETS.first().first)
+    fun noteModel_roundTrip_andClearFallsBackToMain() = runBlocking {
+        // 讲解模型（按用途选模型）：保存 → 快照带出；清空（空白）→ 回跟随主力
+        val database = db()
+        val repo = SettingsRepository(database, FakeSecretStore())
+        try {
+            assertTrue(repo.load().noteModel.isBlank()) // 默认跟随主力
+
+            repo.saveNoteModel("flash-lite-1.5")
+            assertEquals("flash-lite-1.5", repo.load().noteModel)
+
+            // 前后空白自动 trim
+            repo.saveNoteModel("  quick-model  ")
+            assertEquals("quick-model", repo.load().noteModel)
+
+            // 空串/null = 清空回跟随主力
+            repo.saveNoteModel("")
+            assertTrue(repo.load().noteModel.isBlank())
+            repo.saveNoteModel("m")
+            repo.saveNoteModel(null)
+            assertTrue(repo.load().noteModel.isBlank())
+        } finally {
+            database.close()
+        }
     }
 
     @Test
