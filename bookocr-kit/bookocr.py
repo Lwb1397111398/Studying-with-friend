@@ -7,6 +7,7 @@ bookocr — 扫描版 PDF → txt / 插图版 PDF 识别台（agent 驱动，操
   init   <书名> --src <PDF路径> [--batch 10] [--dpi 200] [--color]   建识别工程
   prep   <书名或工程路径>                                            渲染页图
   pull   <书名或工程路径> [--min 100]                                文字层拔取：自带文字层的书免视觉识别（分钟级）
+  aivision <书名或工程路径> [--batch 批号] [--workers 4]              直连视觉 API 并发识图（绕开子代理并发限制，需 apis.json 或本机档案库）
   next   <书名或工程路径>                                            领下一批（输出子代理任务卡）
   check  <书名或工程路径> <批号> [--force] [--min 100]               质检一批
   retry  <书名或工程路径> <批号|--all-failed>                        重置一批待重转
@@ -195,6 +196,156 @@ def cmd_next(a: argparse.Namespace) -> None:
     out(f"  脚注  {job / nxt['notes']}（每条一行；无脚注也写出空文件）")
     out(f"  真图  {job / nxt['figures']}（JSON 数组，格式见规范；无图写 []）")
     out(f"完成后只回报一行：{bid_of(m, nxt)} 完成 正文X字 脚注Y条 图Z张")
+
+
+# ---------------------------------------------------------------- aivision（直连视觉 API 并发识别）
+
+def _load_vision_api() -> tuple[str, str, str]:
+    """视觉 API 三键（base_url, api_key, model）：kit 目录 apis.json 优先（换电脑自配，不入库），
+    回退本机 Agent Manager 档案库挑第一个 caps 含 vision 的启用档案。key 只在内存流转，不打印。"""
+    local = KIT / "apis.json"
+    if local.exists():
+        cfg = json.loads(local.read_text(encoding="utf-8"))
+        model = cfg.get("default_model") or (cfg.get("models") or [None])[0]
+        if not (cfg.get("base_url") and cfg.get("api_key") and model):
+            die("apis.json 需要 base_url / api_key / default_model 三键")
+        return cfg["base_url"], cfg["api_key"], model
+    am = Path(r"C:\Agent\AImanager\ai-apis.json")
+    if not am.exists():
+        die(f"没有视觉 API 配置：把 {{base_url, api_key, default_model}} 写入 {local}（OpenAI 兼容格式；该文件已 gitignore）")
+    items = json.loads(am.read_text(encoding="utf-8"))
+    items = items if isinstance(items, list) else items.get("apis", [])
+    for a in items:
+        if isinstance(a, dict) and "vision" in (a.get("caps") or []) and a.get("enabled", True):
+            model = a.get("default_model") or (a.get("models") or [None])[0]
+            return a["base_url"], a["api_key"], model
+    die("本机档案库里没有 caps 含 vision 的启用档案；在 apis.json 手工配一个")
+
+
+def _aivision_page(base: str, key: str, model: str, spec: str, img: Path, pageno: int, timeout: int = 180) -> str:
+    """单页识图：OpenAI 兼容 chat/completions，图片 base64 内嵌。返回模型文本输出。"""
+    import base64 as _b64
+    import urllib.request
+    data_uri = "data:image/png;base64," + _b64.b64encode(img.read_bytes()).decode()
+    body = {
+        "model": model,
+        "temperature": 0.1,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text":
+                spec + f"\n\n现在转写这一张页图（页号 N={pageno}）。输出格式：\n"
+                       "第一行：〔页" + str(pageno) + "〕\n之后：这一页的正文（段落间空行；图位置写〔图：…〕行）。\n"
+                       "如有脚注：正文之后写一行〔脚注〕，下面每条脚注一行。\n"
+                       "最后：写一行〔FIGURES〕，下面输出本页真图 JSON 数组（无图写 []，格式："
+                       '[{"page": ' + str(pageno) + ', "rect": [左,上,右,下], "kind": "table|photo|diagram", '
+                       '"title": "…", "desc": "…"}]，坐标为整页比例 0~1）。除以上内容不要输出任何别的话。'},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+        ]}],
+    }
+    req = urllib.request.Request(
+        base.rstrip("/") + "/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        resp = json.loads(r.read().decode("utf-8"))
+    return resp["choices"][0]["message"]["content"]
+
+
+def _parse_aivision_page(text: str, pageno: int) -> tuple[list[str], list[str], list[dict]]:
+    """拆模型输出 → (正文行, 脚注行, figures)。容忍模型漏写分区标记。"""
+    body_lines, notes, figs = [], [], []
+    section = "body"
+    for ln in text.replace("\r\n", "\n").split("\n"):
+        s = ln.strip()
+        if re.fullmatch(r"〔\s*脚注\s*〕?", s) or s == "〔脚注〕":
+            section = "notes"; continue
+        if re.fullmatch(r"〔\s*FIGURES\s*〕?", s) or s.upper() == "〔FIGURES〕":
+            section = "figs"; continue
+        if section == "body":
+            if PAGE_MARK.match(s) or s == f"〔页{pageno}〕":
+                continue  # 模型自己写的页标记行，统一重打
+            if s.startswith("〔图") and "〕" in s:
+                body_lines.append(s)
+            elif s:
+                body_lines.append(s)
+        elif section == "notes":
+            if s:
+                notes.append(s)
+        else:
+            m = re.search(r"\[.*\]", s, re.S)
+            if m:
+                try:
+                    arr = json.loads(m.group(0))
+                    if isinstance(arr, list):
+                        figs.extend(arr)
+                except json.JSONDecodeError:
+                    pass
+    return body_lines, notes, figs
+
+
+def cmd_aivision(a: argparse.Namespace) -> None:
+    """直连视觉 API 并发识图：一批内页级并发（workers 路），批完自动质检。"""
+    import concurrent.futures as futures
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    if not m["pages"]:
+        die("还没有页图，先跑 prep（aivision 吃的是 images/ 下的 PNG）")
+    base, key, model = _load_vision_api()
+    spec = (KIT / "spec.md").read_text(encoding="utf-8")
+
+    if a.batch:
+        targets = [normalize_bid(m, a.batch)]
+    else:
+        targets = [k for k, v in m["batches"].items() if v["status"] in ("pending", "failed")]
+    if not targets:
+        out("[ok] 没有待识别的批（pending/failed 为空）")
+        return
+    out(f"[i] 视觉 API {model} @ {base.split('//')[-1].split('/')[0]}（key 已打码），目标 {len(targets)} 批，并发 {a.workers}")
+
+    for bid in targets:
+        b = m["batches"][bid]
+        jobs = {n: job / m["pages"][n - 1]["image"] for n in b["pages"]}
+        results: dict[int, str] = {}
+        fails: list[int] = []
+        with futures.ThreadPoolExecutor(max_workers=a.workers) as ex:
+            futs = {ex.submit(_aivision_page, base, key, model, spec, img, n): n for n, img in jobs.items()}
+            for fu in futures.as_completed(futs):
+                n = futs[fu]
+                try:
+                    results[n] = fu.result()
+                except Exception as e:  # 网络超时/限流等，页面级重试一次
+                    try:
+                        results[n] = _aivision_page(base, key, model, spec, jobs[n], n)
+                        out(f"  · p{n} 重试成功")
+                    except Exception as e2:
+                        fails.append(n)
+                        out(f"  · p{n} 失败：{type(e2).__name__}: {str(e2)[:80]}")
+
+        parts, notes_all, figs_all = [], [], []
+        for n in b["pages"]:
+            if n not in results:
+                continue
+            body_ln, notes, figs = _parse_aivision_page(results[n], n)
+            parts.append(f"〔页{n}〕")
+            parts.extend(body_ln or ["〔空白页〕"])
+            parts.append("")
+            notes_all.extend(notes)
+            figs_all.extend(figs)
+        if fails:
+            b["status"], b["fail_reason"] = "failed", f"aivision 失败页 {fails}"
+            save_manifest(job, m)
+            out(f"[!] {bid} 有 {len(fails)} 页识别失败（{fails}），批标 failed；再跑一次 aivision 只会重试未完成批")
+            continue
+        (job / b["body"]).write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+        (job / b["notes"]).write_text("\n".join(notes_all) + ("\n" if notes_all else ""), encoding="utf-8")
+        (job / b["figures"]).write_text(json.dumps(figs_all, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        b["status"] = "assigned"
+        save_manifest(job, m)
+        try:
+            cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min))
+        except SystemExit:
+            out(f"[!] {bid} 质检不过，retry 后可重跑 aivision 或改派子代理")
+    out("下一步：status 看进度")
 
 
 # ---------------------------------------------------------------- pull（文字层拔取）
@@ -707,6 +858,14 @@ def main() -> None:
     p.add_argument("--force", action="store_true")
     p.add_argument("--min", type=int, default=100)
     p.set_defaults(fn=cmd_pull)
+
+    p = sub.add_parser("aivision")
+    p.add_argument("job")
+    p.add_argument("--batch", default=None, help="只识别指定批（缺省=全部 pending/failed 批）")
+    p.add_argument("--workers", type=int, default=4, help="页级并发数")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--min", type=int, default=100)
+    p.set_defaults(fn=cmd_aivision)
 
     p = sub.add_parser("retry")
     p.add_argument("job")

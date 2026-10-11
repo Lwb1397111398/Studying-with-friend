@@ -17,6 +17,7 @@
    - 主对话用 Agent 工具派一个子代理：子代理读 `spec.md` + 10 张图 → 写 `batches/bXXX.txt`（每页首行〔页N〕）、`bXXX_notes.txt`（脚注）、`bXXX_figures.json`（真图页内比例位置）→ 只回一行统计 → 子代理销毁；
    - `check` 质检：页标记对账（漏页/乱序/重复，永不豁免）、U+FFFD 乱码硬判、页均字数与中文占比（`--force` 豁免，给图表页/空白页用）；通过标 done，失败标 failed；
    - `retry` 重置失败批。**并发注意：部分套餐子代理并发上限=1，必须串行**（一次派 2 个以上立刻 `user concurrency limit exceeded` 全灭）。
+   - `aivision <书名> [--batch 批号] [--workers 4]`：**直连视觉 API 的机器路线**（绕开子代理串行限制）——从 kit 目录 `apis.json`（gitignore，换电脑自配）或本机 Agent Manager 档案库挑第一个 caps 含 vision 的启用档案拿三键（base_url/key/model，key 只在内存流转不打印）；把 `spec.md` 全文当 prompt、页图 base64 内嵌，走 OpenAI 兼容 `chat/completions`；一批内页级并发（ThreadPoolExecutor workers 路），单页失败自动重试一次；模型输出按〔脚注〕/〔FIGURES〕分区解析落三个批文件（容忍漏写标记），批完自动 `check` 质检、失败标 failed。只处理 pending/failed 批，与子代理路线可混用。**selftest 未覆盖此命令**（要走真 API）。
 6. **打包**：`pack` 按页序合并各批 →
    - `output/书名.txt`（UTF-8 BOM，页标记剥除，图位置保留〔图：…〕描述行，脚注归书末「注释」区）；
    - `output/书名_插图版.pdf`（reportlab 排版：msyh 中文字体、书名独占封面页、章标题 15pt/节标题 12.5pt、按 figures 台账的 rect 比例从原 PDF 裁真图嵌入）。
@@ -29,7 +30,7 @@
 
 ## 入口文件清单
 
-- `bookocr-kit/bookocr.py` — 全部八个子命令（init/prep/pull/next/check/retry/status/pack）
+- `bookocr-kit/bookocr.py` — 全部九个子命令（init/prep/pull/next/check/retry/status/pack/aivision）
 - `bookocr-kit/spec.md` — 转写规范（子代理必读；「看不清按上下文编通顺」是老板拍板的口径）+ **工作方式硬约束**（每张页图最多 Read 一次、禁止裁剪/放大/拼接衍生图、只读任务卡列出的页图、全批约 15 次工具调用内完成——实测整页直读相似度 0.98+ 不低于放大方案，违规=白烧额度）
 - `bookocr-kit/SKILL.md` — agent 操作手册（本机已注册 skill `scan-book`；流程=pull 优先、pull 不动的批走视觉）
 - `bookocr-kit/simcheck.py` — 成品 vs 自带文字层逐页相似度抽检（只出数字）
@@ -68,6 +69,8 @@
 - 全本实战《民法物权》577 页：视觉路线 b001-b006 质检全过、与文字层相似度 0.989/0.991 峰值；pull 路线 57/58 批分钟级完成、质检全过、抽检相似度 0.968-0.996（差异=页眉剔除与脚注分离）；仅 b053（无文字层插页）走视觉。
 
 ## 最后更新
+- 2026-10-11 **新增 `aivision` 直连视觉 API 命令**（前序会话遗留改动补录入库）：一批内页级并发识图（--workers 4），绕开子代理并发上限=1 的串行瓶颈；API 三键从 kit 本地 apis.json 或 Agent Manager 档案库取（key 不打印不落库）；批完自动 check 质检。与子代理路线可混用，只处理 pending/failed 批。selftest 未覆盖（需真 API）。
+
 - 2026-10-11 **pull 多批台账覆盖 bug 修复**：cmd_pull 循环每轮 save 外层旧 manifest，cmd_check 内部另开副本标 done，下一轮 save 把上一批 done 覆盖回 assigned、figures 台账只剩最后一批（多批 pull 后 pack 拒绝、打包丢插图）。修法：cmd_check 增加可选共享台账参数，pull 传外层同一份在其上改状态。selftest 补"多批 pull 全部 done"回归断言（旧代码实测红、修复后绿），31 项断言 ALL PASS。
 
 - 2026-10-11 首建：bookocr-kit 全套 + selftest 全绿 + 60 页样本真实跑 + 模拟器抽图实机验证通过。
