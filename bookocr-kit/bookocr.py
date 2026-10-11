@@ -309,7 +309,8 @@ def cmd_pull(a: argparse.Namespace) -> None:
         b["status"] = "assigned"  # 防止 next 重派；由 pull 内部直接质检
         save_manifest(job, m)
         try:
-            cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min))
+            # 传共享台账：check 在外层 m 上标 done、重建图台账，循环内不产生状态回退
+            cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min), m=m)
             pulled.append(bid)
         except SystemExit:
             skipped.append((bid, "质检不过，看 check 输出（可 retry 后派视觉子代理）"))
@@ -331,9 +332,12 @@ def read_text(p: Path) -> str:
     return p.read_text(encoding="utf-8-sig") if p.exists() else ""
 
 
-def cmd_check(a: argparse.Namespace) -> None:
+def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
+    # m 可选共享台账：调用方（pull 循环）传入时直接在其上改状态并落盘，
+    # 避免内部另开副本、下一轮被调用方的旧台账把 done 覆盖回 assigned
     job = resolve_job(a.job)
-    m = load_manifest(job)
+    if m is None:
+        m = load_manifest(job)
     bid = normalize_bid(m, a.batch)
     b = m["batches"][bid]
     if b["status"] == "pending":

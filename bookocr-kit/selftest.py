@@ -174,8 +174,19 @@ def main() -> None:
     check("要约" in alltext and "第9页测试0" in alltext, "PDF 文字层可抽取、含正文")
     d.close()
 
+    print("== pull 文字层拔取（多批台账一致性回归） ==")
+    run(f"init _selftest_pull --src {src} --batch 4")
+    JOB2 = KIT / "jobs" / "_selftest_pull"
+    run("prep _selftest_pull")
+    run("pull _selftest_pull")
+    mp = json.loads((JOB2 / "manifest.json").read_text(encoding="utf-8"))
+    check(all(b["status"] == "done" for b in mp["batches"].values()),
+          "pull 一次拔完 3 批全部 done（状态不被下一轮循环覆盖回退）")
+    check("完成 3" in run("status _selftest_pull"), "pull 后 status 显示 3 批全完成")
+
     print("== 清理 ==")
     shutil.rmtree(JOB, ignore_errors=True)
+    shutil.rmtree(JOB2, ignore_errors=True)
     src.unlink(missing_ok=True)
     if FAILS:
         print(f"SELFTEST FAIL：{len(FAILS)} 项未过")
