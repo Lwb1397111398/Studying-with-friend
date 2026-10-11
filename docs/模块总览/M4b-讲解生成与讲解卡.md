@@ -80,3 +80,7 @@ test/.../M4bUiSmokeTest.kt      3 例（Compose 冒烟）
 - **AiGate 是全应用互斥纪律**：M5 章末总结包的 AI 任务必须同样经 aiGate.tryBegin/end + join 模式，StudyApp 注入共享 gate
 - **版本化缓存约定**：NOTE_VERSION="explain-note-v1"，prompt 语义变更必须升版本号触发全量重生成
 - **UI 测试教训**：Robolectric 小视口 + 新增工具条会挤占懒列表合成区，断言屏外内容先 performScrollToNode
+
+## 最后更新
+
+- 2026-10-11 **优化批次：讲解 2 路并发**——NotePlanner 串行改共享游标 worker 池×2（单元互不依赖；失败 CAS 取最小序号保"中断于第N条"语义，在途单元跑完落库；删旧插新包 withTransaction 防并发写裂）；prev/next 上下文 800→200 字（边界段最多发 3 遍，整章约 1/3 输入是重复 token）。测试：FakeChat 计数改原子（并发后真同时调用）、中断用例改按单元身份键（"context_prev":"正文0）。2 路并发下长章等待约砍半（端点限流约束下的保守值）。

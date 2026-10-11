@@ -104,6 +104,7 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 - **Runner/Planner 模式复用**：ChatJsonFn 构造注入 + StudyApp 单例 + StateFlow 五态 + 全局互斥——M4b 批量讲解队列沿用同一互斥纪律（讲解与粗读互斥或排队由 M4b 计划定）
 
 ## 最后更新
+- 2026-10-11 **优化批次：随手问流式节流**——QuickQaSheet 流式回答改 StringBuilder+100ms 节流刷新（原逐 delta 全文重拼 O(n²)+整卡重组+逐 delta 强制滚动，长回答越生成越卡）；发问前 KeyStore 解密/提示词加载挪 Dispatchers.IO（原主线程卡 10-100ms 量级）。
 
 - 2026-10-03 P5 章节树 UI：章目录页树形挂接（buildChapterTree/flattenTree+越界防御）、校准徽标、节行=目录锚（点击跳父章+findHighlightIndex 滚动定位）、FRONT/BACK 次级展示（ReadStyles.isSecondaryRole 展示与加工解耦）；新增 ChapterTree.kt/ReadStyles.kt，ChapterTreeTest 12 例+P5TreeUiSmokeTest 4 例+ReadStylesTest 3 例；E2E J1-J9 全过（详见 docs/plans/P5-章节树UI计划案.md）
 - 2026-10-04 P4-D 阅读页示意图混排（commit 795592e）：sealed ReadRow 段图混排（ordAfterPara 锚+ord=-1 三态+clamp）、FigureRow（aspectRatio 占位/limitedParallelism(2) IO 解码/按字节 LRU clamp[15,50MB]/失败双态「图片已丢失可重试·图片已损坏 Log.w」/seqNo 角标）、vision DONE 页命中 Log.w（donePageNosByBook）、全屏预览 Dialog 挂顶层独立解码用完即回收、TocConfirmScreen 图片提取明细展开区（figureNoteDetail）；ReadScreenRowsTest 9 例，全模块 572 绿。**已知取舍**：LRU 驱弃不 recycle（API≥26 像素在 Java 堆，recycle 与 Compose 引用竞态，isRecycled 读取守卫兜底）；失败态无断图图标（material-icons-extended 未引入，纯文案）；J3 走查随 J2 E2E 模拟器实测

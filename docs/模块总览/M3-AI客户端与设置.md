@@ -73,6 +73,7 @@ test/.../SettingsRepoTest.kt   9 用例（-presets 用例，+noteModel 往返与
 - 模型列表拉取复用 `AiClient.listModels(baseUrl, apiKey)`；VM 层照抄 ModelsViewModel.fetchModels 的目标解析模式即可加新角色。
 
 ## 最后更新
+- 2026-10-11 **优化批次**：AiBudgets 从单一输入预算扩为输出预算+超时集中地（OUTPUT_TOKENS_PLANNER=16000、粗读线性公式常量、视觉页 8000/判定 2000、连接/读超时五档）；NotePlanner/SummaryPlanner/OverviewPlanner/RoughReadPlanner/VisionTranscriber/TocVisionParser/AiClient 九处字面量收口引用。
 
 - 2026-10-11 模型页重构：新建 ModelsScreen/ModelsViewModel（Routes.MODELS），设置页瘦身（删快速填入与平铺视觉三组），AiClient.listModels，note_model 讲解模型角色接入 NotePlanner/RoughReadPlanner，测试 14+9。
 - 2026-10-05 P6b S5 模型下载入口；2026-10-01 M7 接入。
