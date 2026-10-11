@@ -6,6 +6,7 @@ import com.studyfriend.app.data.SettingsSnapshot
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.PromptLoader
 import com.studyfriend.app.data.db.ChapterEntity
@@ -259,7 +260,8 @@ class RoughReadPlanner(
             model = cfg.noteModel.ifBlank { cfg.model },
             temperature = 0.2,
             // 推理型模型的思考 token 计入 max_tokens：预算不足会被思考吃光、正文截断
-            maxTokens = (block.paragraphs.size * 130 + 600).coerceIn(16_384, 32_768),
+            maxTokens = (block.paragraphs.size * AiBudgets.ROUGH_READ_PER_PARA_TOKENS + AiBudgets.ROUGH_READ_BASE_TOKENS)
+                .coerceIn(AiBudgets.OUTPUT_TOKENS_ROUGH_MIN, AiBudgets.OUTPUT_TOKENS_ROUGH_MAX),
             messages = listOf(
                 AiMessage("system", filled),
                 AiMessage("user", paragraphsJson(block)),
@@ -326,7 +328,7 @@ class RoughReadPlanner(
                         baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
                         temperature = 0.2,
                         // 原值 800 会被推理模型的思考 token 吃光导致正文截断
-                        maxTokens = 16_384,
+                        maxTokens = AiBudgets.OUTPUT_TOKENS_ROUGH_MIN,
                         messages = listOf(
                             AiMessage("user", PromptLoader.load(context, PROMPT_MERGE) + contributions.joinToString("\n")),
                         ),

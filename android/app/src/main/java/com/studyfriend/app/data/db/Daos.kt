@@ -243,7 +243,10 @@ interface QuizAttemptDao {
     @Insert
     suspend fun insert(attempt: QuizAttemptEntity): Long
 
-    /** 错题本全量源（M6）：不过滤 verdict——"先错后对"的 CORRECT 行必须在场才能让题目出列（M6 计划 §2.3） */
+    /** 错题本源（M6 优化 v2）：SQL 内先取每 (chapterId,qIndex) 最新一条（createdAt 降序、
+     *  id 降序破平），作答历史不再整表过 JVM——quiz_attempts 随作答无限增长，不下推的话
+     *  错题本进页随历史变慢。verdict 过滤仍归 latestWrongAttempts（"先错后对"的 CORRECT
+     *  最新行必须在场才能让题目出列，M6 计划 §2.3） */
     @Query(
         """SELECT qa.id AS id, c.bookId AS bookId, qa.chapterId AS chapterId,
                c.title AS chapterTitle, b.title AS bookTitle, qa.qIndex AS qIndex,
@@ -251,9 +254,14 @@ interface QuizAttemptDao {
                qa.createdAt AS createdAt
         FROM quiz_attempts qa JOIN chapters c ON c.id = qa.chapterId
         JOIN books b ON b.id = c.bookId
+        WHERE qa.id = (
+            SELECT q2.id FROM quiz_attempts q2
+            WHERE q2.chapterId = qa.chapterId AND q2.qIndex = qa.qIndex
+            ORDER BY q2.createdAt DESC, q2.id DESC LIMIT 1
+        )
         ORDER BY qa.createdAt DESC""",
     )
-    suspend fun wrongAll(): List<WrongAttempt>
+    suspend fun wrongLatest(): List<WrongAttempt>
 }
 
 @Dao

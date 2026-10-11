@@ -275,7 +275,7 @@ class BookRepository(
     // ---- 做题 ----
     suspend fun attempts(chapterId: Long) = db.quizAttemptDao().byChapter(chapterId)
     suspend fun addAttempt(attempt: QuizAttemptEntity) = db.quizAttemptDao().insert(attempt)
-    // wrongAttempts 已删（M6）：错题本走 QuizAttemptDao.wrongAll + latestWrongAttempts 去重（M6 计划 §2.3）
+    // wrongAttempts 已删（M6）：错题本走 QuizAttemptDao.wrongLatest（SQL 取每题最新）+ latestWrongAttempts 过滤 WRONG
 
     // ---- 复习 ----
     /** now 在订阅时固化：角标不随时间自动刷新，进入书架/首页时需重新收集或用新 now 重查 */
@@ -283,7 +283,7 @@ class BookRepository(
     suspend fun dueReviews(now: Long) = db.reviewItemDao().dueList(now)
     fun dueListWithBookFlow(now: Long) = db.reviewItemDao().dueListWithBookFlow(now)
     fun dueCountByBookFlow(now: Long) = db.reviewItemDao().dueCountByBookFlow(now)
-    suspend fun wrongAll() = db.quizAttemptDao().wrongAll()
+    suspend fun wrongLatest() = db.quizAttemptDao().wrongLatest()
     suspend fun scheduleReviews(items: List<ReviewItemEntity>) = db.reviewItemDao().insertAll(items)
     suspend fun markReviewResult(id: Long, intervalIdx: Int, dueAt: Long, done: Boolean) =
         db.reviewItemDao().markResult(id, intervalIdx, dueAt, done)

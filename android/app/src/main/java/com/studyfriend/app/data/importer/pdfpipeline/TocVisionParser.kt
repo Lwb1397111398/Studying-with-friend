@@ -4,6 +4,7 @@ import android.util.Log
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.ai.ChatRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -202,7 +203,7 @@ class TocVisionParser(
         apiKey = apiKey,
         model = model,
         temperature = 0.1,
-        maxTokens = 8000,
+        maxTokens = AiBudgets.OUTPUT_TOKENS_VISION_PAGE,
         messages = listOf(
             AiMessage(role = "user", content = PROMPT, images = listOf("data:image/png;base64,$pngBase64")),
         ),

@@ -39,8 +39,8 @@ data class ChatRequest(
     val temperature: Double = 0.3,
     val maxTokens: Int? = null,
     val messages: List<AiMessage>,
-    /** 读超时（ms）：视觉转写单页要 60 秒级，这类长任务调大；默认 90s 供聊天/JSON */
-    val readTimeoutMs: Int = 90_000,
+    /** 读超时（ms）：视觉转写单页要 60 秒级，这类长任务调大；默认值见 [AiBudgets.READ_TIMEOUT_DEFAULT_MS] */
+    val readTimeoutMs: Int = AiBudgets.READ_TIMEOUT_DEFAULT_MS,
 )
 
 /**
@@ -77,8 +77,8 @@ object AiClient {
             }
             try {
                 conn.requestMethod = "GET"
-                conn.connectTimeout = 15_000
-                conn.readTimeout = 30_000
+                conn.connectTimeout = AiBudgets.CONNECT_TIMEOUT_MS
+                conn.readTimeout = AiBudgets.READ_TIMEOUT_MODEL_LIST_MS
                 conn.setRequestProperty("Authorization", "Bearer $apiKey")
                 conn.setRequestProperty("Accept", "application/json")
                 val code = conn.responseCode
@@ -145,7 +145,7 @@ object AiClient {
             }
             try {
                 conn.requestMethod = "POST"
-                conn.connectTimeout = 15_000
+                conn.connectTimeout = AiBudgets.CONNECT_TIMEOUT_MS
                 conn.readTimeout = req.readTimeoutMs
                 conn.doOutput = true
                 conn.setRequestProperty("Authorization", "Bearer ${req.apiKey}")

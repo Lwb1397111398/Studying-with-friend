@@ -5,6 +5,7 @@ import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.SettingsSnapshot
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.PromptLoader
 import com.studyfriend.app.data.db.ChapterEntity
@@ -208,7 +209,7 @@ class NotePlanner(
                     model = cfg.noteModel.ifBlank { cfg.model },
                     temperature = 0.5,
                     // 推理型模型的思考 token 计入 max_tokens：讲解卡主体长，预算须给足
-                    maxTokens = 16_000,
+                    maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,
                     messages = listOf(
                         AiMessage("system", systemPrompt),
                         AiMessage("user", userJson),

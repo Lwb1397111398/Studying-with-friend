@@ -218,7 +218,7 @@ private fun VerdictButtons(onVerdict: (ReviewVerdict) -> Unit) {
     }
 }
 
-// ---------- Tab 1：错题本（M5 契约 #1 落地：wrongAll 全量 → latestWrongAttempts 去重 → 按书分组） ----------
+// ---------- Tab 1：错题本（M5 契约 #1：wrongLatest SQL 取每题最新 → latestWrongAttempts 滤 WRONG → 按书分组） ----------
 
 /** 错题行展示数据：题干从该章资产 quizJson 按 qIndex 回查；资产缺失 missing=true（计划 §2.3 文案） */
 private data class WrongRow(
@@ -235,7 +235,7 @@ private data class WrongRow(
 )
 
 private suspend fun loadWrongRows(repo: BookRepository): List<WrongRow> {
-    val wrong = latestWrongAttempts(repo.wrongAll())
+    val wrong = latestWrongAttempts(repo.wrongLatest())
     if (wrong.isEmpty()) return emptyList()
     val assetCache = HashMap<Long, List<QuizQuestion>>()
     return wrong.map { w ->

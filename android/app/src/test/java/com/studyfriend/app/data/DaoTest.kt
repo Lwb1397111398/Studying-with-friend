@@ -172,22 +172,35 @@ class DaoTest {
     }
 
     @Test
-    fun wrongAll_joinsBookTitleForDedup() = runBlocking {
+    fun wrongLatest_takesNewestAttemptPerQuestion() = runBlocking {
         val db = db()
         try {
             val bookId = db.bookDao().insert(book())
             val chId = db.chapterDao().insertAll(listOf(chapter(bookId, 0)))[0]
             db.quizAttemptDao().insert(
-                QuizAttemptEntity(chapterId = chId, qIndex = 0, answer = "A", verdict = DbValues.VERDICT_CORRECT, feedback = null, createdAt = 1L),
+                QuizAttemptEntity(chapterId = chId, qIndex = 0, answer = "A旧", verdict = DbValues.VERDICT_WRONG, feedback = null, createdAt = 1L),
+            )
+            db.quizAttemptDao().insert(
+                QuizAttemptEntity(chapterId = chId, qIndex = 0, answer = "A新", verdict = DbValues.VERDICT_CORRECT, feedback = null, createdAt = 3L),
             )
             db.quizAttemptDao().insert(
                 QuizAttemptEntity(chapterId = chId, qIndex = 1, answer = "B", verdict = DbValues.VERDICT_WRONG, feedback = "再想想", createdAt = 2L),
             )
-            // M6：wrongAll 不过滤 verdict（去重契约靠 latestWrongAttempts 两步走），但必须 JOIN 出书名
-            val all = db.quizAttemptDao().wrongAll()
-            assertEquals(2, all.size)
-            assertEquals("民法典入门", all[0].bookTitle)
-            assertEquals("第0章", all[0].chapterTitle)
+            // 同题同毫秒平票 → id 降序破平（取后答的）
+            db.quizAttemptDao().insert(
+                QuizAttemptEntity(chapterId = chId, qIndex = 2, answer = "C旧", verdict = DbValues.VERDICT_WRONG, feedback = null, createdAt = 5L),
+            )
+            db.quizAttemptDao().insert(
+                QuizAttemptEntity(chapterId = chId, qIndex = 2, answer = "C新", verdict = DbValues.VERDICT_WRONG, feedback = null, createdAt = 5L),
+            )
+            // 每题只出最新一条；q0 最新是 CORRECT 也必须在场（"先错后对"出列判定归 Kotlin 侧），JOIN 出书名
+            val latest = db.quizAttemptDao().wrongLatest()
+            assertEquals(3, latest.size)
+            assertEquals("A新", latest.first { it.qIndex == 0 }.answer)
+            assertEquals(DbValues.VERDICT_CORRECT, latest.first { it.qIndex == 0 }.verdict)
+            assertEquals("民法典入门", latest.first { it.qIndex == 1 }.bookTitle)
+            assertEquals("第0章", latest.first { it.qIndex == 1 }.chapterTitle)
+            assertEquals("C新", latest.first { it.qIndex == 2 }.answer)
         } finally {
             db.close()
         }

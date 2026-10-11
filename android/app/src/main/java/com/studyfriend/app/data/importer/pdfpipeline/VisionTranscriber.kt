@@ -13,6 +13,7 @@ import kotlinx.serialization.json.putJsonArray
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
+import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.JsonSlicer
 
@@ -97,7 +98,7 @@ class VisionTranscriber(
             apiKey = apiKey,
             model = model,
             temperature = 0.1,
-            maxTokens = 8000,
+            maxTokens = AiBudgets.OUTPUT_TOKENS_VISION_PAGE,
             messages = listOf(
                 AiMessage(
                     role = "user",
@@ -105,7 +106,7 @@ class VisionTranscriber(
                     images = listOf("data:image/png;base64,$pngBase64"),
                 ),
             ),
-            readTimeoutMs = 180_000,
+            readTimeoutMs = AiBudgets.READ_TIMEOUT_VISION_MS,
         ),
     )
 
@@ -121,7 +122,7 @@ class VisionTranscriber(
                     apiKey = apiKey,
                     model = model,
                     temperature = 0.1,
-                    maxTokens = 2000,
+                    maxTokens = AiBudgets.OUTPUT_TOKENS_VISION_JUDGE,
                     messages = listOf(
                         AiMessage(
                             role = "user",
@@ -129,7 +130,7 @@ class VisionTranscriber(
                             images = listOf("data:image/png;base64,$pngBase64"),
                         ),
                     ),
-                    readTimeoutMs = 120_000,
+                    readTimeoutMs = AiBudgets.READ_TIMEOUT_VISION_JUDGE_MS,
                 ),
             )
         } catch (e: kotlinx.coroutines.CancellationException) {

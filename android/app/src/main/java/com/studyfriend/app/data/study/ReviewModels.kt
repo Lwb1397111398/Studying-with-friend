@@ -47,9 +47,10 @@ fun aggregateVerdict(verdicts: List<ReviewVerdict>): ReviewVerdict = when {
 // ---------- 错题本去重（M5 契约 #1 落地） ----------
 
 /**
- * 错题投影取最新再过滤（计划 M6 §2.3 两步走）：wrongAll() 返回全量作答历史
- * （SQL 不过滤 verdict，否则"先错后对"的 CORRECT 行被提前滤掉出不了列）；
- * 这里按 (chapterId, qIndex) 分组取 createdAt 最新一条，再只留 verdict=='WRONG'。
+ * 错题投影过滤（计划 M6 §2.3；v2 起取最新已下推到 SQL——wrongLatest 每题只出
+ * createdAt 最新一条，CORRECT 最新行照样在场）；本函数负责最后一步：只留
+ * verdict=='WRONG' 并按 书/章/题 排序。对已去重输入是纯过滤，对全量输入仍可
+ * 自行去重（保留分组取最新以维持纯函数测试契约）。
  */
 fun latestWrongAttempts(all: List<WrongAttempt>): List<WrongAttempt> = all
     .groupBy { it.chapterId to it.qIndex }
