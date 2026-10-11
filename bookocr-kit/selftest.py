@@ -85,6 +85,31 @@ def main() -> None:
     doc = fitz.open()
     tiny = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)  # 8x8 深色小图，供第 11 页嵌图
     tiny.set_rect(tiny.irect, (90, 90, 90))
+    # 第 4-8 页手工摆行造跨页缝合场景：(y, x, 文本)。x=72 顶格（续行）、x=94 缩进两字（新段首）
+    LINES = {
+        4: [(140, 94, "第4页测试一。当事人订立合同，应当具有相应的民事权利能力和民事行为能力。"),
+            (160, 72, "依法成立的合同，自成立时生效。"),
+            (180, 94, "本书设有问题及例题，尤其是采用请求")],       # 页末半句、无标点
+        5: [(140, 72, "权基础的案例，其目的在于引发思考方向。"),     # 顶格续行 → 应缝回第 4 页（跨批边界）
+            (160, 94, "第5页测试一。要约是希望与他人订立合同的意思表示，"),
+            (180, 72, "该意思表示应当符合下列规定。"),
+            (200, 94, "第5页测试二。承诺生效时合同成立，但是法律另有规定的除外。"),
+            (220, 72, "当事人另有约定的除外也不影响。")],
+        6: [(140, 94, "第6页测试一。承诺生效时合同成立，但是法律另有规定或者当事人另有约定的除外。"),  # 缩进 → 不缝
+            (160, 72, "要约邀请是希望他人向自己发出要约的表示。"),
+            (180, 94, "第6页测试二。拍卖公告、招标公告、招股说明书、债券募集办法、基金招募说明书。"),
+            (200, 72, "商业广告和宣传的内容符合要约条件的构成要约。")],
+        7: [(140, 94, "第7页测试一。要约以对话方式作出的，应当即时作出承诺。"),
+            (160, 72, "当事人对承诺方式没有约定的，应当即时作出承诺。"),
+            (180, 94, "第7页测试二。承诺应当在要约确定的期限内到达要约人。"),
+            (200, 72, "要约没有确定承诺期限的，承诺应当依照规定到达。"),
+            (220, 72, "第二章 跨页标题测试")],                        # 页末标题
+        8: [(140, 72, "标题下的正文续行内容。"),                     # 顶格但上页末是标题 → 不得缝进标题
+            (160, 94, "第8页测试一。承诺通知到达要约人时生效。"),
+            (180, 72, "承诺不需要通知的，根据交易习惯作出承诺的行为生效。"),
+            (200, 94, "第8页测试二。当事人订立合同，可以采取要约、承诺方式。"),
+            (220, 72, "其他方式订立合同的情形依照其规定处理。")],
+    }
     for i in range(12):
         page = doc.new_page()
         if i == 0:
@@ -100,6 +125,10 @@ def main() -> None:
             page.insert_image(fitz.Rect(page.rect.width * 0.1, page.rect.height * 0.1,
                                         page.rect.width * 0.9, page.rect.height * 0.9),
                               pixmap=tiny)
+            continue
+        if i + 1 in LINES:
+            for y, x, txt in LINES[i + 1]:
+                page.insert_text((x, y), txt, fontname="china-s", fontsize=11)
             continue
         page.insert_textbox(fitz.Rect(72, 140, page.rect.width - 72, page.rect.height - 90),
                             filler(i + 1, 6), fontname="china-s", fontsize=11)
@@ -186,11 +215,19 @@ def main() -> None:
     run(f"init _selftest_pull --src {src} --batch 4")
     JOB2 = KIT / "jobs" / "_selftest_pull"
     run("prep _selftest_pull")
-    run("pull _selftest_pull")
+    o = run("pull _selftest_pull")
     mp = json.loads((JOB2 / "manifest.json").read_text(encoding="utf-8"))
     check(all(b["status"] == "done" for b in mp["batches"].values()),
           "pull 一次拔完 3 批全部 done（状态不被下一轮循环覆盖回退）")
     check("完成 3" in run("status _selftest_pull"), "pull 后 status 显示 3 批全完成")
+    check("跨页缝合" in o, "pull 汇报跨页缝合数量")
+    b1txt = (JOB2 / "batches" / "b001.txt").read_text(encoding="utf-8")
+    b2txt = (JOB2 / "batches" / "b002.txt").read_text(encoding="utf-8")
+    check("尤其是采用请求权基础的案例，其目的在于引发思考方向。" in b1txt,
+          "跨页缝合：第4页末半句+第5页顶格续行拼回一句（跨批边界 b001|b002）")
+    check("权基础的案例" not in b2txt, "缝合后续行从下一页移除（不残留半句）")
+    check("除外也不影响。第6页测试一" not in b2txt, "下页首行缩进两字=新段首，不缝")
+    check("第二章 跨页标题测试标题下" not in b2txt, "上页末行是标题，下页首行不缝进标题")
     check(mp["batches"]["b003"]["thin_pages"] == [11], "纯图版页记入 thin_pages（不再整批跳过）")
     b3txt = (JOB2 / "batches" / "b003.txt").read_text(encoding="utf-8")
     check("〔图版页〕" in b3txt and "〔图：第11页图版〕" in b3txt, "图版页占位写入正文")

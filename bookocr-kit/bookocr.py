@@ -397,7 +397,11 @@ def cmd_aivision(a: argparse.Namespace) -> None:
 PNUM_RE = re.compile(r"^[\s·•.\-—]*\d{1,4}[\s·•.\-—]*$")
 
 def _page_lines(page: dict) -> list:
-    """把一页的 dict 结构摊平成行：[{text,size,x0,y0,x1,y1}]，按阅读序排好。"""
+    """把一页的 dict 结构摊平成行：[{text,size,x0,y0,x1,y1}]，按阅读序排好。
+
+    两端对齐的排版会把同一视觉行在西文词间大空隙处拆成多个 line 对象
+    （如「dingliche|Einigung」），按 y0 聚簇后把横向间隙小于 4 字号的碎片
+    拼回一行，否则缩进判据会把碎片当新段首。"""
     lines = []
     for blk in page.get("blocks", []):
         if blk.get("type") != 0:
@@ -413,12 +417,28 @@ def _page_lines(page: dict) -> list:
             x0, y0, x1, y1 = ln["bbox"]
             size = max(s["size"] for s in spans)
             lines.append({"text": text, "size": size, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
-    lines.sort(key=lambda l: (round(l["y0"], 1), l["x0"]))
-    return lines
+    lines.sort(key=lambda l: (l["y0"], l["x0"]))
+    merged: list = []
+    for l in lines:
+        if merged and abs(l["y0"] - merged[-1]["y0"]) <= 2.0:
+            g = merged[-1]
+            gap = l["x0"] - g["x1"]
+            if -g["size"] < gap < 4 * max(g["size"], l["size"]):
+                a, bx = g["text"][-1:], l["text"][:1]
+                sep = " " if a.isascii() and a.isalpha() and bx.isascii() and bx.isalpha() else ""
+                g["text"] += sep + l["text"]
+                g["x1"] = max(g["x1"], l["x1"])
+                g["size"] = max(g["size"], l["size"])
+                continue
+        merged.append(dict(l))
+    return merged
 
 
-def _pull_page(page, fitz) -> dict:
-    """拔一页：返回 {body_lines, notes, figs, chars}。页眉页脚/页码剔除，脚注按字号分区。
+def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = None) -> dict:
+    """拔一页：返回 {paras, notes, figs, chars, first/last 行属性}。页眉页脚/页码剔除，脚注按字号分区。
+
+    body_size/lines 可由 cmd_pull 全书预算后传入：页内小样本会被脚注/年表等
+    小字号块带偏主字号，致正文行被误判标题、脚注漏分区（全书主字号是稳定的）。
 
     职责声明（双端分段规则各自标定，勿互相"对齐"）：本函数阈值按**出版社级 PDF
     文字层**标定（字号/坐标来自内嵌字体度量，可靠），分钟级批量零 token；
@@ -426,15 +446,16 @@ def _pull_page(page, fitz) -> dict:
     （size=框高×0.68 有系统性偏差），判据更保守。两套数值差异数值表见
     docs/模块总览/M9-书籍识别台bookocr-kit.md「双端分段规则对照」。"""
     H = page.rect.height
-    raw = _page_lines(page.get_text("dict"))
+    raw = lines if lines is not None else _page_lines(page.get_text("dict"))
 
-    # 正文主字号：中带区按字数加权的众数
-    mid = [l for l in raw if 0.10 * H < l["y0"] < 0.85 * H]
-    tally: dict[float, int] = {}
-    for l in mid:
-        k = round(l["size"], 1)
-        tally[k] = tally.get(k, 0) + len(l["text"])
-    body_size = max(tally, key=tally.get) if tally else 12.0
+    # 正文主字号：中带区按字数加权的众数（未传全书值时按本页算）
+    if body_size is None:
+        mid = [l for l in raw if 0.10 * H < l["y0"] < 0.85 * H]
+        tally: dict[float, int] = {}
+        for l in mid:
+            k = round(l["size"], 1)
+            tally[k] = tally.get(k, 0) + len(l["text"])
+        body_size = max(tally, key=tally.get) if tally else 12.0
 
     body, notes = [], []
     for l in raw:
@@ -473,8 +494,19 @@ def _pull_page(page, fitz) -> dict:
                              "kind": "photo", "title": f"第{page.number + 1}页插图",
                              "desc": "原书嵌入插图（坐标按原 PDF 图块精确提取）"})
     chars = sum(len(re.sub(r"\s", "", p)) for p in paras)
+
+    # 跨页缝合依据：本页首/末行的缩进与标题属性（中文书段首缩进约两字、续行顶格）
+    def _is_head(l: dict) -> bool:
+        return bool(l["size"] >= body_size * 1.15 or CH_RE.match(l["text"]) or SEC_RE.match(l["text"]))
+
+    first, last = (body[0], body[-1]) if body else (None, None)
     return {"paras": paras, "notes": notes, "figs": figs, "chars": chars, "fig_area": sum(
-        (f["rect"][2] - f["rect"][0]) * (f["rect"][3] - f["rect"][1]) for f in figs)}
+        (f["rect"][2] - f["rect"][0]) * (f["rect"][3] - f["rect"][1]) for f in figs),
+        "first_x0": first["x0"] if first else None,
+        "first_size": first["size"] if first else None,
+        "first_is_head": _is_head(first) if first else True,
+        "last_is_head": _is_head(last) if last else True,
+        "page_left": left if body else None}
 
 
 def cmd_pull(a: argparse.Namespace) -> None:
@@ -486,9 +518,44 @@ def cmd_pull(a: argparse.Namespace) -> None:
     fitz = load_fit()
     doc = fitz.open(m["src_pdf"])
 
+    # 全书一次拔取：跨页缝合需要全书视野（批边界上的段落照样缝）
+    npages = len(m["pages"])
+    all_lines = {n: _page_lines(doc[n - 1].get_text("dict")) for n in range(1, npages + 1)}
+    # 全书正文主字号：跨页统计——页内小样本会被脚注/年表小字号带偏（实测 43 页误判）
+    tally: dict[float, int] = {}
+    for n in range(1, npages + 1):
+        ph = doc[n - 1].rect.height
+        for l in all_lines[n]:
+            if 0.10 * ph < l["y0"] < 0.85 * ph:
+                k = round(l["size"], 1)
+                tally[k] = tally.get(k, 0) + len(l["text"])
+    gbody = max(tally, key=tally.get) if tally else 12.0
+    all_pages = {n: _pull_page(doc[n - 1], fitz, body_size=gbody, lines=all_lines[n])
+                 for n in range(1, npages + 1)}
+    doc.close()
+
+    # 跨页缝合：中文书每段首行缩进约两字、续行顶格——下页首行顶格且非标题、
+    # 上页末行非标题时，把下页首段拼回上页末段（修「请求|权基础」式跨页断句）
+    gleft = min((d["page_left"] for d in all_pages.values() if d["page_left"] is not None),
+                default=0.0)
+    stitched = 0
+    for n in range(2, npages + 1):
+        prev, cur = all_pages[n - 1], all_pages[n]
+        if not prev["paras"] or not cur["paras"]:
+            continue  # 图版页/空白页不参与
+        if prev["last_is_head"] or cur["first_is_head"]:
+            continue
+        indent = (cur["first_x0"] - gleft) / (cur["first_size"] or 1)
+        if indent < 0.6:
+            tail, head = prev["paras"][-1][-1:], cur["paras"][0][:1]
+            sep = " " if tail.isascii() and tail.isalpha() and head.isascii() and head.isalpha() else ""
+            prev["paras"][-1] += sep + cur["paras"][0]
+            cur["paras"] = cur["paras"][1:]
+            stitched += 1
+
     pulled, thin_total = [], 0
     for bid, b in m["batches"].items():
-        pages_data = {n: _pull_page(doc[n - 1], fitz) for n in b["pages"]}
+        pages_data = {n: all_pages[n] for n in b["pages"]}
         # 页级路由：无文字但被大图占据的页 = 图版页，正文写占位、记 thin_pages 留给 patch 补描述；
         # 不再整批跳过——一批里混几页图版不再连累其余 9 页走视觉
         thin = sorted(n for n, d in pages_data.items()
@@ -521,8 +588,7 @@ def cmd_pull(a: argparse.Namespace) -> None:
             pulled.append(bid)
         except SystemExit:
             out(f"[!] {bid} 质检不过，看 check 输出（可 retry 后派视觉子代理/aivision）")
-    doc.close()
-    out(f"[ok] pull 完成：拔取 {len(pulled)}/{len(m['batches'])} 批，图版页 {thin_total} 页"
+    out(f"[ok] pull 完成：拔取 {len(pulled)}/{len(m['batches'])} 批，跨页缝合 {stitched} 处，图版页 {thin_total} 页"
         + (f"（python bookocr.py patch {a.job} 可派视觉补图版描述）" if thin_total else ""))
     if pulled:
         out("下一步：status 看进度；全 done 即可 pack")
