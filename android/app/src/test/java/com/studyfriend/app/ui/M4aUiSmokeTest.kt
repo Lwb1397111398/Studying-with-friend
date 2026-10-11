@@ -1,6 +1,7 @@
 package com.studyfriend.app.ui
 
-import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -121,11 +122,16 @@ class M4aUiSmokeTest {
             StudyFriendTheme { ReadScreen(chapterId = chapterId, onBack = {}) }
         }
         awaitText("普通段落正文") // 等 Room Flow 首发射、LazyColumn 合成，滚动容器才存在
-        // M5 总结入口按钮占纵向空间后初始视口放不下 SKIP 行：先滚动懒列表再断言
-        compose.onNode(hasScrollAction()).performScrollToNode(hasText("已跳过"))
+        // P7 工具行引入横向滚动后 hasScrollAction() 会双匹配：这里只认纵向滚动容器
+        compose.onNode(hasVerticalScrollAction()).performScrollToNode(hasText("已跳过"))
         awaitText("已跳过")
-        // M4b NoteBar 占纵向空间后 Robolectric 小视口放不下 4 行：滚动懒列表让 GROUP 行合成
-        compose.onNode(hasScrollAction()).performScrollToNode(hasText("合并讲"))
+        // P7 顶部收纳后纵向空间充裕，但 Robolectric 视口仍小：滚动懒列表让 GROUP 行合成
+        compose.onNode(hasVerticalScrollAction()).performScrollToNode(hasText("合并讲"))
         awaitText("合并讲")
+    }
+
+    /** 只匹配带纵向滚动轴的容器（P7 工具行的横向滚动不满足） */
+    private fun hasVerticalScrollAction() = SemanticsMatcher("vertical scroll") {
+        it.config.contains(SemanticsProperties.VerticalScrollAxisRange)
     }
 }

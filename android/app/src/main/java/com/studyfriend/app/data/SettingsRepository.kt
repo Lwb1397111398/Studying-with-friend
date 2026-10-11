@@ -182,6 +182,17 @@ class SettingsRepository(
         }
     }
 
+    // ---- 阅读字号（随手问轮 P7）：四档即选即存，坏值回退默认 ----
+
+    suspend fun readFontSize(): Int =
+        db.settingDao().get(KEY_READ_FONT_SIZE)?.value?.toIntOrNull()
+            ?.takeIf { it in READ_FONT_SIZES } ?: DEFAULT_READ_FONT_SIZE
+
+    suspend fun saveReadFontSize(size: Int) {
+        if (size !in READ_FONT_SIZES) return
+        db.settingDao().upsert(SettingEntity(KEY_READ_FONT_SIZE, size.toString()))
+    }
+
     // ---- 扫描书本地识别（P6b S4）：开关 / 用户反馈计数 / OCR 版本标记 ----
 
     /** OCR 开关即点即存（off = 扫描书走现状路径，OCR 产出缓存不删） */
@@ -365,6 +376,10 @@ class SettingsRepository(
         const val KEY_UPDATE_AUTO = "update_auto_check"
         const val KEY_UPDATE_LAST = "update_last_check_ms"
         const val KEY_UPDATE_API_BASE = "update_api_base"
+        // 阅读字号（阅读页「Aa」四档）
+        const val KEY_READ_FONT_SIZE = "read_font_size"
+        val READ_FONT_SIZES = listOf(16, 18, 20, 22)
+        const val DEFAULT_READ_FONT_SIZE = 18
         val DETAIL_LEVELS = listOf("简略", "标准", "深入")
         const val DEFAULT_BASE = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"

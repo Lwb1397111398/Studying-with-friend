@@ -111,7 +111,8 @@ class M4bUiSmokeTest {
     @Test
     fun notebar_showsGenerateWhenNoNotes() {
         setContent()
-        awaitText("让搭子讲解本章")
+        // P7 工具行收纳：讲解入口变成 chip（seed 1 个讲解单元 → 「讲解 1」）
+        awaitText("讲解 1")
         awaitText("重点段落") // 段落流正常渲染
     }
 
@@ -119,7 +120,6 @@ class M4bUiSmokeTest {
     fun notebar_showsAllGeneratedWithRegenerate() = runBlocking {
         seedValidNote()
         setContent()
-        awaitText("本章讲解已全部生成")
-        awaitText("重新生成")
+        awaitText("讲解 ✓") // 全部已生成态；「重新生成」入口在点击后的 force 确认弹窗
     }
 }
