@@ -6,6 +6,7 @@ bookocr — 扫描版 PDF → txt / 插图版 PDF 识别台（agent 驱动，操
 子命令：
   init   <书名> --src <PDF路径> [--batch 10] [--dpi 200] [--color]   建识别工程
   prep   <书名或工程路径>                                            渲染页图
+  pull   <书名或工程路径> [--min 100]                                文字层拔取：自带文字层的书免视觉识别（分钟级）
   next   <书名或工程路径>                                            领下一批（输出子代理任务卡）
   check  <书名或工程路径> <批号> [--force] [--min 100]               质检一批
   retry  <书名或工程路径> <批号|--all-failed>                        重置一批待重转
@@ -194,6 +195,130 @@ def cmd_next(a: argparse.Namespace) -> None:
     out(f"  脚注  {job / nxt['notes']}（每条一行；无脚注也写出空文件）")
     out(f"  真图  {job / nxt['figures']}（JSON 数组，格式见规范；无图写 []）")
     out(f"完成后只回报一行：{bid_of(m, nxt)} 完成 正文X字 脚注Y条 图Z张")
+
+
+# ---------------------------------------------------------------- pull（文字层拔取）
+
+PNUM_RE = re.compile(r"^[\s·•.\-—]*\d{1,4}[\s·•.\-—]*$")
+
+def _page_lines(page: dict) -> list:
+    """把一页的 dict 结构摊平成行：[{text,size,x0,y0,x1,y1}]，按阅读序排好。"""
+    lines = []
+    for blk in page.get("blocks", []):
+        if blk.get("type") != 0:
+            continue
+        for ln in blk.get("lines", []):
+            spans = [s for s in ln.get("spans", []) if s.get("text", "").strip()]
+            if not spans:
+                continue
+            spans.sort(key=lambda s: s["bbox"][0])
+            text = "".join(s["text"] for s in spans).strip()
+            if not text:
+                continue
+            x0, y0, x1, y1 = ln["bbox"]
+            size = max(s["size"] for s in spans)
+            lines.append({"text": text, "size": size, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
+    lines.sort(key=lambda l: (round(l["y0"], 1), l["x0"]))
+    return lines
+
+
+def _pull_page(page, fitz) -> dict:
+    """拔一页：返回 {body_lines, notes, figs, chars}。页眉页脚/页码剔除，脚注按字号分区。"""
+    H = page.rect.height
+    raw = _page_lines(page.get_text("dict"))
+
+    # 正文主字号：中带区按字数加权的众数
+    mid = [l for l in raw if 0.10 * H < l["y0"] < 0.85 * H]
+    tally: dict[float, int] = {}
+    for l in mid:
+        k = round(l["size"], 1)
+        tally[k] = tally.get(k, 0) + len(l["text"])
+    body_size = max(tally, key=tally.get) if tally else 12.0
+
+    body, notes = [], []
+    for l in raw:
+        y0n, y1n = l["y0"] / H, l["y1"] / H
+        if y1n <= 0.062 or y0n >= 0.958 or PNUM_RE.match(l["text"]) and (y1n <= 0.10 or y0n >= 0.90):
+            continue  # 页眉带/页脚带/孤立页码
+        if y0n > 0.72 and l["size"] < body_size * 0.88:
+            notes.append(l["text"])
+            continue
+        body.append(l)
+
+    # 段落重组：标题独立成行；正文行首缩进超 1.4 字号 = 新段
+    left = min((l["x0"] for l in body), default=0.0)
+    paras: list[str] = []
+    for l in body:
+        is_head = l["size"] >= body_size * 1.15 or CH_RE.match(l["text"]) or SEC_RE.match(l["text"])
+        new_para = is_head or (l["x0"] - left > body_size * 1.4) or not paras
+        if new_para or is_head:
+            paras.append(l["text"])
+        else:
+            paras[-1] += l["text"]
+
+    # 嵌入真图：按实际图块坐标登记（比目测准），整页水印图跳过
+    figs = []
+    for img in page.get_images(full=True):
+        try:
+            rects = page.get_image_rects(img[0])
+        except Exception:
+            continue
+        for r in rects:
+            area = (r.width * r.height) / (page.rect.width * page.rect.height)
+            if 0.015 < area < 0.85:
+                figs.append({"page": page.number + 1,
+                             "rect": [round(r.x0 / page.rect.width, 4), round(r.y0 / H, 4),
+                                      round(r.x1 / page.rect.width, 4), round(r.y1 / H, 4)],
+                             "kind": "photo", "title": f"第{page.number + 1}页插图",
+                             "desc": "原书嵌入插图（坐标按原 PDF 图块精确提取）"})
+    chars = sum(len(re.sub(r"\s", "", p)) for p in paras)
+    return {"paras": paras, "notes": notes, "figs": figs, "chars": chars, "fig_area": sum(
+        (f["rect"][2] - f["rect"][0]) * (f["rect"][3] - f["rect"][1]) for f in figs)}
+
+
+def cmd_pull(a: argparse.Namespace) -> None:
+    """对自带文字层的书：直接拔取文字层产出批文件，免视觉识别（分钟级、零幻觉）。"""
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    if not m["batches"]:
+        die("还没有批次，先跑 prep")
+    fitz = load_fit()
+    doc = fitz.open(m["src_pdf"])
+
+    pulled, skipped = [], []
+    for bid, b in m["batches"].items():
+        pages_data = {n: _pull_page(doc[n - 1], fitz) for n in b["pages"]}
+        # 有字但整页被图占据 → 疑似无文字层的扫描插页，整批留给视觉子代理
+        if any(d["chars"] == 0 and d["fig_area"] > 0.3 for d in pages_data.values()):
+            skipped.append((bid, "疑似无文字层插页，留给视觉"))
+            continue
+
+        parts, all_notes = [], []
+        figs = []
+        for n in b["pages"]:
+            d = pages_data[n]
+            parts.append(f"〔页{n}〕")
+            parts.extend(d["paras"] or ["〔空白页〕"])
+            parts.append("")  # 页间空行
+            all_notes.extend(d["notes"])
+            figs.extend(d["figs"])
+        (job / b["body"]).write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+        (job / b["notes"]).write_text("\n".join(all_notes) + ("\n" if all_notes else ""), encoding="utf-8")
+        (job / b["figures"]).write_text(json.dumps(figs, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+        b["status"] = "assigned"  # 防止 next 重派；由 pull 内部直接质检
+        save_manifest(job, m)
+        try:
+            cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min))
+            pulled.append(bid)
+        except SystemExit:
+            skipped.append((bid, "质检不过，看 check 输出（可 retry 后派视觉子代理）"))
+    doc.close()
+    out(f"[ok] pull 完成：拔取 {len(pulled)} 批，留视觉 {len(skipped)} 批")
+    for bid, why in skipped:
+        out(f"  · {bid}：{why}")
+    if pulled:
+        out("下一步：status 看进度；全 done 即可 pack")
 
 
 def bid_of(m: dict, batch: dict) -> str:
@@ -572,6 +697,12 @@ def main() -> None:
     p.add_argument("--force", action="store_true", help="豁免字数/占比判据（页对账永不豁免）")
     p.add_argument("--min", type=int, default=100, help="页均字数阈值")
     p.set_defaults(fn=cmd_check)
+
+    p = sub.add_parser("pull")
+    p.add_argument("job")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--min", type=int, default=100)
+    p.set_defaults(fn=cmd_pull)
 
     p = sub.add_parser("retry")
     p.add_argument("job")
