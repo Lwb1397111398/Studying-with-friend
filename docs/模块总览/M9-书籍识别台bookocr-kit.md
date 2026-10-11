@@ -28,7 +28,7 @@
 ## 入口文件清单
 
 - `bookocr-kit/bookocr.py` — 全部七个子命令（init/prep/next/check/retry/status/pack）
-- `bookocr-kit/spec.md` — 转写规范（子代理必读；「看不清按上下文编通顺」是老板拍板的口径）
+- `bookocr-kit/spec.md` — 转写规范（子代理必读；「看不清按上下文编通顺」是老板拍板的口径）+ **工作方式硬约束**（每张页图最多 Read 一次、禁止裁剪/放大/拼接衍生图、只读任务卡列出的页图、全批约 15 次工具调用内完成——实测整页直读相似度 0.98+ 不低于放大方案，违规=白烧额度）
 - `bookocr-kit/SKILL.md` — agent 操作手册（本机已注册 skill `scan-book`）
 - `bookocr-kit/README.md` — 新电脑三步安装
 - `bookocr-kit/selftest.py` — 回归自测（合成 12 页假书，24 项断言，换电脑即可跑）
