@@ -31,7 +31,8 @@ class OcrImportRunner(
     private val context: Context,
     private val uri: Uri,
     private val engine: OcrEngine,
-    private val onProgress: (page: Int, total: Int, etaMinutes: Int) -> Unit = { _, _, _ -> },
+    /** etaSeconds=预计剩余秒数（实测均速，<60s 时 UI 显「不到 1 分钟」） */
+    private val onProgress: (page: Int, total: Int, etaSeconds: Int) -> Unit = { _, _, _ -> },
     private val isCancelled: () -> Boolean = { false },
     /** AI 目视确认竖排（全本扫描疑似后触发）：返回各页「是否竖排」判定；null=视觉不可用（放行） */
     private val aiVerticalCheck: suspend (pageNos: List<Int>, render: (Int) -> String) -> List<Boolean>? =
@@ -42,8 +43,24 @@ class OcrImportRunner(
         /** 双引擎叠加 OOM 防护：同一时刻只允许一轮 OCR 导入 */
         val IMPORT_MUTEX = Mutex()
 
-        /** P6a 实测单页中位耗时（秒），ETA 估算基准 */
+        /** P6a 实测单页中位耗时（秒），ETA 在本会话未积累 3 页实测前用的静态基准。
+         *  2026-10-11 修：此前恒用此值算剩余时间，慢机上严重偏短（显示 9 分钟实际 30+），
+         *  老板按错误预期等待导致黑屏断连；现改为本会话实测均速（[etaSeconds]）。 */
         const val SECONDS_PER_PAGE = 1.24
+
+        /**
+         * Pass1 剩余时间估算（纯函数，单测锁定）：本会话已识别 ≥3 页用实测均速
+         * （elapsedMs ÷ doneThisSession），否则退回 [SECONDS_PER_PAGE] 静态基准。
+         * 分母必须用 doneThisSession（断点续跑恢复的页不耗时，计入会污染均速）。
+         */
+        internal fun etaSeconds(total: Int, page: Int, doneThisSession: Int, elapsedMs: Long): Int {
+            val perPageMs = if (doneThisSession >= 3) {
+                elapsedMs.toDouble() / doneThisSession
+            } else {
+                SECONDS_PER_PAGE * 1000
+            }
+            return ((total - page) * perPageMs / 1000).roundToInt()
+        }
 
         /** 估字号系数：行框高 × 0.68（rapidocr 实测正文行框高≈1.47×字号；生产引擎 det
          *  扩张口径不同，S7 E2E 以真书 docStats 众数校准。系数只作整体缩放，众数不受影响） */
@@ -219,6 +236,10 @@ class OcrImportRunner(
         // open/close 在同一执行器内成对（S4 质检自查补：close 在 finally，open 缺失会让
         // recognize 抛「未 open」——JVM 单测测不到引擎真实加载，S7 E2E 才暴露，此处堵死）
         engine.open(OcrModelStore.modelsDir(context))
+        // 断点续跑（黑屏杀进程防从头来）：懒清掉其他书旧目录，只留本书；取消/异常保留，
+        // 整轮成功收尾才清。落盘失败降级为「本次无续跑」，不阻断导入。
+        val resumeDir = OcrResumeStore.dirFor(context.filesDir, uri.toString())
+        OcrResumeStore.pruneOther(context.filesDir, resumeDir)
         PdfPageRenderer(context, uri).use { renderer ->
             val total = renderer.pageCount
             // ---- 竖排书两段式排除（引擎 open 前，纯渲染统计）----
@@ -231,10 +252,23 @@ class OcrImportRunner(
             var inferMs = 0L
             var postMs = 0L
             var ruleMs = 0L
+            var resumedPages = 0 // 续跑命中缓存页数（诊断可观测）
+            var doneThisSession = 0 // 本会话实际识别页数（ETA 均速分母，恢复页不计）
             val pagesOcrLines = ArrayList<List<OcrLine>>(total)
             val separatorYs = ArrayList<Float>(total)
             for (page in 1..total) {
                 if (isCancelled()) throw CancelledImportException()
+                val cached = OcrResumeStore.load(resumeDir, page)
+                if (cached != null) {
+                    pagesOcrLines.add(cached.first)
+                    separatorYs.add(cached.second)
+                    resumedPages++
+                    onProgress(
+                        page, total,
+                        etaSeconds(total, page, doneThisSession, System.currentTimeMillis() - pass1Start),
+                    )
+                    continue
+                }
                 var t = System.currentTimeMillis()
                 val bmp = renderer.renderPageBitmap(page - 1)
                 renderMs += System.currentTimeMillis() - t
@@ -260,13 +294,14 @@ class OcrImportRunner(
                     OcrTextPostProcessor.stripCitations(OcrTextPostProcessor.normalizePunct(inPt)),
                 )
                 postMs += System.currentTimeMillis() - t
-                val eta = ((total - page) * SECONDS_PER_PAGE / 60).roundToInt().coerceAtLeast(1)
-                onProgress(page, total, eta)
+                OcrResumeStore.save(resumeDir, page, pagesOcrLines.last(), separatorYs.last())
+                doneThisSession++
+                onProgress(page, total, etaSeconds(total, page, doneThisSession, System.currentTimeMillis() - pass1Start))
             }
             android.util.Log.w(
                 "OcrImport",
-                "Pass1 done: pages=$total renderMs=$renderMs inferMs=$inferMs postMs=$postMs " +
-                    "ruleMs=$ruleMs ruleYs=${separatorYs.count { !it.isNaN() }}",
+                "Pass1 done: pages=$total resumed=$resumedPages renderMs=$renderMs inferMs=$inferMs " +
+                    "postMs=$postMs ruleMs=$ruleMs ruleYs=${separatorYs.count { !it.isNaN() }}",
             )
 
             // ---- Pass2：docStats 主字号 → 规则 c/d/e → 页级分流 ----
@@ -292,6 +327,8 @@ class OcrImportRunner(
                     tallBoxLine(f.pageNo, box.first, box.second),
                 )
             }
+            // 整轮成功收尾：续跑缓存清掉（取消/异常路径保留，重导同一文件即续跑）
+            OcrResumeStore.clear(resumeDir)
             return Outcome(
                 pagesLines = p2.pagesLines,
                 dims = dims,

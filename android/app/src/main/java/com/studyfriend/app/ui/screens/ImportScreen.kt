@@ -67,6 +67,14 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
         if (uri != null) vm.loadFile(uri)
     }
 
+    // busy 期间屏幕常亮：扫描书识别可达几十分钟，黑屏后进程被系统冻结/杀掉，
+    // 导入只能从头重来（老板 2026-10-11 实测痛点）；离开导入页或导入结束自动解除
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(busy) {
+        if (busy) view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
+
     // 单列居中，平板上不无限拉宽（计划 §4：最大 720dp）
     Box(Modifier.fillMaxSize()) {
         Column(

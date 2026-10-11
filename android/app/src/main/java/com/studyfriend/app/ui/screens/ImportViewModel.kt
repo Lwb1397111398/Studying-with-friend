@@ -376,8 +376,11 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         phase = "本地文字识别"
         val outcome = OcrImportRunner(
             app, uri, PpOcrEngine(),
-            onProgress = { p, t, eta ->
-                phase = "本地文字识别 第 $p/$t 页（约剩 $eta 分钟）"
+            onProgress = { p, t, etaSeconds ->
+                // 实测均速 ETA（2026-10-11 修：原静态 1.24s/页在慢机上偏短数倍，老板按错误
+                // 预期等待黑屏断连）；<1 分钟直说，不给凑整的假分钟数
+                phase = "本地文字识别 第 $p/$t 页（" +
+                    if (etaSeconds >= 60) "约剩 ${etaSeconds / 60} 分钟）" else "不到 1 分钟）"
             },
             isCancelled = { cancelFlag.get() },
             aiVerticalCheck = ::aiVerticalCheck,
