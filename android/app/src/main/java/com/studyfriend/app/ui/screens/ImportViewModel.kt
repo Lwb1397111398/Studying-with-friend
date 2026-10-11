@@ -922,10 +922,23 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         parseNote = null
         phase = "解析章节结构"
         try {
-            val result = withContext(Dispatchers.Default) {
+            // 解析与锚点对账都是 CPU 密集（锚点要全书逐行正则扫描，几百页数秒级），一并放 Default
+            val (result, anchors) = withContext(Dispatchers.Default) {
                 // styleAware 与 assembleText 打标同源（isPdf）：PDF=true 认〔标题〕前缀并
                 // 启用字号门槛，TXT=false 完全保持 P2 行为
-                BookParser.parse(text, currentRegex, styleAware = isPdf)
+                val parsed = BookParser.parse(text, currentRegex, styleAware = isPdf)
+                // P6b S4 章节锚点对账（v1.2 P1-3）：行首「第X章」锚数 vs 检出章节数，
+                // 锚 ≥3 且检出 <70% 追加提示。点线行（目录条目）不计锚，行首锚定滤段中引用；
+                // OCR 拆行致锚少报 → 判据趋保守（少提示），UNMEASURED 待 S7 真书复核。
+                val anchorCount = if (ocrImported) {
+                    val anchorRe = Regex("^第[0-9零〇一二三四五六七八九十百千两]+章")
+                    val dots = Regex("[…⋯·•‧]")
+                    text.lineSequence()
+                        .map { it.trim() }
+                        .filter { anchorRe.containsMatchIn(it) && !dots.containsMatchIn(it) }
+                        .count()
+                } else 0
+                parsed to anchorCount
             }
             if (result.all { it.paras.isEmpty() }) {
                 error = "未能解析出任何内容，请检查文件"
@@ -950,17 +963,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             // P6b S4 章节锚点对账（v1.2 P1-3）：行首「第X章」锚数 vs 检出章节数，
             // 锚 ≥3 且检出 <70% 追加提示。点线行（目录条目）不计锚，行首锚定滤段中引用；
             // OCR 拆行致锚少报 → 判据趋保守（少提示），UNMEASURED 待 S7 真书复核。
-            if (ocrImported) {
-                val anchorRe = Regex("^第[0-9零〇一二三四五六七八九十百千两]+章")
-                val dots = Regex("[…⋯·•‧]")
-                val anchors = text.lineSequence()
-                    .map { it.trim() }
-                    .filter { anchorRe.containsMatchIn(it) && !dots.containsMatchIn(it) }
-                    .count()
-                if (anchors >= 3 && result.size < anchors * 0.7) {
-                    parseNote = (parseNote?.plus("；") ?: "") +
-                        "书中有 $anchors 处「第X章」字样但只解析出 ${result.size} 章，可到章节列表核对"
-                }
+            if (ocrImported && anchors >= 3 && result.size < anchors * 0.7) {
+                parseNote = (parseNote?.plus("；") ?: "") +
+                    "书中有 $anchors 处「第X章」字样但只解析出 ${result.size} 章，可到章节列表核对"
             }
         } catch (e: PatternSyntaxException) {
             error = "识别规则正则无效：${e.description ?: e.message ?: "语法错误"}"

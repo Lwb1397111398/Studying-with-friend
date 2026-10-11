@@ -31,17 +31,19 @@ class NotePlannerTest {
         StudyDatabase::class.java,
     ).allowMainThreadQueries().build()
 
-    /** 讲解假 chat：按调用序返回标签文本（v2 格式）或抛错 */
+    /** 讲解假 chat：按调用序返回标签文本（v2 格式）或抛错。
+     *  计数与请求记录须线程安全——单元 2 路并发后两条 lane 会真正同时调用 */
     private class FakeChat : ChatTextFn {
         var onNote: (callIndex: Int, req: ChatRequest) -> String = { _, _ ->
             throw AiException("意外的讲解调用")
         }
-        var noteCalls = 0
-        val requests = mutableListOf<ChatRequest>()
+        private val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val noteCalls: Int get() = calls.get()
+        val requests = java.util.concurrent.CopyOnWriteArrayList<ChatRequest>()
 
         override suspend fun invoke(req: ChatRequest, onDelta: (String) -> Unit): String {
             requests += req
-            return onNote(++noteCalls, req)
+            return onNote(calls.incrementAndGet(), req)
         }
     }
 
@@ -225,7 +227,12 @@ class NotePlannerTest {
     fun batch_interruptedKeepsDoneAndResumes() = runBlocking {
         val db = db()
         val fake = FakeChat()
-        fake.onNote = { call, _ -> if (call == 1) noteTagged() else throw AiException("超时") }
+        // 按单元身份失败：第 2 个单元是唯一带非空 context_prev（正文0…）的请求——
+        // 段落数组里的 "id" 是单元内序号（每单元从 0 起）认不了单元；调用序号在
+        // 2 路并发下也不确定，按序号键会 flaky
+        fake.onNote = { _, req ->
+            if (req.messages.last().content.contains("\"context_prev\":\"正文0")) throw AiException("超时") else noteTagged()
+        }
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null), Triple(1, "EXPLAIN", null)))
 
         val outcome = planner(db, fake).run(ch)
@@ -256,7 +263,8 @@ class NotePlannerTest {
         val outcome = planner(db, fake).run(ch)
 
         assertEquals(1, outcome.interruptedAtUnit)
-        assertEquals("401 不重试", 1, fake.noteCalls)
+        // 401 每单元只打 1 次（不重试）；2 路并发下两单元各打一次才观察到中断、即停
+        assertEquals(2, fake.noteCalls)
         db.close()
     }
 

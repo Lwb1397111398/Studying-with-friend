@@ -1067,6 +1067,9 @@ private fun NoteCard(note: ParaNoteEntity?, generating: Boolean) {
 
 // ==================== P7 随手问问答弹层 ====================
 
+/** 流式回答的打字机刷新间隔：攒增量至多每 100ms 刷一次状态，避免逐 delta 全卡重组 */
+private const val QA_STREAM_FLUSH_MS = 100L
+
 /**
  * 随手问底部问答卡（P7）：打开即按默认问题自动发问（词/句/段粒度由浮条决定），
  * 流式回答（打字机效果），下方输入框可追问（多轮，历史裁最近 10 轮）。
@@ -1100,15 +1103,23 @@ internal fun QuickQaSheet(
             noKey = false
             streaming = ""
             try {
-                val cfg = app.settingsRepo.load()
-                val key = app.settingsRepo.decryptKeyOrNull()
-                if (key == null) {
+                // KeyStore 解密（binder IPC）+ 首次读 assets 提示词是同步重活，别在主线程做
+                val prepared = withContext(Dispatchers.IO) {
+                    val cfg = app.settingsRepo.load()
+                    val key = app.settingsRepo.decryptKeyOrNull()
+                    if (key == null) null else Triple(cfg, key, PromptLoader.load(app, "quick_qa"))
+                }
+                if (prepared == null) {
                     noKey = true
                     streaming = null
                     return@launch
                 }
-                val systemPrompt = PromptLoader.load(app, "quick_qa")
-                val answer = AiClient.chat(
+                val (cfg, key, systemPrompt) = prepared
+                // 打字机节流：StringBuilder 攒增量，至多每 QA_STREAM_FLUSH_MS 刷一次状态。
+                // 逐 delta 全文重拼字符串是 O(n²) 拷贝且每个 delta 触发整卡重组+滚动，长回答越到后面越卡
+                val answer = StringBuilder()
+                var lastFlush = 0L
+                val result = AiClient.chat(
                     ChatRequest(
                         baseUrl = cfg.baseUrl,
                         apiKey = key,
@@ -1118,8 +1129,16 @@ internal fun QuickQaSheet(
                         maxTokens = 4000,
                         messages = QuickQa.messages(systemPrompt, ctx, history, question),
                     ),
-                ) { delta -> streaming += delta }
-                history = history + QuickQa.Turn(question, answer)
+                ) { delta ->
+                    answer.append(delta)
+                    val now = System.currentTimeMillis()
+                    if (now - lastFlush >= QA_STREAM_FLUSH_MS) {
+                        lastFlush = now
+                        streaming = answer.toString()
+                    }
+                }
+                streaming = answer.toString() // 收尾补刷：节流窗口内的尾部增量上屏
+                history = history + QuickQa.Turn(question, result)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

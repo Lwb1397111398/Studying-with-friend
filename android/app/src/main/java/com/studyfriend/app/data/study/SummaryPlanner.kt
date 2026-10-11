@@ -88,11 +88,17 @@ class SummaryPlanner(
             coroutineContext.ensureActive()
             val userJson = buildSummaryUserJson(chapter.title, chapter.gist, terms, paragraphs, noteByAnchorIdx) +
                 if (attempt > 1) "\n\n上次输出不符合五标签格式，请严格按标签格式重新输出全部五段" else ""
-            // 累计 partial 直通 UI（重试时归零重算），Streaming 视图据此增量渲染
+            // 累计 partial 直通 UI（重试时归零重算），Streaming 视图据此增量渲染；
+            // 按 STREAM_FLUSH_MS 节流发射，成功/失败态紧随其后无需尾部补刷
             val raw = StringBuilder()
+            var lastFlush = 0L
             val got = chatTextFn(summaryRequest(cfg, key, systemPrompt, userJson)) { delta ->
                 raw.append(delta)
-                onDelta(raw.toString())
+                val now = System.currentTimeMillis()
+                if (now - lastFlush >= STREAM_FLUSH_MS) {
+                    lastFlush = now
+                    onDelta(raw.toString())
+                }
             }
             bundle = TaggedBundleParser.parse(got)
             if (bundle != null) {

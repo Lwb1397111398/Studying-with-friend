@@ -189,6 +189,9 @@ class SummaryRunnerGateTest {
                 entered.complete(Unit)
                 return if (call == 1) {
                     onDelta("部分")
+                    // 流式按 STREAM_FLUSH_MS(100ms) 节流发射：同窗口内的增量会被合并，
+                    // 间隔拉开让两个 delta 各自成帧，"累计"语义才可观测
+                    delay(150)
                     onDelta("输出")
                     hold1.await()
                     "格式不对" // 第一次解析失败 → 触发重试
