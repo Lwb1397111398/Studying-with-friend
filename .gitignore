@@ -16,9 +16,16 @@ replay_pid*.log
 
 # 构建中间产物
 *.log
+__pycache__/
 
 # E2E 测试现场（截图/数据库快照，含设备数据，不入库）
 .e2e/
 
 # CodeGraph 本地索引缓存
 .codegraph/
+
+# bookocr-kit 识别工程（书稿内容不进仓库）
+bookocr-kit/jobs/
+
+# ZCode 会话本地产物（计划文件等）
+.zcode/
