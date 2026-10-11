@@ -30,3 +30,6 @@ bookocr-kit/jobs/
 # ZCode 会话本地产物（计划文件等）
 .zcode/
 bookocr-kit/_diag_*.py
+
+# 签名密钥不入库（GitHub secret 注入 CI；本地文件保留）
+android/keystore/app.keystore

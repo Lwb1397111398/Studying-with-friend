@@ -26,6 +26,19 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: 还原签名密钥（GitHub secret 注入；密钥本体已不入库）
+        working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            mkdir -p keystore
+            echo "$KEYSTORE_BASE64" | base64 -d > keystore/app.keystore
+            echo "签名密钥已还原"
+          else
+            echo "::warning::缺少 ANDROID_KEYSTORE_BASE64 secret，本次构建产物将未签名、不可安装"
+          fi
+
       - name: 构建 Release APK
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon
