@@ -4,10 +4,11 @@
 bookocr — 扫描版 PDF → txt / 插图版 PDF 识别台（agent 驱动，操作手册见 SKILL.md）
 
 子命令：
-  init   <书名> --src <PDF路径> [--batch 10] [--dpi 200] [--color]   建识别工程
-  prep   <书名或工程路径>                                            渲染页图
+  init   <书名> --src <PDF路径> [--batch 10] [--dpi 200] [--color]   建识别工程（直接建批，免渲染）
+  prep   <书名或工程路径> [--pages 521-530]                          渲染页图（可只渲染指定页）
   pull   <书名或工程路径> [--min 100]                                文字层拔取：自带文字层的书免视觉识别（分钟级）
   aivision <书名或工程路径> [--batch 批号] [--workers 4]              直连视觉 API 并发识图（绕开子代理并发限制，需 apis.json 或本机档案库）
+  patch  <书名或工程路径> [--batch 批号]                              图版页任务卡：派视觉只补这几页的图描述
   next   <书名或工程路径>                                            领下一批（输出子代理任务卡）
   check  <书名或工程路径> <批号> [--force] [--min 100]               质检一批
   retry  <书名或工程路径> <批号|--all-failed>                        重置一批待重转
@@ -118,57 +119,92 @@ def cmd_init(a: argparse.Namespace) -> None:
         "min_chars_per_page": 100,
         "spec": str(KIT / "spec.md"),
         "npages": npages,
-        "pages": [],       # [{no, image}]，prep 填充
-        "batches": {},     # b001 -> {pages, status, body, notes, figures, stats, fail_reason}
+        "pages": [{"no": i + 1, "image": f"images/{i + 1:04d}.png"} for i in range(npages)],
+        "rendered": [],    # 已渲染出 PNG 的页号（pull 不需要渲染；prep 填充）
+        "batches": {},     # bXXX -> {pages, status, body, notes, figures, stats, fail_reason, thin_pages}
         "figures": [],     # [{id, batch, page, rect, kind, title, desc, file}]
     }
-    save_manifest(job, m)
-    out(f"[ok] 工程 {job}")
-    out(f"     书名「{name}」 PDF {src}（{npages} 页） dpi={a.dpi} 每批 {a.batch} 页")
-    out("下一步：prep 渲染页图")
-
-
-# ---------------------------------------------------------------- prep
-
-def cmd_prep(a: argparse.Namespace) -> None:
-    job = resolve_job(a.job)
-    m = load_manifest(job)
-    if m["pages"]:
-        out(f"[ok] 已渲染过 {len(m['pages'])} 页，跳过（重复跑安全）")
-        return
-    fitz = load_fit()
-    doc = fitz.open(m["src_pdf"])
-    dpi, gray = m["dpi"], not m["color"]
-    pages = []
-    for i in range(doc.page_count):
-        page = doc[i]
-        pix = page.get_pixmap(dpi=dpi)
-        if gray and pix.colorspace and pix.colorspace.n > 1:
-            pix = fitz.Pixmap(fitz.csGRAY, pix)
-        img_rel = f"images/{i + 1:04d}.png"
-        pix.save(str(job / img_rel))
-        pages.append({"no": i + 1, "image": img_rel})
-        if (i + 1) % 20 == 0 or i + 1 == doc.page_count:
-            out(f"  渲染 {i + 1}/{doc.page_count}")
-    doc.close()
-
-    bs = m["batch_size"]
-    batches = {}
-    for bi, start in enumerate(range(0, len(pages), bs), 1):
-        grp = pages[start:start + bs]
-        batches[f"b{bi:03d}"] = {
-            "pages": [p["no"] for p in grp],
+    bs = a.batch
+    for bi, start in enumerate(range(0, npages, bs), 1):
+        grp = list(range(start + 1, min(start + bs, npages) + 1))
+        m["batches"][f"b{bi:03d}"] = {
+            "pages": grp,
             "status": "pending",  # pending→assigned→done/failed
             "body": f"batches/b{bi:03d}.txt",
             "notes": f"batches/b{bi:03d}_notes.txt",
             "figures": f"batches/b{bi:03d}_figures.json",
             "stats": None,
             "fail_reason": None,
+            "thin_pages": [],  # 疑似无文字层的图版页（patch 命令的视觉补描述对象）
         }
-    m["pages"], m["batches"] = pages, batches
     save_manifest(job, m)
-    out(f"[ok] 渲染 {len(pages)} 页 → 共 {len(batches)} 批（每批 {bs} 页）")
-    out("下一步：next 领批，派子代理识别（见 SKILL.md）")
+    out(f"[ok] 工程 {job}")
+    out(f"     书名「{name}」 PDF {src}（{npages} 页） dpi={a.dpi} 每批 {bs} 页 → 共 {len(m['batches'])} 批")
+    out("下一步：先 pull 试试文字层拔取（分钟级）；拔不动再 prep 渲染页图走视觉")
+
+
+# ---------------------------------------------------------------- prep
+
+def _parse_pages_arg(s: str, npages: int) -> list[int]:
+    """解析 '521-530,12' 形式的页参数为页号列表。"""
+    out_pages: list[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            lo, hi = int(lo), int(hi)
+            if not (1 <= lo <= hi <= npages):
+                die(f"页范围不合法：{part}（全书 {npages} 页）")
+            out_pages.extend(range(lo, hi + 1))
+        else:
+            n = int(part)
+            if not (1 <= n <= npages):
+                die(f"页号不合法：{part}（全书 {npages} 页）")
+            out_pages.append(n)
+    return sorted(set(out_pages))
+
+
+def cmd_prep(a: argparse.Namespace) -> None:
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    fitz = load_fit()
+    doc = fitz.open(m["src_pdf"])
+    if not m["pages"]:  # 旧版工程兼容：init 未填页清单时补齐
+        m["pages"] = [{"no": i + 1, "image": f"images/{i + 1:04d}.png"} for i in range(doc.page_count)]
+    if not m["batches"]:  # 旧版工程兼容：init 未建批时补建
+        bs = m["batch_size"]
+        for bi, start in enumerate(range(0, len(m["pages"]), bs), 1):
+            grp = list(range(start + 1, min(start + bs, len(m["pages"])) + 1))
+            m["batches"][f"b{bi:03d}"] = {
+                "pages": grp, "status": "pending",
+                "body": f"batches/b{bi:03d}.txt", "notes": f"batches/b{bi:03d}_notes.txt",
+                "figures": f"batches/b{bi:03d}_figures.json", "stats": None,
+                "fail_reason": None, "thin_pages": [],
+            }
+    m.setdefault("rendered", [])
+
+    want = _parse_pages_arg(a.pages, len(m["pages"])) if a.pages else list(range(1, len(m["pages"]) + 1))
+    todo = [n for n in want if n not in m["rendered"]]
+    if not todo:
+        save_manifest(job, m)
+        out(f"[ok] 目标 {len(want)} 页均已渲染过，跳过（重复跑安全）")
+        return
+    dpi, gray = m["dpi"], not m["color"]
+    for k, n in enumerate(todo, 1):
+        page = doc[n - 1]
+        pix = page.get_pixmap(dpi=dpi)
+        if gray and pix.colorspace and pix.colorspace.n > 1:
+            pix = fitz.Pixmap(fitz.csGRAY, pix)
+        pix.save(str(job / m["pages"][n - 1]["image"]))
+        m["rendered"].append(n)
+        if k % 20 == 0 or k == len(todo):
+            out(f"  渲染 {k}/{len(todo)}")
+    doc.close()
+    save_manifest(job, m)
+    out(f"[ok] 本次渲染 {len(todo)} 页（累计 {len(m['rendered'])}/{len(m['pages'])}）")
+    out("下一步：pull 若已全 done 可直接 pack；否则 next 领批/aivision/patch 走视觉")
 
 
 # ---------------------------------------------------------------- next
@@ -183,6 +219,10 @@ def cmd_next(a: argparse.Namespace) -> None:
         bad = [b for b in m["batches"].values() if b["status"] == "failed"]
         out("[ok] 没有待领的批了。" + (f"有 {len(bad)} 批失败待处理（retry 或人工看）。" if bad else "全部完成可 pack。"))
         return
+    unrendered = [n for n in nxt["pages"] if n not in (m.get("rendered") or [])]
+    if unrendered:
+        die(f"页图未渲染 {unrendered[:5]}{'…' if len(unrendered) > 5 else ''}，"
+            f"先跑：python bookocr.py prep {a.job} --pages {unrendered[0]}-{unrendered[-1]}")
     nxt["status"] = "assigned"
     save_manifest(job, m)
 
@@ -288,8 +328,8 @@ def cmd_aivision(a: argparse.Namespace) -> None:
     import concurrent.futures as futures
     job = resolve_job(a.job)
     m = load_manifest(job)
-    if not m["pages"]:
-        die("还没有页图，先跑 prep（aivision 吃的是 images/ 下的 PNG）")
+    if not m["batches"]:
+        die("还没有批次，先跑 init")
     base, key, model = _load_vision_api()
     spec = (KIT / "spec.md").read_text(encoding="utf-8")
 
@@ -304,6 +344,10 @@ def cmd_aivision(a: argparse.Namespace) -> None:
 
     for bid in targets:
         b = m["batches"][bid]
+        unrendered = [n for n in b["pages"] if n not in (m.get("rendered") or [])]
+        if unrendered:
+            out(f"[!] {bid} 页图未渲染 {unrendered[:5]}，跳过（先 prep --pages {unrendered[0]}-{unrendered[-1]}）")
+            continue
         jobs = {n: job / m["pages"][n - 1]["image"] for n in b["pages"]}
         results: dict[int, str] = {}
         fails: list[int] = []
@@ -374,7 +418,13 @@ def _page_lines(page: dict) -> list:
 
 
 def _pull_page(page, fitz) -> dict:
-    """拔一页：返回 {body_lines, notes, figs, chars}。页眉页脚/页码剔除，脚注按字号分区。"""
+    """拔一页：返回 {body_lines, notes, figs, chars}。页眉页脚/页码剔除，脚注按字号分区。
+
+    职责声明（双端分段规则各自标定，勿互相"对齐"）：本函数阈值按**出版社级 PDF
+    文字层**标定（字号/坐标来自内嵌字体度量，可靠），分钟级批量零 token；
+    App 侧 PdfCleaner/ParagraphAssembler 面向手机导入、要同时伺候 OCR 行
+    （size=框高×0.68 有系统性偏差），判据更保守。两套数值差异数值表见
+    docs/模块总览/M9-书籍识别台bookocr-kit.md「双端分段规则对照」。"""
     H = page.rect.height
     raw = _page_lines(page.get_text("dict"))
 
@@ -436,20 +486,24 @@ def cmd_pull(a: argparse.Namespace) -> None:
     fitz = load_fit()
     doc = fitz.open(m["src_pdf"])
 
-    pulled, skipped = [], []
+    pulled, thin_total = [], 0
     for bid, b in m["batches"].items():
         pages_data = {n: _pull_page(doc[n - 1], fitz) for n in b["pages"]}
-        # 有字但整页被图占据 → 疑似无文字层的扫描插页，整批留给视觉子代理
-        if any(d["chars"] == 0 and d["fig_area"] > 0.3 for d in pages_data.values()):
-            skipped.append((bid, "疑似无文字层插页，留给视觉"))
-            continue
+        # 页级路由：无文字但被大图占据的页 = 图版页，正文写占位、记 thin_pages 留给 patch 补描述；
+        # 不再整批跳过——一批里混几页图版不再连累其余 9 页走视觉
+        thin = sorted(n for n, d in pages_data.items()
+                      if d["chars"] == 0 and d["fig_area"] > 0.3)
 
         parts, all_notes = [], []
         figs = []
         for n in b["pages"]:
             d = pages_data[n]
             parts.append(f"〔页{n}〕")
-            parts.extend(d["paras"] or ["〔空白页〕"])
+            if n in thin:
+                parts.append(f"〔图：第{n}页图版〕")
+                parts.append("〔图版页〕")
+            else:
+                parts.extend(d["paras"] or ["〔空白页〕"])
             parts.append("")  # 页间空行
             all_notes.extend(d["notes"])
             figs.extend(d["figs"])
@@ -458,19 +512,65 @@ def cmd_pull(a: argparse.Namespace) -> None:
         (job / b["figures"]).write_text(json.dumps(figs, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
         b["status"] = "assigned"  # 防止 next 重派；由 pull 内部直接质检
+        b["thin_pages"] = thin
+        thin_total += len(thin)
         save_manifest(job, m)
         try:
             # 传共享台账：check 在外层 m 上标 done、重建图台账，循环内不产生状态回退
             cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min), m=m)
             pulled.append(bid)
         except SystemExit:
-            skipped.append((bid, "质检不过，看 check 输出（可 retry 后派视觉子代理）"))
+            out(f"[!] {bid} 质检不过，看 check 输出（可 retry 后派视觉子代理/aivision）")
     doc.close()
-    out(f"[ok] pull 完成：拔取 {len(pulled)} 批，留视觉 {len(skipped)} 批")
-    for bid, why in skipped:
-        out(f"  · {bid}：{why}")
+    out(f"[ok] pull 完成：拔取 {len(pulled)}/{len(m['batches'])} 批，图版页 {thin_total} 页"
+        + (f"（python bookocr.py patch {a.job} 可派视觉补图版描述）" if thin_total else ""))
     if pulled:
         out("下一步：status 看进度；全 done 即可 pack")
+
+
+# ---------------------------------------------------------------- patch（图版页视觉补描述）
+
+def cmd_patch(a: argparse.Namespace) -> None:
+    """对 pull 记录的 thin_pages（图版页）派视觉补描述：只读这几页图，替换占位段落。"""
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    if not m["pages"] or len(m.get("rendered") or []) < len(m["pages"]):
+        need = sorted({n for b in m["batches"].values() for n in b.get("thin_pages", [])
+                       if n not in (m.get("rendered") or [])})
+        if need:
+            out(f"[!] 有图版页还没渲染页图：{need[:8]}{'…' if len(need) > 8 else ''}")
+            out(f"    先跑：python bookocr.py prep {a.job} --pages {need[0]}-{need[-1]}")
+            if not m["pages"]:
+                return
+    targets = {bid: list(b.get("thin_pages") or []) for bid, b in m["batches"].items()
+               if b.get("thin_pages")}
+    if a.batch:
+        bid = normalize_bid(m, a.batch)
+        targets = {bid: targets[bid]} if bid in targets else {}
+    if not targets:
+        out("[ok] 没有待补描述的图版页（thin_pages 为空）")
+        return
+    for bid, pages in targets.items():
+        b = m["batches"][bid]
+        unrendered = [n for n in pages if n not in (m.get("rendered") or [])]
+        if unrendered:
+            out(f"[!] 批 {bid} 图版页页图未渲染：{unrendered}（不发任务卡）")
+            out(f"    先跑：python bookocr.py prep {a.job} --pages {unrendered[0]}-{unrendered[-1]}，"
+                "渲染完重跑 patch")
+            continue
+        imgs = "\n".join(f"  {job / m['pages'][n - 1]['image']}" for n in pages)
+        out(f"批 {bid} 图版页 {pages}（共 {len(pages)} 页）")
+        out(f"转写规范（必读，先 Read 它）：{m['spec']}")
+        out(f"图片（按页序）：\n{imgs}")
+        out("任务（用 Edit 工具改文件，描述文字绝不贴进对话）：")
+        out(f"  正文  {job / b['body']}——每页把「〔页N〕\\n〔图：第N页图版〕\\n〔图版页〕」三行中的「〔图版页〕」"
+            f"替换为你从图里看出的内容描述（一两句，如「影印照片：×××手稿首页」）；〔图：…〕行保留不动")
+        out(f"  真图  {job / b['figures']}——Read 现有 JSON，为每页补一条本页图记录（rect 按整页画面估比例，"
+            "title 用图版说明文字，desc 一两句），保留已有记录，Write 回去")
+        out(f"写完自查后只回报一行：{bid} patch 完成 页X字 图Y条")
+        b["thin_pages"] = []  # 任务卡已发出，避免重复派
+    save_manifest(job, m)
+    out(f"派完后对每批跑：python bookocr.py check {a.job} <批号> --force（图版页字数天然少）")
 
 
 def bid_of(m: dict, batch: dict) -> str:
@@ -840,7 +940,13 @@ def main() -> None:
 
     p = sub.add_parser("prep")
     p.add_argument("job")
+    p.add_argument("--pages", default=None, help="只渲染指定页，如 521-530 或 12,521-530（缺省=全书）")
     p.set_defaults(fn=cmd_prep)
+
+    p = sub.add_parser("patch")
+    p.add_argument("job")
+    p.add_argument("--batch", default=None, help="只处理指定批（缺省=所有含图版页的批）")
+    p.set_defaults(fn=cmd_patch)
 
     p = sub.add_parser("next")
     p.add_argument("job")
