@@ -30,6 +30,7 @@ import com.studyfriend.app.data.importer.PdfLoader
 import com.studyfriend.app.data.importer.PdfPageRenderer
 import com.studyfriend.app.BuildConfig
 import com.studyfriend.app.data.importer.TextLoader
+import com.studyfriend.app.data.importer.ocr.OcrDiagnostics
 import com.studyfriend.app.data.importer.ocr.OcrImportRunner
 import com.studyfriend.app.data.importer.ocr.OcrModelStore
 import com.studyfriend.app.data.importer.ocr.PpOcrEngine
@@ -56,11 +57,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.add
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 /** 目录探针状态机（P3b-2 §3.5）：Idle=未开始/已清空，Running=视觉识别中，Done=过守卫的
  *  目录条目全集（等价原非 null），Failed=无 tocLike/视觉未配置/识别失败/异常（等价原 null）。 */
@@ -429,108 +425,40 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * OCR 质量备注（v1.4 P2-1 漂移两级告警 + v1.2 P1-1 字数偏差代理）；null=无可提示。
-     * 置信度告警：兜底页（0f）剔除后页均置信度 median <0.85 硬告警（建议关 OCR）/
-     * <0.90 预警；字数偏差：|页字数−中位|/中位 >60% 的页占比 >10% → 提示可能识别不完整。
+     * OCR 质量备注委托 [OcrDiagnostics.qualityNote]（v1.4 P2-1 漂移两级告警 + v1.2 P1-1
+     * 字数偏差代理）；null=无可提示。字数口径：每页正文段字符总数。
      */
     private fun buildOcrQualityNote(
         outcome: OcrImportRunner.Outcome,
         result: PdfExtractResult,
-    ): String? {
-        val parts = mutableListOf<String>()
-        val confs = outcome.pageMeanConfs.filter { it > 0f }
-        if (confs.size >= 5) {
-            val median = confs.sorted()[confs.size / 2]
-            val pct = "%.2f".format(median)
-            if (median < OcrImportRunner.PageGate.CONF_THRESHOLD) {
-                parts.add("全书识别质量偏低（平均置信度 $pct），建议检查扫描件清晰度，" +
-                    "或在设置中关闭「扫描书本地识别」")
-            } else if (median < 0.90f) {
-                parts.add("识别质量略低（平均置信度 $pct），建议导入后抽查几页阅读效果")
-            }
-        }
-        val charCounts = result.pages.map { p -> p.paras.sumOf { it.text.length } }.filter { it > 0 }
-        if (charCounts.size >= 5) {
-            val med = charCounts.sorted()[charCounts.size / 2].toFloat()
-            if (med > 0f) {
-                val odd = charCounts.count { kotlin.math.abs(it - med) / med > 0.6f }
-                if (odd > charCounts.size * 0.10) {
-                    parts.add("$odd 页文字量明显偏离全书水平，可能识别不完整")
-                }
-            }
-        }
-        return parts.joinToString("；").ifEmpty { null }
-    }
+    ): String? = OcrDiagnostics.qualityNote(
+        pageMeanConfs = outcome.pageMeanConfs,
+        pageCharCounts = result.pages.map { p -> p.paras.sumOf { it.text.length } },
+    )
 
     /**
-     * 离线校验快照（v1.3 P1-2）：固定种子（bookTitle.hashCode）从有内容的页里抽 1-2 页，
-     * 落盘 filesDir/ocr_verify/<bookKey>/snapshot.json（页码+文本+行级置信度），首月每两周
-     * 人工抽查对照原书，监控识别漂移；滚动保留最近 2 本。任何失败只记 log 不影响导入。
+     * 离线校验快照（v1.3 P1-2）：委托 [OcrDiagnostics.writeVerifySnapshot]，固定种子抽页
+     * 落盘 filesDir/ocr_verify/<bookKey>/snapshot.json，滚动保留最近 2 本；失败只记 log。
      */
     private fun writeOcrVerifySnapshot(outcome: OcrImportRunner.Outcome) {
-        try {
-            val ctx = getApplication<StudyApp>()
-            val dir = File(ctx.filesDir, "ocr_verify/${ocrBookKey()}")
-            dir.mkdirs()
-            val candidates = outcome.pagesLines.withIndex().filter { (_, ls) -> ls.isNotEmpty() }
-            if (candidates.isEmpty()) return
-            val rng = java.util.Random(bookTitle.hashCode().toLong())
-            val count = if (outcome.pagesLines.size >= 100) 2 else 1
-            val picked = List(count) { candidates[rng.nextInt(candidates.size)] }.distinctBy { it.index }
-            val json = buildJsonObject {
-                put("bookTitle", bookTitle)
-                put("savedAt", System.currentTimeMillis())
-                put("pageCount", outcome.pagesLines.size)
-                put("pages", buildJsonArray {
-                    picked.forEach { (idx, lines) ->
-                        add(buildJsonObject {
-                            put("page", idx + 1)
-                            put("lineCount", lines.size)
-                            put("confs", buildJsonArray {
-                                // 防御取值：Outcome 构造已 require 四方同长，此处再兜一层
-                                outcome.pageLineConfs.getOrNull(idx)?.forEach { add(JsonPrimitive(it)) }
-                            })
-                            put("text", lines.joinToString("\n") { it.text })
-                        })
-                    }
-                })
-            }
-            File(dir, "snapshot.json").writeText(json.toString())
-            File(ctx.filesDir, "ocr_verify").listFiles()
-                ?.filter { it.isDirectory }
-                ?.sortedBy { it.lastModified() }
-                ?.dropLast(2)
-                ?.forEach { it.deleteRecursively() }
-        } catch (e: Exception) {
-            Log.w("P6b", "ocr verify snapshot: ${e.message}")
-        }
+        OcrDiagnostics.writeVerifySnapshot(getApplication<StudyApp>().filesDir, bookTitle, outcome)
     }
 
     /**
      * Debug 抽样（v1.1 P1-4）：仅 DEBUG 构建（编译期常量短路 + R8 死代码消除，release
-     * 无此路径也无 ocr_debug 目录）。每 20 页抽 1 页：页面 PNG + 识别文本成对落盘
-     * filesDir/ocr_debug/<bookKey>/，S7/S8 人工核查识别质量用。
-     * 兜底页草稿全量落盘（d<页号>.txt：行文本+行尾 tab+置信度 3 位）——置信度-质量
-     * 分层标定（P6b 落地报告 §7 画线）的数据源，过闸页草稿不入库故只落兜底页。
+     * 无此路径也无 ocr_debug 目录）。草稿落盘委托 [OcrDiagnostics.writeFallbackDrafts]；
+     * 每 20 页抽 1 页：页面 PNG + 识别文本成对落盘 filesDir/ocr_debug/<bookKey>/，
+     * S7/S8 人工核查识别质量用（页图渲染依赖 PdfPageRenderer，留在此处编排）。
      */
     private fun writeOcrDebugSample(uri: Uri, outcome: OcrImportRunner.Outcome) {
         if (!BuildConfig.DEBUG) return
         try {
             val ctx = getApplication<StudyApp>()
-            val dir = File(ctx.filesDir, "ocr_debug/${ocrBookKey()}")
+            val dir = File(ctx.filesDir, "ocr_debug/${OcrDiagnostics.bookKey(bookTitle)}")
             dir.mkdirs()
-            outcome.fallbackPages.forEach { fb ->
-                val lines = outcome.pageDrafts.getOrNull(fb.pageNo - 1).orEmpty()
-                // 行文本只作 %s 参数不作模板（OCR 文本含 % 会炸 UnknownFormatConversion，
-                // 实录：d094 附近「%车」致中断，p 抽样一并跳过）；单页失败不拖垮其余落盘
-                runCatching {
-                    File(dir, "d%03d.txt".format(fb.pageNo)).writeText(
-                        lines.joinToString("\n") { "%s\t%.3f".format(it.text, it.confidence) },
-                    )
-                }.onFailure { Log.w("P6b", "draft p${fb.pageNo}: ${it.message}") }
-            }
+            OcrDiagnostics.writeFallbackDrafts(dir, outcome)
             PdfPageRenderer(ctx, uri).use { renderer ->
-                for (p in 1..outcome.pagesLines.size step 20) {
+                for (p in OcrDiagnostics.samplePageNos(outcome.pagesLines.size)) {
                     val bmp = renderer.renderPageBitmap(p - 1)
                     try {
                         File(dir, "p%03d.png".format(p)).outputStream().use { out ->
@@ -548,10 +476,6 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             Log.w("P6b", "ocr debug sample: ${e.message}")
         }
     }
-
-    /** 书名 → 快照/抽样目录名：非法字符压下划线，截 40 字，空名兜底 "book" */
-    private fun ocrBookKey(): String =
-        bookTitle.replace(Regex("[^\\u4e00-\\u9fffA-Za-z0-9]"), "_").take(40).ifBlank { "book" }
 
     /**
      * 视觉兜底主流程（OPT-F 起，双路）：
