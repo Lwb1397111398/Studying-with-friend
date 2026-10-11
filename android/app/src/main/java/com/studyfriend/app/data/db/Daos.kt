@@ -323,6 +323,11 @@ interface VisionQueueDao {
     @Query("SELECT DISTINCT bookId FROM vision_queue WHERE status = 'PENDING'")
     suspend fun booksWithPending(): List<Long>
 
+    /** FAILED 定格页重置回 PENDING 并清零 attempts：设置页保存视觉配置后调用，
+     *  用户改 Key/开关/模型 = 明确的重试意图，给一个全新重试周期（防 FAILED 永久死局） */
+    @Query("UPDATE vision_queue SET status = 'PENDING', attempts = 0, updatedAt = :now WHERE status = 'FAILED'")
+    suspend fun resetFailedToPending(now: Long): Int
+
     @Query("UPDATE vision_queue SET status = :status, attempts = :attempts, updatedAt = :now WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String, attempts: Int, now: Long)
 

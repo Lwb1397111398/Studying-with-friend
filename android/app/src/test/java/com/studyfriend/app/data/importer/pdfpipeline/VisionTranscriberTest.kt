@@ -1,8 +1,10 @@
 package com.studyfriend.app.data.importer.pdfpipeline
 
+import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.MiniHttpServer
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -100,6 +102,54 @@ class VisionTranscriberTest {
                 VisionTranscriber(server.baseUrl, "k", "m").transcribePage(100, "QQ==")
             }
             assertNull(t)
+            assertEquals(2, calls)
+        } finally {
+            server.stop()
+        }
+    }
+
+    // ================= 坏 Key 熔断（UNRETRYABLE 401/403/404）与限流退避 =================
+
+    @Test
+    fun fatalHttp_failsFast_withoutSecondAttempt() {
+        // 坏 Key/欠费下重试必败：401 第一次就上抛 AiException，不再烧第二次调用，
+        // VisionWorker 据此整队熔断（页不计 attempts）
+        var calls = 0
+        val server = MiniHttpServer { _, _, _, resp ->
+            calls++
+            resp.status(401, "Unauthorized")
+        }
+        try {
+            val e = try {
+                runBlocking {
+                    VisionTranscriber(server.baseUrl, "k", "m", retryDelayMs = 0, rateLimitDelayMs = 0)
+                        .transcribePage(100, "QQ==")
+                }
+                null
+            } catch (e: AiException) {
+                e
+            }
+            assertNotNull("401 应上抛而非静默返 null", e)
+            assertEquals(401, e!!.httpCode)
+            assertEquals("致命码不重试", 1, calls)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun rateLimited_retriesAfterBackoff_thenSucceeds() {
+        var calls = 0
+        val server = MiniHttpServer { _, _, _, resp ->
+            if (calls++ == 0) resp.status(429, "Too Many Requests")
+            else resp.sse(listOf("""{"body":["限流后成功"],"footnotes":[]}"""))
+        }
+        try {
+            val t = runBlocking {
+                VisionTranscriber(server.baseUrl, "k", "m", retryDelayMs = 0, rateLimitDelayMs = 0)
+                    .transcribePage(100, "QQ==")
+            }
+            assertEquals(listOf("限流后成功"), t!!.body)
             assertEquals(2, calls)
         } finally {
             server.stop()

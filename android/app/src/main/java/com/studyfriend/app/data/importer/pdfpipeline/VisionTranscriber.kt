@@ -1,6 +1,7 @@
 package com.studyfriend.app.data.importer.pdfpipeline
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -10,6 +11,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.putJsonArray
 import com.studyfriend.app.data.ai.AiClient
+import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.JsonSlicer
@@ -43,14 +45,19 @@ object TranscriptionJson {
  * 复用 AiClient（推理模型的 reasoning_content 独立成字段，extractDelta 只取
  * delta.content 天然忽略思考过程）。温度 0.1、读超时 180s（实测 60~70s/页）。
  *
- * 失败语义（经验帖：失败回退不阻断）：解析失败/长度守卫不过 → 重试 1 次；
- * 最终失败返回 null，调用方保留该页文字层内容继续导入。
+ * 失败语义（经验帖：失败回退不阻断）：解析失败/长度守卫不过 → 退避后重试 1 次；
+ * 最终失败返回 null，调用方保留该页文字层内容继续导入。401/403/404 例外：坏 Key/
+ * 欠费下重试必败（对比讲解/粗读链路的 UNRETRYABLE 直断），转写器原样上抛，
+ * [com.studyfriend.app.data.vision.VisionWorker] 捕获后整队熔断、不烧页级 attempts。
  */
 class VisionTranscriber(
     private val baseUrl: String,
     private val apiKey: String,
     /** 模型名公开只读：Worker 多模型轮转的日志与可观测性用（R3） */
     val model: String,
+    /** 轮内重试退避（生产 2s；测试注入 0 免等待）。429 限流用更长窗口（30s） */
+    private val retryDelayMs: Long = 2_000L,
+    private val rateLimitDelayMs: Long = 30_000L,
 ) {
 
     /**
@@ -60,12 +67,22 @@ class VisionTranscriber(
      * 不用 rawChars（rawChars 含将被删掉的页眉页码，会让守卫失真）。
      */
     suspend fun transcribePage(originChars: Int, pngBase64: String): PageTranscription? {
+        var lastError: AiException? = null
         repeat(TRANSCRIBE_ATTEMPTS) { attempt ->
+            if (attempt > 0) {
+                // 轮内退避：429 限流窗口内立即重打大概率再 429（白打一次还让窗口更紧）
+                delay(if (lastError?.httpCode == 429) rateLimitDelayMs else retryDelayMs)
+            }
             val t = try {
                 parseTranscription(callModel(pngBase64))
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: AiException) {
+                if (e.httpCode in UNRETRYABLE) throw e // 401/403/404：坏 Key/欠费重试必败，上抛整队熔断
+                lastError = e
+                null
             } catch (e: Exception) {
+                lastError = null
                 null
             }
             if (t != null && passesLengthGuard(originChars, t.totalChars)) return t
@@ -128,8 +145,12 @@ class VisionTranscriber(
     private fun passesLengthGuard(originChars: Int, transcribedChars: Int): Boolean =
         originChars <= LENGTH_GUARD_ORIGIN_MIN || transcribedChars >= originChars * LENGTH_GUARD_RATIO
 
-    private companion object {
-        const val TRANSCRIBE_ATTEMPTS = 2
+    companion object {
+        /** HTTP 层重试必败的致命码（与 NotePlanner/RoughReadPlanner 的 UNRETRYABLE 同口径）：
+         *  Key 失效/欠费/端点不存在——重试只是白打请求，转写器直接上抛由 Worker 整队熔断 */
+        val UNRETRYABLE = setOf(401, 403, 404)
+
+        private const val TRANSCRIBE_ATTEMPTS = 2
         const val LENGTH_GUARD_ORIGIN_MIN = 200
         const val LENGTH_GUARD_RATIO = 0.5
 

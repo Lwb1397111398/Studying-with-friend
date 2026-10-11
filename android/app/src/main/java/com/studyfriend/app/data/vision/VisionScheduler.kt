@@ -1,6 +1,7 @@
 package com.studyfriend.app.data.vision
 
 import android.content.Context
+import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
@@ -17,6 +18,8 @@ import java.util.concurrent.TimeUnit
  * 每本书一个 unique 任务（REPLACE 保证重复入队不叠跑）；约束联网，退避重试。
  */
 object VisionScheduler {
+
+    private const val TAG = "VisionScheduler"
 
     /** 队列总页数上限：超过仍拒绝导入（整本无文字层的极端 PDF，静默烧几小时不合适） */
     const val MAX_QUEUE_PAGES = 400
@@ -50,9 +53,15 @@ object VisionScheduler {
     /**
      * 设置变更（视觉开关/Key/模型保存）后的重调度：所有有 PENDING 的书全部
      * REPLACE 一次——此前因缺 Key 退避重试的任务立即拿到新配置开跑。
+     * FAILED 定格页一并重置回 PENDING（attempts 清零）：用户改配置 = 明确的重试
+     * 意图，给一个全新的重试周期，坏 Key 期间烧光 3 轮的页不必整本重导。
+     * 日常启动续跑（[restorePending]）不做此重置，FAILED 维持终态防烧钱。
      */
     suspend fun reenqueueAllPending(db: StudyDatabase, context: Context) {
-        for (bookId in db.visionQueueDao().booksWithPending()) {
+        val dao = db.visionQueueDao()
+        val reset = dao.resetFailedToPending(System.currentTimeMillis())
+        if (reset > 0) Log.i(TAG, "reset $reset FAILED page(s) → PENDING")
+        for (bookId in dao.booksWithPending()) {
             WorkManager.getInstance(context).enqueueUniqueWork(
                 workName(bookId),
                 ExistingWorkPolicy.REPLACE,

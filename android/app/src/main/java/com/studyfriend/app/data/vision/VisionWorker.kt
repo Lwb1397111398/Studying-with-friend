@@ -15,6 +15,7 @@ import androidx.work.WorkerParameters
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.VisionQueueDao
+import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.importer.PdfPageRenderer
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import com.studyfriend.app.data.db.VisionQueueEntity
@@ -28,8 +29,10 @@ import kotlinx.coroutines.launch
 /**
  * 视觉后台队列执行器（OPT-F）：消化一本书的 vision_queue PENDING 页。
  * 每页一次视觉调用（约 1 分钟），缓存命中直接标完成不调模型；单页失败计
- * attempts，达上限定格 FAILED（不再自动重试，防无限烧钱）；未配置 Key 时不烧
- * attempts 直接退避重试，设置页保存配置后会 REPLACE 重调度立即拿到新配置。
+ * attempts，达上限定格 FAILED（不再自动重试，防无限烧钱；设置页保存视觉配置
+ * 后由 reenqueueAllPending 重置回 PENDING 给全新重试周期）；401/403/404 坏 Key
+ * 整队熔断（页不计 attempts、终态不重排）；未配置 Key 时不烧 attempts 直接退避
+ * 重试，设置页保存配置后会 REPLACE 重调度立即拿到新配置。
  * 全部终态后尝试守卫式整书重建（[VisionRebuilder]），让转写成果落到书内容。
  *
  * 前台化（R3）：整队一次跑完远超 JobScheduler 10 分钟 job 时限——每次超时被杀
@@ -109,6 +112,13 @@ class VisionWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             }
         } catch (e: CancellationException) {
             return Result.retry() // 系统 stop（省电/约束变化）：任务保留，下次续跑
+        } catch (e: AiException) {
+            // 401/403/404 整队熔断（VisionTranscriber.UNRETRYABLE）：坏 Key/欠费下逐页重试
+            // 全部必败（页上限 3 × 轮内 2 次 × 400 页 = 最多 2400 次白打），因此：
+            // 页保持 PENDING 不烧 attempts（Key 没坏页没坏）；Result.failure() 终态不再自动
+            // 重排防同 Key 无限烧钱；设置页保存视觉配置 → reenqueueAllPending 重置重跑
+            Log.w(TAG, "fatal http ${e.httpCode} → 整队停，PENDING 保留待新配置")
+            return Result.failure()
         } catch (e: Exception) {
             return Result.retry() // 渲染器级故障（uri 失效等）：退避重试，页级 attempts 不动
         }
@@ -136,6 +146,12 @@ class VisionWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             transcriber.transcribePage(item.originChars, job.pngBase64)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: AiException) {
+            // 坏 Key 熔断：致命码原样上抛取消整队（coroutineScope 收敛到 doWork 的 AiException 分支）
+            if (e.httpCode in VisionTranscriber.UNRETRYABLE) throw e
+            Log.w(TAG, "page ${item.pageNo} failed [${transcriber.model}]: " +
+                "${e.javaClass.simpleName}: ${e.message}")
+            null
         } catch (e: Exception) {
             Log.w(TAG, "page ${item.pageNo} failed [${transcriber.model}]: " +
                 "${e.javaClass.simpleName}: ${e.message}")
