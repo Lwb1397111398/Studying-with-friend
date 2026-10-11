@@ -43,7 +43,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 开启（2026-10 优化批次）：代码压缩 + 资源裁剪；keep 规则见 proguard-rules.pro
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("app")
         }
