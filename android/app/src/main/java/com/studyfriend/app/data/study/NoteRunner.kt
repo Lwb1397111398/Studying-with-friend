@@ -4,16 +4,12 @@ import android.content.Context
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.ai.AiGate
 import com.studyfriend.app.data.db.StudyDatabase
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import kotlin.coroutines.coroutineContext
 
 /** 讲解运行状态（与 RoughRunState 同构；unitCount=本章讲解条数） */
 sealed interface NoteRunState {
@@ -47,67 +43,41 @@ sealed interface NoteRunState {
 
 /**
  * 讲解批量任务管理（计划 M4b §2.7）：应用级单例 + AiGate 全局互斥；
- * start 捕获旧 job 先 cancel、新协程 join 后再 tryBegin（§2.6 自替换竞态修复）。
+ * job/gate/迟到异常纪律单源见 [AiTaskRunner]。
  */
 class NoteRunner(
     private val db: StudyDatabase,
     private val context: Context,
     private val settings: SettingsRepository,
     private val chatTextFn: ChatTextFn,
-    private val scope: CoroutineScope,
-    private val gate: AiGate = AiGate(),
-) {
+    scope: CoroutineScope,
+    gate: AiGate = AiGate(),
+) : AiTaskRunner<NoteRunState>(gate, scope) {
     constructor(
         db: StudyDatabase,
         context: Context,
         settings: SettingsRepository,
     ) : this(db, context, settings, AiClientChatTextFn, CoroutineScope(SupervisorJob() + Dispatchers.Default))
 
+    override val gateLabel = "讲解"
+
     private val _state = MutableStateFlow<NoteRunState>(NoteRunState.Idle)
     val state: StateFlow<NoteRunState> = _state.asStateFlow()
-
-    private var job: Job? = null
+    override fun setState(state: NoteRunState) {
+        _state.value = state
+    }
+    override fun idleState(): NoteRunState = NoteRunState.Idle
+    override fun failureState(id: Long, message: String, keyIssue: Boolean) =
+        NoteRunState.Failed(id, message, keyIssue)
 
     /** 启动（或替换）一章的批量讲解。force=true 全部重生成（忽略缓存）。 */
-    fun start(chapterId: Long, force: Boolean = false) {
-        val old = job
-        old?.cancel()
-        job = scope.launch {
-            old?.join() // 等旧 job 完全退出（含其 finally gate.end()），自替换才能重获 gate
-            if (!gate.tryBegin("讲解")) {
-                _state.value = NoteRunState.Failed(chapterId, "另一项 AI 任务进行中，请等待完成")
-                return@launch
+    fun start(chapterId: Long, force: Boolean = false) = launchTask(chapterId, "讲解启动失败") {
+        setState(NoteRunState.Running(chapterId, 0, 0))
+        val outcome = NotePlanner(db, context, settings, chatTextFn)
+            .run(chapterId, force = force) { done, total ->
+                setState(NoteRunState.Running(chapterId, done, total))
             }
-            try {
-                _state.value = NoteRunState.Running(chapterId, 0, 0)
-                val outcome = NotePlanner(db, context, settings, chatTextFn)
-                    .run(chapterId, force = force) { done, total ->
-                        _state.value = NoteRunState.Running(chapterId, done, total)
-                    }
-                _state.value = finishState(chapterId, outcome)
-            } catch (e: CancellationException) {
-                // 被新 start 替换：新任务自己会写 Running，这里不要把状态抹成 Idle
-                if (coroutineContext[Job] === job) _state.value = NoteRunState.Idle
-                throw e
-            } catch (e: Exception) {
-                // 只在本 job 仍是现任时覆盖状态：stop/start 替换后旧 job 的迟到异常不得刷掉新状态
-                if (coroutineContext[Job] === job) {
-                    _state.value = NoteRunState.Failed(
-                        chapterId,
-                        e.message ?: "讲解启动失败",
-                        keyIssue = e is MissingKeyException,
-                    )
-                }
-            } finally {
-                gate.end()
-            }
-        }
-    }
-
-    /** 用户主动停止：已完成单元保留（等于断点），状态回 Idle；job 引用保留供 start join */
-    fun stop() {
-        job?.cancel()
-        _state.value = NoteRunState.Idle
+        finishState(chapterId, outcome)
     }
 
     private fun finishState(chapterId: Long, outcome: NoteOutcome): NoteRunState {
