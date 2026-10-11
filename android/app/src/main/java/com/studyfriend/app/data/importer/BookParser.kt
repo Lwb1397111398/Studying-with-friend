@@ -132,6 +132,20 @@ object BookParser {
     const val TOC_BLOCK_MARK = "〔目录〕"
 
     /**
+     * 目录章标题（P6g，老板拍板）：目录块（〔目录〕标记块/散条目块）一律独立成
+     * 「目录」章，与第一章/第二章同级——不再挂进邻近章（msw 40 页 E2E 实录：
+     * p6 标记块挂进「序言」章、p7 散条目块挂进「第一章法律思维」章）。连续目录
+     * 块（目录跨页）合入同一个「目录」章，不重复开章。
+     */
+    const val TOC_CHAPTER_TITLE = "目录"
+
+    /** 孤页码行（P6g tocEntries 处置）：纯数字/括号数字，可带句点收尾 */
+    private val RE_TOC_LONE_PAGE = Regex("^\\(?\\d{1,4}\\)?[.。]?$")
+
+    /** 条目尾页码（P6g）：上一条目已带页码时孤页码判残留丢弃 */
+    private val RE_TOC_TAIL_PAGE = Regex("\\d{1,4}\\s*[.。]?$")
+
+    /**
      * TOC 连续区（块下标闭区间）。锚点路径记录锚点行坐标（区内唯一可产标题命中的行）；
      * anchorLine = -1 表示无锚点、按密度兜底划区。
      */
@@ -216,6 +230,11 @@ object BookParser {
         var curTitle = "开篇"
         // 开篇章（第一个标题命中前的封面/版权/总序）标 FRONT：无用前置信息有 role 归属
         var curRole = DbValues.ROLE_FRONT
+        // 「目录」章的插入式恢复（P6g）：切开目录章时保存此前章上下文，TOC 块后
+        // 遇到正文块时恢复——否则 curRole=TOC 永久生效，散条目后的正文段被吞进
+        // 目录章并误标 TOC（strayTocEntriesAfterChapter 回归实录）
+        var savedTitle: String? = null
+        var savedRole = DbValues.ROLE_FRONT
         var curParas = mutableListOf<ParsedPara>()
 
         fun flush() {
@@ -251,7 +270,18 @@ object BookParser {
                     if (tocRegion.anchorLine >= 0) {
                         curParas.addAll(tocEntries(lines, -1, blockPage))
                     } else {
-                        pendingToc.addAll(tocEntries(lines, -1, blockPage))
+                        // P6g 补：锚点行被 LOW_CONF 兜底吃掉（msw p6 简目页实录）时
+                        // 区内条目仍独立成「目录」章，不再顺延挂进下一命中章头部
+                        // （老板拍板：目录与第一章/第二章同级）；pendingToc 与尾部
+                        // 兜底保留作安全网，正常不再触发
+                        if (curTitle != TOC_CHAPTER_TITLE) {
+                            flush()
+                            savedTitle = curTitle
+                            savedRole = curRole
+                            curTitle = TOC_CHAPTER_TITLE
+                            curRole = DbValues.ROLE_TOC
+                        }
+                        curParas.addAll(tocEntries(lines, -1, blockPage))
                     }
                 }
                 else -> {
@@ -266,14 +296,40 @@ object BookParser {
                         blockTocMark[bi] -> {
                             // P6c-E：tocLike 页整块条目重组——前级 PdfCleaner 三判据已验
                             // 目录页，不再 isTocBlock 占比重判（OCR 碎行占比必不过，E2E 实录）
+                            // P6g：flush 后独立成「目录」章（老板拍板：目录与第一章/第二章
+                            // 同级，不混进邻近章）；已在目录章内（目录跨页连续块）则直接续挂
+                            if (curTitle != TOC_CHAPTER_TITLE) {
+                                flush()
+                                savedTitle = curTitle
+                                savedRole = curRole
+                                curTitle = TOC_CHAPTER_TITLE
+                                curRole = DbValues.ROLE_TOC
+                            }
                             curParas.addAll(tocEntries(lines, -1, blockPage))
                         }
                         isTocBlock(lines) -> {
-                            // 目录区外的散条目块（目录尾页没盖进 tocRegion，E2E 实证漏进
-                            // 第一章开头）：仍按条目重组标 ROLE_TOC，不混进正文
+                            // 目录区外的散条目块（目录尾页没盖进 tocRegion / OCR 目录页
+                            // 点线被吃光漏判 tocLike，msw p7 实录）：条目重组标 ROLE_TOC
+                            // 并同样独立成「目录」章——块已自我声明为目录条目，切出成章
+                            // 与段 role 一致，避免挂进第一章正文
+                            if (curTitle != TOC_CHAPTER_TITLE) {
+                                flush()
+                                savedTitle = curTitle
+                                savedRole = curRole
+                                curTitle = TOC_CHAPTER_TITLE
+                                curRole = DbValues.ROLE_TOC
+                            }
                             curParas.addAll(tocEntries(lines, -1, blockPage))
                         }
                         else -> {
+                            if (curTitle == TOC_CHAPTER_TITLE) {
+                                // 目录块结束、回到正文：恢复切出前的章上下文（目录章是
+                                // 插入式章节，不改变后续正文/标题的章归属）
+                                flush()
+                                curTitle = savedTitle ?: "开篇"
+                                curRole = savedRole
+                                savedTitle = null
+                            }
                             for (para in parasOf(lines, curRole, blockPage)) curParas.add(para)
                         }
                     }
@@ -285,7 +341,20 @@ object BookParser {
             curParas.addAll(pendingToc)
         }
         flush()
-        return chapters.also(::assertNoMarkLeak)
+        // P6g：「目录」章是插入式章节——切出、恢复后，被它切开的同名章成两截且
+        // 中间隔着目录章（strayTocEntriesAfterChapter 实录：第一章导论/目录/第一章导论）。
+        // 同名章紧邻、或仅隔一个「目录」章时合并回去（条目续挂前段，目录章位置跟随文流）。
+        val merged = mutableListOf<ParsedChapter>()
+        for (ch in chapters) {
+            val n = merged.size
+            val j = if (n >= 2 && merged[n - 1].title == TOC_CHAPTER_TITLE && merged[n - 2].title == ch.title) {
+                n - 2
+            } else n - 1
+            if (j >= 0 && merged[j].title == ch.title) {
+                merged[j] = merged[j].copy(paras = merged[j].paras + ch.paras)
+            } else merged.add(ch)
+        }
+        return merged.also(::assertNoMarkLeak)
     }
 
     /**
@@ -395,11 +464,21 @@ object BookParser {
         val out = mutableListOf<ParsedPara>()
         val acc = mutableListOf<String>()
         fun flushAcc() {
-            if (acc.isNotEmpty()) {
-                val merged = softMerge(acc)
-                if (merged.isNotBlank()) out.add(ParsedPara(merged, DbValues.ROLE_TOC, pageNo))
-                acc.clear()
+            if (acc.isEmpty()) return
+            val merged = softMerge(acc)
+            // P6g：孤页码段处置——OCR 目录页把条目页码拆成独立行（msw p7 实录：
+            // 「159」「88」各自成段）。单行纯页码且上一条目尾无页码 → 拼回上一条目；
+            // 上一条目尾已有页码 → 原书版式不存在条目间夹孤页码，判 OCR 残留丢弃
+            // （并入会造「…388 88」幻觉页码）。
+            if (acc.size == 1 && RE_TOC_LONE_PAGE.matches(merged) && out.isNotEmpty()) {
+                val prevTail = out.last().text.trim()
+                if (!RE_TOC_TAIL_PAGE.containsMatchIn(prevTail.takeLast(8))) {
+                    out[out.size - 1] = out.last().copy(text = softMerge(listOf(prevTail, merged)))
+                }
+            } else if (merged.isNotBlank()) {
+                out.add(ParsedPara(merged, DbValues.ROLE_TOC, pageNo))
             }
+            acc.clear()
         }
         for ((li, raw) in lines.withIndex()) {
             if (li == skipLine) continue

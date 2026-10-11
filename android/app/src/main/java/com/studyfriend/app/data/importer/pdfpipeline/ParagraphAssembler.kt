@@ -34,6 +34,9 @@ object ParagraphAssembler {
      */
     internal const val TITLE_FACTOR_OCR = 1.4f
 
+    /** OCR 行标题文本长度上限（字号路与 headingLikeOcr 同款）：真章题影印书 ≤24 字 */
+    private const val TITLE_TEXT_MAX = 24
+
     /** 行所属来源是否 OCR（字号容差分支用）；混合段按行级判定，数字行不受影响 */
     private fun isOcrLine(l: PLine): Boolean = l.sourceVersion >= TextSourceRow.PROD_OCR_V1
 
@@ -41,9 +44,16 @@ object ParagraphAssembler {
         if (isOcrLine(l)) TITLE_FACTOR_OCR else TITLE_FACTOR
 
     /** 标题判据：字号路（数字路径主路）+ OCR 行编号形态路（P6c-F，见 [headingLikeOcr]） */
-    private fun titleLike(l: PLine, stats: DocStats): Boolean =
-        l.size >= stats.bodySize * titleFactorOf(l) ||
-            (headingTextRouteEnabled && isOcrLine(l) && headingLikeOcr(l.text))
+    private fun titleLike(l: PLine, stats: DocStats): Boolean {
+        if (l.size >= stats.bodySize * titleFactorOf(l)) {
+            // OCR 行字号路加长度守卫（P6g）：det 框高受括号/字形拉虚——msw p17 实录
+            // 正文行框高 15px vs 同页正文 11-12px，size 10.1 撞上 bodySize 6.5×1.4=9.1
+            // 被误判标题，2_titleNew+3_afterTitle 双斩成三段。真章题影印书 ≤24 字
+            // （headingLikeOcr 同款上限），30 字的「正文行」拦下。数字路径不受影响。
+            return !isOcrLine(l) || l.text.length <= TITLE_TEXT_MAX
+        }
+        return headingTextRouteEnabled && isOcrLine(l) && headingLikeOcr(l.text)
+    }
 
     /** 标题折行容差按行来源分支（OCR 大标题行距按字号算更远，见 TITLE_FOLD_FACTOR_OCR 标定） */
     private fun titleFoldFactorOf(l: PLine): Float =

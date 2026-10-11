@@ -329,7 +329,12 @@ object PdfLoader {
         hitStats: MutableMap<String, Int>? = null,
     ): PdfExtractResult {
         val stats = PdfCleaner.docStats(outcome.pagesLines, outcome.dims)
-        val pageOuts = PdfCleaner.clean(outcome.pagesLines, outcome.dims, stats, hitStats)
+        // P6g：分隔线归一化 y → pt（-1=未检出），clean 据此把线下行整块收脚注
+        val ruleYs = outcome.dims.mapIndexed { idx, d ->
+            val n = outcome.separatorYs.getOrNull(idx) ?: Float.NaN
+            if (n.isNaN()) -1f else n * d.second
+        }
+        val pageOuts = PdfCleaner.clean(outcome.pagesLines, outcome.dims, stats, hitStats, ruleYs)
         PdfCleaner.crossPageMergeY0Preview(pageOuts, stats) // P4 锚定口径预演（与 extract 同步执行）
         val landscapeRatio = if (outcome.dims.isEmpty()) 0f
         else outcome.dims.count { it.second > it.first }.toFloat() / outcome.dims.size

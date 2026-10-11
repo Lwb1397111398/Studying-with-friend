@@ -77,6 +77,19 @@ class OcrImportRunner(
             sourceVersion = TextSourceRow.PROD_OCR_V1,
         )
 
+        /**
+         * 脚注分隔线检测（P6g）Bitmap 入口：归一化 y（0..1），未检出 NaN。
+         * 像素核心在 [OcrTextPostProcessor.findFootnoteRuleYFromPixels]（纯 JVM 可测）。
+         */
+        internal fun footnoteRuleY(bmp: android.graphics.Bitmap): Float {
+            val w = bmp.width
+            val h = bmp.height
+            if (w < 50 || h < 50) return Float.NaN
+            val px = IntArray(w * h)
+            bmp.getPixels(px, 0, w, 0, 0, w, h)
+            return OcrTextPostProcessor.findFootnoteRuleYFromPixels(px, w, h)
+        }
+
         /** [pass2] 产物（Pass2 纯逻辑的返回值，字段与 [Outcome] 对齐） */
         /**
          * Pass2 单源：bodySize → 逐页规则 c（diagram 分类）→ 页级分流 → 规则 d（碎片合并）。
@@ -86,6 +99,7 @@ class OcrImportRunner(
         internal fun pass2(
             pagesOcrLines: List<List<OcrLine>>,
             dims: List<Pair<Float, Float>>,
+            separatorYs: List<Float> = emptyList(),
         ): Pass2 {
             // 估字号先转一轮求 bodySize（碎片合并的参照）；页型判定在合并前
             val bodySize = PdfCleaner.docStats(
@@ -117,16 +131,19 @@ class OcrImportRunner(
                     } else {
                         pageMeanConfs.add(PageGate.meanConf(lines))
                         val merged = OcrTextPostProcessor.mergeFragments(lines, bodySize)
+                        // 规则 e（P6g）：切口索引字过滤——原书边缘竖排检索字成 1-2 字
+                        // 短行混进正文（msw p32-p40 每页 10+ 个单字段），过闸页行级删除
+                        val kept = OcrTextPostProcessor.dropEdgeTabs(merged, dims.getOrNull(idx)?.first ?: 0f)
                         fragmentLinesMerged += lines.size - merged.size
-                        pageLineConfs.add(merged.map { it.confidence })
+                        pageLineConfs.add(kept.map { it.confidence })
                         pageDrafts.add(emptyList())
-                        merged.map { it.toPLine() }
+                        kept.map { it.toPLine() }
                     }
                 }
             }
             return Pass2(
                 pagesLines, fallbacks, pageMeanConfs, pageLineConfs, pageDrafts,
-                bodySize, fragmentLinesMerged,
+                bodySize, fragmentLinesMerged, separatorYs,
             )
         }
     }
@@ -143,6 +160,8 @@ class OcrImportRunner(
         val pageDrafts: List<List<OcrLine>>,
         val bodySize: Float,
         val fragmentLinesMerged: Int,
+        /** 每页脚注分隔线 y（归一化 0..1；NaN=未检出），透传 [Outcome] 供 clean 分流 */
+        val separatorYs: List<Float> = emptyList(),
     )
 
     data class Outcome(
@@ -158,18 +177,23 @@ class OcrImportRunner(
          *  过闸页恒空（草稿不入库）。生产管线不消费，供 DEBUG 抽样落盘做置信度-质量
          *  分层标定（P6b 落地报告 §7 选项 A 的画线依据） */
         val pageDrafts: List<List<OcrLine>>,
+        /** 每页脚注分隔线 y（归一化页高 0..1；NaN=未检出，P6g）。Pass1 渲染位图上
+         *  投影检出，PdfLoader.finalizeOcr 换算 pt 交 PdfCleaner.clean：检出页线下
+         *  行整块收脚注（版式事实强于行首文本特征，修脚注/正文双向错分） */
+        val separatorYs: List<Float> = emptyList(),
     ) {
         init {
-            // 逐页列表五方同长不变量（S6）：快照/告警按页索引取值，错位会越界或张冠李戴
+            // 逐页列表六方同长不变量（S6）：快照/告警按页索引取值，错位会越界或张冠李戴
             require(
                 pagesLines.size == dims.size &&
                     dims.size == pageMeanConfs.size &&
                     pageMeanConfs.size == pageLineConfs.size &&
-                    pageLineConfs.size == pageDrafts.size,
+                    pageLineConfs.size == pageDrafts.size &&
+                    (separatorYs.isEmpty() || separatorYs.size == dims.size),
             ) {
                 "Outcome 逐页列表长度不一致：lines=${pagesLines.size} dims=${dims.size} " +
                     "meanConfs=${pageMeanConfs.size} lineConfs=${pageLineConfs.size} " +
-                    "drafts=${pageDrafts.size}"
+                    "drafts=${pageDrafts.size} ruleYs=${separatorYs.size}"
             }
         }
     }
@@ -206,12 +230,18 @@ class OcrImportRunner(
             var renderMs = 0L
             var inferMs = 0L
             var postMs = 0L
+            var ruleMs = 0L
             val pagesOcrLines = ArrayList<List<OcrLine>>(total)
+            val separatorYs = ArrayList<Float>(total)
             for (page in 1..total) {
                 if (isCancelled()) throw CancelledImportException()
                 var t = System.currentTimeMillis()
                 val bmp = renderer.renderPageBitmap(page - 1)
                 renderMs += System.currentTimeMillis() - t
+                t = System.currentTimeMillis()
+                // 脚注分隔线检测（P6g）：渲染位图投影，须在 recycle 前做
+                separatorYs.add(footnoteRuleY(bmp))
+                ruleMs += System.currentTimeMillis() - t
                 t = System.currentTimeMillis()
                 val lines: List<OcrLine>
                 try {
@@ -235,17 +265,18 @@ class OcrImportRunner(
             }
             android.util.Log.w(
                 "OcrImport",
-                "Pass1 done: pages=$total renderMs=$renderMs inferMs=$inferMs postMs=$postMs",
+                "Pass1 done: pages=$total renderMs=$renderMs inferMs=$inferMs postMs=$postMs " +
+                    "ruleMs=$ruleMs ruleYs=${separatorYs.count { !it.isNaN() }}",
             )
 
-            // ---- Pass2：docStats 主字号 → 规则 c/d → 页级分流 ----
+            // ---- Pass2：docStats 主字号 → 规则 c/d/e → 页级分流 ----
             val allLines = pagesOcrLines.flatten()
             if (allLines.isEmpty()) {
                 throw PdfImportException("扫描页面未能识别出任何文字，可能是拍摄/扫描质量太差")
             }
             val dims = renderer.pageDims()
             val pass2Start = System.currentTimeMillis()
-            val p2 = pass2(pagesOcrLines, dims)
+            val p2 = pass2(pagesOcrLines, dims, separatorYs)
             android.util.Log.w(
                 "OcrImport",
                 pass2DoneLine(
@@ -268,6 +299,7 @@ class OcrImportRunner(
                 pageMeanConfs = p2.pageMeanConfs,
                 pageLineConfs = p2.pageLineConfs,
                 pageDrafts = p2.pageDrafts,
+                separatorYs = p2.separatorYs,
             )
         }
     }

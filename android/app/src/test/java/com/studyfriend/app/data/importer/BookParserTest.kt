@@ -257,7 +257,8 @@ class BookParserTest {
 
     @Test
     fun tocRegionDetectedWithoutAnchor_byDensity() {
-        // 无"目录"锚点：密度兜底把连续点线条目块划为 TOC 区（区内不产标题命中），后随正文正常成章
+        // 无"目录"锚点：密度兜底把连续点线条目块划为 TOC 区（区内不产标题命中）。
+        // P6g 补：条目独立成「目录」章（与第一章同级，老板拍板），后随正文正常成章
         val toc = """
             第一章 私法绪论.............................. 1
             第一节 法律的斗争..................................... 1
@@ -265,8 +266,37 @@ class BookParserTest {
         """.trimIndent()
         val body = "\n\n第一章 私法绪论\n\n这是第一章正文。"
         val chapters = BookParser.parse(toc + body)
-        assertEquals(1, chapters.size)
+        assertEquals(listOf(BookParser.TOC_CHAPTER_TITLE, "第一章 私法绪论"), chapters.map { it.title })
         assertTrue(chapters[0].paras.any { it.role == DbValues.ROLE_TOC && it.text.contains("第一节") })
+        assertEquals(DbValues.ROLE_BODY, chapters[1].paras.last().role)
+    }
+
+    @Test
+    fun p6g_anchorlessTocRegion_tocChapterInsertedAndContextRestored() {
+        // msw p6-p7 E2E 实录（bookId=10 装机复现）：p6 简目页「目录」锚点被 LOW_CONF
+        // 兜底吃掉，p7 条目块走密度兜底 tocRegion 无锚点路，旧逻辑 pendingToc 顺延把
+        // 14 段 TOC 挂进「第一章 法律思维」章头。修后：无锚点区也切「目录」章（插入式，
+        // 后随正文恢复切出前的章上下文），锚点路（anchorLine>=0）与章内命中章不受影响
+        val toc = """
+            第一章 法律思维.............................. 3
+            第一节 案例 [...1
+            第二节 探讨................................... 17
+            第二章 案例研习............................. 23
+        """.trimIndent()
+        val body = "\n\n第一章 法律思维\n\n这是第一章正文，讨论法律思维的形成。" +
+            "\n\n第二章 案例研习\n\n这是第二章正文。"
+        val chapters = BookParser.parse(toc + body)
+        assertEquals(
+            listOf(BookParser.TOC_CHAPTER_TITLE, "第一章 法律思维", "第二章 案例研习"),
+            chapters.map { it.title },
+        )
+        val tocCh = chapters[0]
+        assertTrue(tocCh.paras.isNotEmpty() && tocCh.paras.all { it.role == DbValues.ROLE_TOC })
+        assertTrue(tocCh.paras.any { it.text.contains("第二节") && it.text.contains("17") })
+        // 恢复逻辑：目录章之后的正文回到各自命中章，段不串章
+        assertEquals(DbValues.ROLE_BODY, chapters[1].paras.last().role)
+        assertTrue(chapters[1].paras.any { it.text.contains("法律思维的形成") })
+        assertTrue(chapters[2].paras.any { it.text.contains("第二章正文") })
     }
 
     @Test
@@ -287,8 +317,13 @@ class BookParserTest {
         """.trimIndent()
         val body = "\n\n第一章 风险社会、保护国家与损害赔偿制度\n\n这是第一章正文。"
         val chapters = BookParser.parse(toc + body)
-        assertEquals("简目块整体为 TOC 区（含简目锚点段），正文正常成章", 1, chapters.size)
+        // P6g 补：简目块（无「目录」锚点词）密度兜底划 TOC 区后独立成「目录」章，正文正常成章
+        assertEquals(
+            listOf(BookParser.TOC_CHAPTER_TITLE, "第一章 风险社会、保护国家与损害赔偿制度"),
+            chapters.map { it.title },
+        )
         assertTrue(chapters[0].paras.any { it.role == DbValues.ROLE_TOC && it.text.contains("第二节美国法上的惩罚性赔偿") })
+        assertTrue(chapters[1].paras.any { it.role == DbValues.ROLE_BODY && it.text.contains("这是第一章正文") })
     }
 
     @Test
@@ -538,9 +573,15 @@ class BookParserTest {
             正文其二。
         """.trimIndent()
         val chapters = BookParser.parse(text)
-        assertEquals(1, chapters.size)
-        val roles = chapters[0].paras.map { it.role }
-        assertEquals(listOf(DbValues.ROLE_BODY, DbValues.ROLE_TOC, DbValues.ROLE_TOC, DbValues.ROLE_BODY), roles)
+        // P6g：TOC 段一律独立开「目录」章（不再挂当前章），散条目 role=TOC 不混正文
+        assertEquals(2, chapters.size)
+        assertEquals("第一章 导论", chapters[0].title)
+        assertEquals(BookParser.TOC_CHAPTER_TITLE, chapters[1].title)
+        assertEquals(
+            listOf(DbValues.ROLE_TOC, DbValues.ROLE_TOC),
+            chapters[1].paras.map { it.role },
+        )
+        assertEquals(DbValues.ROLE_BODY, chapters[0].paras[0].role)
     }
 
     // ---------------------------------------------------------------- P3a 字号证据链
@@ -882,7 +923,65 @@ class BookParserTest {
         assertEquals(listOf(1, 9), chapters[0].paras.map { it.pageNo })
     }
 
-    // ---- P6c-E 〔目录〕页级标记（tocLike 页直通条目重组） ----
+    // ---- P6g 修⑤：目录孤页码处置（OCR 把条目页码拆成独立行） ----
+
+    @Test
+    fun p6g_lonePageNum_mergesBackWhenPrevHasNoPage() {
+        // msw p7 实录：条目行尾点线残留「·」自成一拍、页码「159」独立成行
+        val tocPage = PageOut(
+            7, tocLike = true, rawChars = 200, puaCount = 0,
+            lineCount = 3, shortLineCount = 0,
+            paras = listOf(
+                Para("第二节请求权基础的意义,构造和功能·"),
+                Para("159"),
+                Para("第三节请求权基础的结构·"),
+            ),
+            firstLine = null, lastLine = null,
+        )
+        val bodyPage = PageOut(
+            8, tocLike = false, rawChars = 100, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(Para("第一章 法律思维", size = 19f), Para("正文内容。")),
+            firstLine = null, lastLine = null,
+        )
+        val text = PdfExtractResult(listOf(tocPage, bodyPage), chainStats, scanned = false)
+            .assembleText(styleAware = true)
+        val chapters = BookParser.parse(text, styleAware = true)
+        val joined = chapters.filter { it.title == BookParser.TOC_CHAPTER_TITLE }
+            .flatMap { it.paras }.joinToString("\n") { it.text }
+        assertTrue(
+            "孤页码 159 应拼回上一条目尾：$joined",
+            Regex("构造和功能·\\s*159").containsMatchIn(joined),
+        )
+    }
+
+    @Test
+    fun p6g_lonePageNum_afterEntryWithPage_dropped() {
+        // 条目尾已有页码再跟孤页码 = OCR 残留（并入会造「…107 88」幻觉页码）→ 丢弃
+        val tocPage = PageOut(
+            7, tocLike = true, rawChars = 200, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(
+                Para("第一节 民法的法源…………107"),
+                Para("88"),
+            ),
+            firstLine = null, lastLine = null,
+        )
+        val bodyPage = PageOut(
+            8, tocLike = false, rawChars = 100, puaCount = 0,
+            lineCount = 2, shortLineCount = 0,
+            paras = listOf(Para("第一章 法律思维", size = 19f), Para("正文内容。")),
+            firstLine = null, lastLine = null,
+        )
+        val text = PdfExtractResult(listOf(tocPage, bodyPage), chainStats, scanned = false)
+            .assembleText(styleAware = true)
+        val chapters = BookParser.parse(text, styleAware = true)
+        val joined = chapters.filter { it.title == BookParser.TOC_CHAPTER_TITLE }
+            .flatMap { it.paras }.joinToString("\n") { it.text }
+        assertTrue("条目应在目录章：$joined", joined.contains("民法的法源"))
+        assertFalse("幻觉页码 88 应被丢弃：$joined", joined.contains("88"))
+    }
+
 
     @Test
     fun p6cE_tocMarkPage_entriesRegrouped_noFakeChapter() {
@@ -914,8 +1013,8 @@ class BookParserTest {
         assertTrue("tocLike 页应打〔目录〕标记", text.contains(BookParser.TOC_BLOCK_MARK))
         val chapters = BookParser.parse(text, styleAware = true)
         // 无「第力章」假章：目录条目块不产标题命中。本例目录块 dotLike 恰达 3 行
-        // 构成密度兜底 tocRegion，条目按既有设计顺延并入下一命中章段落头部
-        assertEquals(listOf("第一章 私法绪论"), chapters.map { it.title })
+        // 构成密度兜底 tocRegion（无锚点），P6g 补后独立成「目录」章（与第一章同级）
+        assertEquals(listOf(BookParser.TOC_CHAPTER_TITLE, "第一章 私法绪论"), chapters.map { it.title })
         val paras = chapters[0].paras
         val tocParas = paras.filter { it.role == DbValues.ROLE_TOC }
         assertTrue(tocParas.isNotEmpty())
@@ -925,8 +1024,9 @@ class BookParserTest {
         assertTrue(joined.contains("第力章") && joined.contains("341"))
         assertTrue(joined.contains("第一节") && joined.contains("355"))
         assertTrue(joined.contains("第二节") && joined.contains("359"))
-        // 正文页不受影响
-        assertEquals(DbValues.ROLE_BODY, paras.last().role)
+        // 正文页不受影响（在目录章之后、独立成「第一章」章）
+        assertEquals(2, chapters.size)
+        assertEquals(DbValues.ROLE_BODY, chapters[1].paras.last().role)
     }
 
     @Test
@@ -950,8 +1050,9 @@ class BookParserTest {
             .assembleText(styleAware = false)
         assertFalse(text.contains(BookParser.TOC_BLOCK_MARK))
         val chapters = BookParser.parse(text)
-        // 散条目块在第一个标题命中前 → 落「开篇」章但 role=TOC 不混正文（P6c-D 既有行为）
-        assertEquals(listOf("开篇", "第一章 甲"), chapters.map { it.title })
+        // 散条目块在第一个标题命中前 → P6g 起独立开「目录」章（与第一章同级，老板点名的
+        // 结构诉求），role=TOC 不混正文；此前挂在「开篇」章下
+        assertEquals(listOf(BookParser.TOC_CHAPTER_TITLE, "第一章 甲"), chapters.map { it.title })
         assertEquals(DbValues.ROLE_TOC, chapters[0].paras[0].role)
         assertEquals(DbValues.ROLE_BODY, chapters[1].paras.last().role)
     }

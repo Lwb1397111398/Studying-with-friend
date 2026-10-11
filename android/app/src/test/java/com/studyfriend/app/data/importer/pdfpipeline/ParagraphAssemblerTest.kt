@@ -455,4 +455,40 @@ class ParagraphAssemblerTest {
         assertEquals(3, paras.size)
         assertEquals("第二章 民法的法源", paras[1].text)
     }
+
+    @Test
+    fun `ocr body line with inflated det box and long text is not a title`() {
+        // P6g 修④锁定（msw p17 实录）：OCR 行 det 框高被括号拉虚（15px vs 同页正文
+        // 11-12px）→ size 10.1 撞上 bodySize 6.5×1.4=9.1；30 字长文本拦在字号路外，
+        // 满行续接 4.75 臂接手（此前 2_titleNew+3_afterTitle 双斩成三段）
+        val msw = DocStats(bodySize = 6.5f, left = 0f, right = 594f, pitchThreshold = null)
+        // body 也是 OCR 行（fixture 全 OCR 行；数字口径 1.15× 下 8.35>7.475 会被误判标题）
+        val body = PLine(
+            "上一行正文是满行没有句末标点继续说", x0 = 27f, x1 = 594.7f, y0 = 100f,
+            size = 8.35f, sourceVersion = 1,
+        )
+        val inflated = PLine(
+            "ar)并e学生课外作业。教e应e解试题的内容分析学生易犯的错", // 30 字 > 24
+            x0 = 0f, x1 = 594.7f, y0 = 130f, size = 10.14f, sourceVersion = 1,
+        )
+        val paras = ParagraphAssembler.assemble(listOf(body, inflated), msw)
+        assertEquals(1, paras.size)
+    }
+
+    @Test
+    fun `ocr real chapter title at body text length still isolated`() {
+        // 对照：OCR 行 size 虚高但文本是短章题（≤24 字）→ 字号路照常独立成段
+        val msw = DocStats(bodySize = 6.5f, left = 0f, right = 594f, pitchThreshold = null)
+        val body = PLine(
+            "正文第一段讲完了。", x0 = 27f, x1 = 594.7f, y0 = 100f,
+            size = 8.35f, sourceVersion = 1,
+        )
+        val title = PLine(
+            "第二章 请求权基础", x0 = 50f, x1 = 400f, y0 = 130f, size = 10.14f,
+            sourceVersion = 1,
+        )
+        val paras = ParagraphAssembler.assemble(listOf(body, title), msw)
+        assertEquals(2, paras.size)
+        assertEquals("第二章 请求权基础", paras[1].text)
+    }
 }

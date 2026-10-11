@@ -8,6 +8,7 @@ import com.studyfriend.app.data.importer.PdfPageRenderer
 import com.studyfriend.app.data.importer.pdfpipeline.DocStats
 import com.studyfriend.app.data.importer.pdfpipeline.endsSentence
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -40,10 +41,12 @@ class OcrReplayBenchTest {
     private data class Fixture(
         val pagesOcrLines: List<List<OcrLine>>,
         val dims: List<Pair<Float, Float>>,
+        /** 每页脚注分隔线 y（归一化，NaN=未检出/null；P6g，Python 同口径复刻产出） */
+        val separatorYs: List<Float> = emptyList(),
     )
 
-    private fun load(): Fixture? {
-        val stream = javaClass.getResourceAsStream(FIXTURE) ?: return null
+    private fun load(fixture: String = FIXTURE): Fixture? {
+        val stream = javaClass.getResourceAsStream(fixture) ?: return null
         val json = stream.bufferedReader(Charsets.UTF_8)
             .use { Json.parseToJsonElement(it.readText()) }
             .jsonObject
@@ -74,6 +77,10 @@ class OcrReplayBenchTest {
                 val d = it["dims_pt"]!!.jsonArray
                 d[0].jsonPrimitive.content.toFloat() to d[1].jsonPrimitive.content.toFloat()
             },
+            separatorYs = pages.map { p ->
+                val ry = p["rule_y"]
+                if (ry == null || ry is JsonNull) Float.NaN else ry.jsonPrimitive.content.toFloat()
+            },
         )
     }
 
@@ -92,7 +99,6 @@ class OcrReplayBenchTest {
             pageLineConfs = p2.pageLineConfs,
             pageDrafts = p2.pageDrafts,
         )
-
         // 同轮 A/B 阶梯：两个新判据各开一次，归因到规则本身。
         // 注意 S0 也不是「原始线上版」——句末判据补半角 : ; 与行尾脚注数字、行距臂的
         // 「上一行满行」前提、中西文拼接补白四处修正无开关，四档里恒为开（它们是判据修正，
@@ -120,6 +126,48 @@ class OcrReplayBenchTest {
         println(report)
         File("build/replay_shpc60.txt").apply { parentFile?.mkdirs() }.writeText(report)
 
+        org.junit.Assert.assertEquals("fixture 页数与页尺寸数须一致", f.pagesOcrLines.size, f.dims.size)
+    }
+
+    /**
+     * msw 40 页回放（P6g：《民法思维》样本，修法回归主战场）：
+     * ruleY=off（P6c-F 口径）/ ruleY=on（脚注分隔线分流）同轮 A/B 归因，
+     * 修法靶子：目录独立成章、切口索引字、脚注/正文双向错分、目录孤页码。
+     */
+    @Test
+    fun replay_msw40_runsProductionChain() {
+        val f = load(MSW_FIXTURE)
+        assumeTrue("msw 离线回放 fixture 缺失（$MSW_FIXTURE）：跳过。生成方法见类 KDoc", f != null)
+        requireNotNull(f)
+
+        val reports = LinkedHashMap<String, String>()
+        for (useRule in listOf(false, true)) {
+            val p2 = OcrImportRunner.pass2(f.pagesOcrLines, f.dims)
+            val outcome = OcrImportRunner.Outcome(
+                pagesLines = p2.pagesLines,
+                dims = f.dims,
+                fallbackPages = p2.fallbacks,
+                pageMeanConfs = p2.pageMeanConfs,
+                pageLineConfs = p2.pageLineConfs,
+                pageDrafts = p2.pageDrafts,
+                separatorYs = if (useRule) f.separatorYs else emptyList(),
+            )
+            val hits = LinkedHashMap<String, Int>()
+            val result = PdfLoader.finalizeOcr(outcome, hits)
+            val text = result.assembleText(styleAware = true)
+            val chapters = BookParser.parse(text, null, true)
+            reports[if (useRule) "ruleY=on(生产口径)" else "ruleY=off(P6c-F 口径)"] =
+                buildReport(f, p2, result.stats, chapters, hits) +
+                    "\n== 章节树全文 ==\n" + chapters.joinToString("\n") { ch ->
+                        "### ${ch.title}\n" +
+                            ch.paras.joinToString("\n") { "[${it.role} p${it.pageNo}] ${it.text}" }
+                    }
+        }
+        val sb = StringBuilder("== msw40 A/B（同一 fixture，只差脚注分隔线分流）==\n")
+        reports.forEach { (k, v) -> sb.appendLine("----- $k -----").appendLine(headline(v)) }
+        reports.forEach { (k, v) -> sb.appendLine("\n\n===== $k 全量报告 =====").appendLine(v) }
+        println(sb)
+        File("build/replay_msw40.txt").apply { parentFile?.mkdirs() }.writeText(sb.toString())
         org.junit.Assert.assertEquals("fixture 页数与页尺寸数须一致", f.pagesOcrLines.size, f.dims.size)
     }
 
@@ -244,5 +292,8 @@ class OcrReplayBenchTest {
 
     private companion object {
         const val FIXTURE = "/ocr/replay_shpc60.json"
+
+        /** P6g：《民法思维》40 页样本（msw_mini.pdf），修法回归主战场 */
+        const val MSW_FIXTURE = "/ocr/replay_msw40.json"
     }
 }

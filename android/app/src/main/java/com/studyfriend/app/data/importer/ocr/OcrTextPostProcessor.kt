@@ -173,4 +173,102 @@ object OcrTextPostProcessor {
             confidence = minOf(a.confidence, b.confidence),
         )
     }
+
+    // ---- 规则 e：切口索引字过滤（P6g msw 40 页 E2E 实录） ----
+    // 原书每页外侧印竖排切口检索字（章节导航，逐页错位），扫描 OCR 后成 1-2 字
+    // 短行混进正文（msw p32-p40 每页 10+ 个单字段：「意」「表」「无」「销」…）。
+    // 判据：行文本 ≤2 字且**行缘**贴页面边缘——左切口字 x1≤10.6pt（p32 实测 21 行），
+    // 正文顶格 x0≈27pt、其残行 x1≥35pt，15pt 分界两侧余量 1.4 倍；右切口对称取
+    // x0 ≥ 页宽−15pt。横排页前置保证：竖排书已在 OcrImportRunner.ensureNotVertical
+    // 整书拒绝，进 pass2 的全是横排页。
+    private const val EDGE_TAB_MAX_CHARS = 2
+    private const val EDGE_TAB_MAX_X = 15f
+
+    /** 删除贴页面左/右边缘的切口索引短行（[pageWidthPt] ≤ 0 视为页宽未知，原样返回） */
+    fun dropEdgeTabs(lines: List<OcrLine>, pageWidthPt: Float): List<OcrLine> {
+        if (pageWidthPt <= 0f) return lines
+        val rightStart = pageWidthPt - EDGE_TAB_MAX_X
+        return lines.filter { l ->
+            l.text.length > EDGE_TAB_MAX_CHARS || (l.x1 > EDGE_TAB_MAX_X && l.x0 < rightStart)
+        }
+    }
+
+    // ---- 脚注分隔线检测（P6g msw 40 页 E2E 实录） ----
+    // 印刷版式：脚注区上方有一条短横线（书页 25%-40% 页宽、居左），线下全为脚注。
+    // OCR 圈码编号①②被规则 b 吃掉/认成乱码，行首文本特征认不出脚注首行 → 脚注
+    // ①②整块混进正文段（msw p16/p21/p22/p30）；反向地，正文行首「．」+行中含
+    // 「判例」误触引注形态 → 正文被块续收吞进脚注（msw p33）。分隔线是强于一切
+    // 文本特征的版式事实：检出页线下行整块收脚注，两个方向的错分一次解决。
+    private const val RULE_BIN = 160 // 墨迹灰度阈值（OcrVerticalDetector.BIN 同值）
+    // 线长下限：msw p16 实测线 213px/1158 = 18.4% 页宽（80dpi 目测 29% 严重偏高）；
+    // 正文文字行最长连续暗段实测 ≤2.5% 页宽，15% 下限余量 6 倍
+    private const val RULE_MIN_RUN = 0.15f
+    private const val RULE_MAX_RUN = 0.80f // 线长上限：横贯全页的黑边/图片不算
+    private const val RULE_START_MAX = 0.25f // 线起点贴左侧正文区（msw 实测起点 ≈11%）
+    private const val RULE_Y_FROM = 0.55f // 只在页面下部找（脚注区位置）
+    private const val RULE_Y_TO = 0.97f
+    private const val RULE_MAX_GAP = 2 // 段内允许的亮隙（扫描噪声断线）
+    private const val RULE_BAND_MAX = 8 // 线带高度上限（px）：细横线，粗块是插图
+
+    /**
+     * 单页脚注分隔线检测（像素版，纯 JVM 可测）：在 y∈[55%,97%] 页高内找第一条
+     * 「最长连续暗段长 ∈[20%,80%] 页宽、起点 <25% 页宽」的横线，带高 ≤8px →
+     * 返回带中心 y / 页高（归一化 0..1）；未检出返回 NaN。
+     * 误报代价可控：表格/框图页的横线可能命中，但其下半页碎片本就不该是正文，
+     * 收进脚注段（阅读/AI 主流程跳过）反而干净。
+     */
+    fun findFootnoteRuleYFromPixels(px: IntArray, w: Int, h: Int): Float {
+        if (w < 50 || h < 50) return Float.NaN
+        val yStart = (h * RULE_Y_FROM).toInt()
+        val yEnd = minOf(h - 1, (h * RULE_Y_TO).toInt())
+        val minRun = (w * RULE_MIN_RUN).toInt()
+        val maxRun = (w * RULE_MAX_RUN).toInt()
+        val startMax = (w * RULE_START_MAX).toInt()
+        var bandFirst = -1
+        var bandLast = -1
+        for (y in yStart..yEnd) {
+            var runLen = 0
+            var gapCnt = 0
+            var bestLen = 0
+            var segStart = -1
+            var bestStart = -1
+            val row = y * w
+            for (x in 0 until w) {
+                val p = px[row + x]
+                val gray = ((p shr 16 and 0xFF) + (p shr 8 and 0xFF) + (p and 0xFF)) / 3
+                if (gray < RULE_BIN) {
+                    if (segStart < 0) segStart = x
+                    runLen += gapCnt + 1
+                    gapCnt = 0
+                    if (runLen > bestLen) {
+                        bestLen = runLen
+                        bestStart = segStart
+                    }
+                } else {
+                    gapCnt++
+                    if (gapCnt > RULE_MAX_GAP) {
+                        runLen = 0
+                        segStart = -1
+                        gapCnt = 0
+                    }
+                }
+            }
+            val isRule = bestLen in minRun..maxRun && bestStart in 0 until startMax
+            if (isRule) {
+                if (bandFirst < 0) bandFirst = y
+                bandLast = y
+            } else if (bandFirst >= 0 && y - bandLast > RULE_MAX_GAP) {
+                // 带结束（允许相邻行断检）：带高合法即命中
+                val bandH = bandLast - bandFirst + 1
+                if (bandH in 1..RULE_BAND_MAX) return (bandFirst + bandLast) / 2f / h
+                bandFirst = -1
+                bandLast = -1
+            }
+        }
+        if (bandFirst >= 0) {
+            val bandH = bandLast - bandFirst + 1
+            if (bandH in 1..RULE_BAND_MAX) return (bandFirst + bandLast) / 2f / h
+        }
+        return Float.NaN
+    }
 }

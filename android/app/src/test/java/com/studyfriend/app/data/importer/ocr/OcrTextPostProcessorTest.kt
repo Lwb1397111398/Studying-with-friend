@@ -7,7 +7,9 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.int
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -315,5 +317,64 @@ class OcrTextPostProcessorTest {
             y1 = o["y1"]!!.jsonPrimitive.double.toFloat(),
             confidence = o["confidence"]!!.jsonPrimitive.double.toFloat(),
         )
+    }
+
+    // ================= P6g 规则 e：切口索引字过滤 =================
+
+    @Test
+    fun `rule e - edge tab chars dropped, body lines kept`() {
+        // msw p32 实测几何：切口字 x1≤10.6pt；正文顶格 x0≈27pt、页宽 595.28pt
+        val lines = listOf(
+            line("意", x0 = 0f, y0 = 377f, x1 = 9.7f, y1 = 386f),      // 左切口单字 → 滤
+            line("销", x0 = 0f, y0 = 484f, x1 = 9.7f, y1 = 493f),      // 左切口单字 → 滤
+            line("88", x0 = 585f, y0 = 100f, x1 = 594f, y1 = 109f),    // 右缘页码样短行 → 滤
+            line("正文", x0 = 27f, y0 = 200f, x1 = 55f, y1 = 209f),    // 顶格 2 字残行（x1=55）→ 留
+            line("保护", x0 = 0f, y0 = 210f, x1 = 40f, y1 = 219f),     // 贴左但 x1=40 → 留
+            line("者是请求权基础方法。", x0 = 27f, y0 = 220f, x1 = 540f, y1 = 229f), // 长行 → 留
+        )
+        val kept = OcrTextPostProcessor.dropEdgeTabs(lines, 595.28f)
+        assertEquals(listOf("正文", "保护", "者是请求权基础方法。"), kept.map { it.text })
+    }
+
+    @Test
+    fun `rule e - unknown page width returns input unchanged`() {
+        val lines = listOf(line("意", x0 = 0f, y0 = 1f, x1 = 9f, y1 = 10f))
+        assertEquals(lines, OcrTextPostProcessor.dropEdgeTabs(lines, 0f))
+    }
+
+    // ================= P6g 修③：脚注分隔线检测（合成像素图） =================
+
+    private val BLACK = 0xFF000000.toInt()
+    private val WHITE = 0xFFFFFFFF.toInt()
+
+    private fun canvas(w: Int, h: Int, paint: (IntArray) -> Unit): IntArray =
+        IntArray(w * h) { WHITE }.also(paint)
+
+    @Test
+    fun `rule y - footnote rule detected at band center`() {
+        // w=200,h=100：y=80..81 两条暗带、x=20..69（25% 页宽、起点 10%）→ 中心 y=0.805
+        val px = canvas(200, 100) { p ->
+            for (y in 80..81) for (x in 20..69) p[y * 200 + x] = BLACK
+        }
+        val y = OcrTextPostProcessor.findFootnoteRuleYFromPixels(px, 200, 100)
+        assertEquals(0.805f, y, 0.001f)
+    }
+
+    @Test
+    fun `rule y - blank page or fullwidth bar or high line not detected`() {
+        // 全白页
+        assertEquals(Float.NaN, OcrTextPostProcessor.findFootnoteRuleYFromPixels(canvas(200, 100) {}, 200, 100))
+        // 横贯全页的线（run=100% > 80% 上限，黑边/图片）不判
+        val full = canvas(200, 100) { p ->
+            for (x in 0..199) p[80 * 200 + x] = BLACK
+        }
+        assertEquals(Float.NaN, OcrTextPostProcessor.findFootnoteRuleYFromPixels(full, 200, 100))
+        // 线在页面上部（y=30 < 55% 下限）不判
+        val high = canvas(200, 100) { p ->
+            for (x in 20..69) p[30 * 200 + x] = BLACK
+        }
+        assertEquals(Float.NaN, OcrTextPostProcessor.findFootnoteRuleYFromPixels(high, 200, 100))
+        assertTrue(Float.NaN.isNaN())
+        assertFalse(0.5f.isNaN())
     }
 }

@@ -246,12 +246,16 @@ object PdfCleaner {
      * 返回 PageOut 列表（paras 已组装；跨页续接由调用方再调 crossPageMerge）。
      * [hitStats]（P6c-F）：非 null 时把 [ParagraphAssembler] 的命中/质量信号写进调用方的表，
      * 供离线回放台量化「过断/漏断」；缺省 null 走内部临时表（生产行为不变，仍打印一行）。
+     * [footnoteRuleYs]（P6g）：每页脚注分隔线 y（pt；-1=未检出），与 pagesLines 等长或空
+     * （旧调用方/回放台不带——行为与 P6c-F 逐字节一致）。仅 OCR 页消费：检出页线下行
+     * 整块收脚注，版式事实优先于行首文本特征。
      */
     fun clean(
         pagesLines: List<List<PLine>>,
         dims: List<Pair<Float, Float>>,
         stats: DocStats,
         hitStats: MutableMap<String, Int>? = null,
+        footnoteRuleYs: List<Float> = emptyList(),
     ): List<PageOut> {
         val out = mutableListOf<PageOut>()
         // 组装规则命中计数（可观测性）：println(stdout) 在 Android 进 logcat（tag=System.out），导入完成后输出一次；（不用 android.util.Log：PdfCleanerTest 为纯 JVM 单测，Log 未 mock）
@@ -284,6 +288,8 @@ object PdfCleaner {
             // footnoteMarked 行首路也失效 → 脚注整块混进正文，把句子从中间斩断（老板头号投诉）。
             // 故 OCR 页额外开「引注文本路 + 块续收」；数字页不开（既有 E2E 口径零改动）。
             val ocrPage = lines.any { it.sourceVersion >= TextSourceRow.PROD_OCR_V1 }
+            // P6g：本页脚注分隔线（仅 OCR 页消费；-1/缺省=未检出）
+            val ruleY = if (ocrPage) footnoteRuleYs.getOrNull(idx)?.takeIf { it >= 0f } else null
             var footnoteRun = false
             for (line in lines) {
                 val norm = stripControl(maybeYiNormalize(line.text))
@@ -298,10 +304,22 @@ object PdfCleaner {
                 ) continue
                 // 页码行（目录页不删）
                 if (!tocLike && RE_PAGE_NUM.matches(l.text)) continue
+                // 脚注分隔线以下（P6g）：印刷版式事实强于行首文本特征——检出页线下行
+                // 整块收脚注（修 OCR 圈码①②被吃 → 脚注混正文 p16/p21/p22/p30；与正文
+                // 行首「．」+行中「判例」误触引注 → 正文被吞 p33 的双向错分）
+                if (ruleY != null && !tocLike && l.y0 >= ruleY) {
+                    footnoteLines.add(l)
+                    footnoteRun = true
+                    continue
+                }
                 // 脚注：底部条带 + 显著小字号；或行首脚注编号符（文本路兜底，目录页不收）；
                 // 或（OCR 页）引注形态起点——命中后本条带其后的行整块续收（块内续行常是
-                // 纯德文，再无特征可认；条带内块前的正文行在循环里已先行保留，不受影响）
-                if (!tocLike && l.y0 >= footerBandStart &&
+                // 纯德文，再无特征可认；条带内块前的正文行在循环里已先行保留，不受影响）。
+                // P6g：分隔线检出页整页禁用形态路——footerBandStart 是盲猜条带（页高×系数），
+                // 可低于真实分隔线（p33 实录：盲猜 606pt < 真线 719pt，线上正文
+                // 「试就上开判例要旨…」被「判例」关键词吞进脚注再块续拖走三行）；
+                // 版式事实检出后，线下归属已由上面的 ruleY 路整块接管。
+                if (ruleY == null && !tocLike && l.y0 >= footerBandStart &&
                     ((footnoteRun && ocrPage) || l.size in 0.1f..(stats.bodySize * FOOTER_SIZE_FACTOR) ||
                         footnoteMarked(l.text) ||
                         (ocrPage && ocrFootnoteLeadEnabled && footnoteLeadText(l.text)))
