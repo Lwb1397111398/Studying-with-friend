@@ -109,8 +109,12 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Button(onClick = { pickFile.launch(arrayOf("text/*", "application/pdf")) }) {
-                    Text("选择 TXT / PDF 文件")
+                Button(onClick = {
+                    pickFile.launch(
+                        arrayOf("text/*", "application/pdf", "application/zip", "application/x-zip-compressed"),
+                    )
+                }) {
+                    Text("选择 TXT / PDF / 图包")
                 }
                 OutlinedButton(onClick = { showPaste = true }) { Text("粘贴文本") }
             }

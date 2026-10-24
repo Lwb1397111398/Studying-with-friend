@@ -45,6 +45,11 @@ object KitBookParser {
         } catch (e: Exception) {
             return null
         }
+        return parseMeta(obj)
+    }
+
+    /** 解析 kit:1 元数据 JSON 对象（txt 头部块与 KIT 图包 kit.json 共用口径） */
+    fun parseMeta(obj: JSONObject): KitMeta? {
         if (obj.optInt("kit", 0) != 1) return null
         val arr = obj.optJSONArray("chapters") ?: return null
         val chapters = mutableListOf<KitChapter>()

@@ -30,7 +30,7 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
 | `dpi` | 200 | 页图渲染精度 |
 | `aivision_workers` | 5 | aivision 页级并发 |
 | `chapter_review` | true | 章界疑点是否派子代理裁决 |
-| `output` | `["txt","pdf"]` | 产出物开关（txt 永远产出） |
+| `output` | `["txt","pdf","zip"]` | 产出物开关：txt 永远产出；`pdf`=插图版 PDF；`zip`=KIT 图包（kit.json 章表+图清单+book.txt+真图，App 一个文件直入图文混排） |
 
 老板没说参数就全用 config 默认。
 
@@ -58,7 +58,12 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
    ```
    python bookocr-kit/bookocr.py pull <书名>
    ```
-   很多「扫描书」自带出版社 OCR 文字层，pull 分钟级拔完、零幻觉零额度；跨页段落自动缝合。pull 记录的图版页（thin_pages）用 `prep --pages` + `patch <书名>` 派视觉只补这几页的图描述，再 `check <批号> --force` 放行。
+   很多「扫描书」自带出版社 OCR 文字层，pull 分钟级拔完、零幻觉零额度；跨页段落自动缝合、插图按图块精确坐标在段间落占位行。pull 记录的图版页（thin_pages）用 `prep --pages` + `patch <书名>` 派视觉只补这几页的图描述，再 `check <批号> --force` 放行。
+   **pull 登记的图只有坐标没有语义（图题是「第N页插图」占位）**，转完跑一次：
+   ```
+   python bookocr-kit/bookocr.py figure-desc <书名> [--dry-run]
+   ```
+   按坐标裁小图 → 视觉 API 逐图补图题/描述/类型（photo/table/diagram），pack 时正文占位行与图包清单用的就是补好的语义。先 `--dry-run` 看裁图对不对再真跑。有图的书**必跑**，否则老板在 App 里看到的图全是「第N页插图」。
 6. **切章（全书转完必跑——产出手机 App 直入的章界，替代 App 端猜测）**：
    ```
    python bookocr-kit/bookocr.py chapters <书名>
@@ -74,8 +79,8 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
    ```
    python bookocr-kit/bookocr.py pack <书名>
    ```
-   产出 `jobs/<书名>/output/书名.txt`（**头部带章界元数据块——App 识别到即按电脑侧章表直入，不再自己猜章节**）和 `书名_插图版.pdf`（没装 reportlab 则只有 txt）。忘跑 chapters 会被拦，或 `pack --auto-chapters` 一条龙。
-8. **汇报**（人话，给老板）：总页数、总字数、图张数、**章数与疑点裁决情况**、产出的两个文件完整路径、一句「微信传 txt 到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章」。附 token 粗账（pull 批零消耗；aivision 批走识图 API、10 页约 23 秒；子代理批约 50 万 token/10 页）。
+   产出 `jobs/<书名>/output/` 下三件：`书名.txt`（头部带章界元数据块——App 识别到即按电脑侧章表直入）、`书名_插图版.pdf`（没装 reportlab 则跳过）、`书名_Kit图包.zip`（**推荐手机导入用这个**：kit.json 章表+图清单 + book.txt + 裁好的真图，App 一个文件直入、阅读页图文混排）。忘跑 chapters 会被拦（或 `pack --auto-chapters` 一条龙）；图版页没 patch 也会被拦（先 `patch`，确要占位打包加 `--force`）。
+8. **汇报**（人话，给老板）：总页数、总字数、图张数（含 figure-desc 补语义情况）、**章数与疑点裁决情况**、产出文件完整路径、一句「微信传 zip 图包到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章、插图原位显示」。附 token 粗账（pull 批零消耗；figure-desc 走识图 API、每图一次小图调用；aivision 批 10 页约 23 秒；子代理批约 50 万 token/10 页）。
 
 ## 断点续转（会话中断/换会话/换 agent）
 

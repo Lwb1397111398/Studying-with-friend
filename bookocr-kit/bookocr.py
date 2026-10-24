@@ -9,12 +9,13 @@ bookocr — 扫描版 PDF → txt / 插图版 PDF 识别台（agent 驱动，操
   pull   <书名或工程路径> [--min 100]                                文字层拔取：自带文字层的书免视觉识别（分钟级）
   aivision <书名或工程路径> [--batch 批号] [--workers 4]              直连视觉 API 并发识图（绕开子代理并发限制，需 apis.json 或本机档案库）
   patch  <书名或工程路径> [--batch 批号]                              图版页任务卡：派视觉只补这几页的图描述
+  figure-desc <书名或工程路径> [--workers 5] [--dry-run]             pull 图补语义：按 rect 裁小图→视觉 API 逐图补 title/desc/kind
   next   <书名或工程路径>                                            领下一批（输出子代理任务卡）
   check  <书名或工程路径> <批号> [--force] [--min 100]               质检一批
   retry  <书名或工程路径> <批号|--all-failed>                        重置一批待重转
   chapters <书名或工程路径> [--apply 裁决文件] [--no-review]          全书切章 + 目录对账（疑点出裁决任务卡）
   status <书名或工程路径>                                            进度一览
-  pack   <书名或工程路径> [--no-pdf] [--force]                       打包 txt / 插图版 PDF（txt 头部带章界元数据）
+  pack   <书名或工程路径> [--no-pdf] [--force]                       打包 txt / 插图版 PDF / KIT 图包 zip（App 直入图文混排）
 
 全局设置读 kit 目录 config.json（route 路线 / pages_per_batch / dpi / aivision_workers /
 chapter_review / output），init 时快照进台账；缺省值见 DEFAULT_CONFIG。
@@ -24,6 +25,7 @@ chapter_review / output），init 时快照进台账；缺省值见 DEFAULT_CONF
 from __future__ import annotations
 
 import argparse
+import bisect
 import difflib
 import json
 import re
@@ -45,7 +47,9 @@ DEFAULT_CONFIG = {
     "dpi": 200,
     "aivision_workers": 5,
     "chapter_review": True,    # 章界疑点是否派子代理裁决（无疑点自动跳过）
-    "output": ["txt", "pdf"],  # 产出物开关（txt 永远产出；"pdf" 不在列表则不出插图版）
+    # 产出物开关：txt 永远产出；"pdf"=插图版 PDF（重排版嵌真图）；"zip"=KIT 图包
+    # （kit.json 章表+图清单 + book.txt + figures/*.png 裁真图，App 端 zip 直入图文混排）
+    "output": ["txt", "pdf", "zip"],
 }
 VALID_ROUTES = ("subagent", "aivision", "pull-first", "pull-only")
 
@@ -69,9 +73,14 @@ def load_config() -> dict:
         die('config.json 的 output 必须是列表且含 "txt"（如 ["txt", "pdf"]）')
     return cfg
 
-# 子代理产出协议：〔页N〕整行 = 一页开始；〔图：标题〕整行 = 真图占位
+# 子代理产出协议：〔页N〕整行 = 一页开始；〔图：标题〕行 = 真图占位（〕后可跟 desc 尾巴，
+# App 端按前缀识别；旧版严格整行正则与 pack 写出的「〔图：题〕desc」不一致，已放宽）
 PAGE_MARK = re.compile(r"^\s*〔页\s*(\d+)\s*〕\s*$")
-FIG_MARK = re.compile(r"^\s*〔图[:：]\s*(.+?)\s*〕\s*$")
+FIG_MARK = re.compile(r"^\s*〔图[:：]\s*(.+?)\s*〕(.*)$")
+# pull 自动登记的占位图行（figure-desc 补描述前 / pack 重写前的过渡格式，pack 按
+# 页内出现序用台账图重写为真实 title/desc）
+PULL_FIG_MARK = re.compile(r"^〔图：第(\d+)页插图\d*〕$")
+PULL_FIG_DESC = "原书嵌入插图（坐标按原 PDF 图块精确提取）"
 # 排版标题启发式（与 APP 侧 BookParser 同一套档位口径）
 CH_RE = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十百千]+\s*[章编部篇]")
 SEC_RE = re.compile(r"^(第\s*[0-9〇零一二三四五六七八九十百千]+\s*[节讲]|[一二三四五六七八九十]+\s*、)")
@@ -443,9 +452,188 @@ def cmd_aivision(a: argparse.Namespace) -> None:
     out("下一步：status 看进度")
 
 
+# ---------------------------------------------------------------- figure-desc（pull 图补视觉描述）
+
+def _aivision_figure(base: str, key: str, model: str, img: Path, pageno: int,
+                     timeout: int = 120) -> dict:
+    """单图识语义：按精确 rect 裁出的小图问视觉 API，返回 {title, desc, kind}。
+    小图 token 远小于整页；坐标准（程序裁），语义有（视觉补）。"""
+    import base64 as _b64
+    import urllib.request
+    data_uri = "data:image/png;base64," + _b64.b64encode(img.read_bytes()).decode()
+    body = {
+        "model": model,
+        "temperature": 0.1,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text":
+                f"这是从一本书第 {pageno} 页按精确坐标裁出的一张插图。"
+                "只输出一个 JSON 对象（不要任何多余文字、不要代码块标记）：\n"
+                '{"title": "图题：优先用图上印的标题/图号（如「图3-1 xx」），图上没有就一句话概括内容", '
+                '"desc": "一两句话说明图里画的是什么，读者不看图也能知道图讲什么", '
+                '"kind": "photo|table|diagram 三选一（照片插图/表格图/示意图或流程图）"}'},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+        ]}],
+    }
+    req = urllib.request.Request(
+        base.rstrip("/") + "/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        resp = json.loads(r.read().decode("utf-8"))
+    text = resp["choices"][0]["message"]["content"].strip()
+    mm = re.search(r"\{.*\}", text, re.S)  # 容忍 ```json 包裹/前后废话
+    if not mm:
+        raise ValueError(f"输出不是 JSON 对象：{text[:60]}")
+    got = json.loads(mm.group(0))
+    if not isinstance(got, dict):
+        raise ValueError("输出不是 JSON 对象")
+    return got
+
+
+def cmd_figdesc(a: argparse.Namespace) -> None:
+    """pull 登记的图只有坐标没有语义（title=第N页插图、desc=固定占位）：按 rect 裁小图
+    → 视觉 API 逐图补 title/desc/kind → 写回台账。幂等：desc 仍是占位文案的才算待办。"""
+    import concurrent.futures as futures
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    todo = {i: f for i, f in enumerate(m["figures"]) if f.get("desc") == PULL_FIG_DESC}
+    if not todo:
+        out("[ok] 没有待补描述的图（pull 登记的占位图已全部处理或本书无图）")
+        return
+    out(f"[i] 待补语义 {len(todo)} 张图（desc 仍为 pull 占位文案的）")
+
+    # 1. 裁图（确定性，不花 API）：dpi 用渲染同级，存 figures/{id}_p{页号}.png，记宽高与 file
+    fitz = load_fit()
+    doc = fitz.open(m["src_pdf"])
+    fig_dir = job / "figures"
+    fig_dir.mkdir(exist_ok=True)
+
+    def crop_to(fp: Path, rect: list, pageno: int, dpi: int):
+        page = doc[pageno - 1]
+        r = page.rect
+        l, t, rr, bb = rect
+        clip = fitz.Rect(r.width * l, r.height * t, r.width * rr, r.height * bb)
+        if clip.width * clip.height < r.width * r.height * 0.01:
+            raise ValueError("rect 过小疑似标错")
+        pix = page.get_pixmap(dpi=dpi, clip=clip)
+        if not m["color"] and pix.colorspace and pix.colorspace.n > 1:
+            pix = fitz.Pixmap(fitz.csGRAY, pix)
+        pix.save(str(fp))
+        return pix
+
+    crops: dict[int, Path] = {}
+    for i, f in todo.items():
+        try:
+            fp = fig_dir / f"{f['id']}_p{f['page']:03d}.png"
+            pix = crop_to(fp, f["rect"], f["page"], a.dpi)
+            # 伪图判定：极扁横条（高 <48px 或高宽比 <0.06）是影印页上的装饰线/表格线，
+            # 不是真图——喂视觉 API 只会报错（实测商汤 413），直接标记跳过
+            if pix.height < 48 or pix.height / max(1, pix.width) < 0.06:
+                f["w"], f["h"] = pix.width, pix.height
+                f["file"] = f"figures/{fp.name}"
+                f["desc"] = "页面装饰线（自动识别，无图义）"
+                out(f"  [i] 图 {f['id']}（p{f['page']}）是装饰线/表格线，跳过识图")
+                continue
+            crops[i] = fp
+            f["w"], f["h"] = pix.width, pix.height
+            f["file"] = f"figures/{fp.name}"
+        except Exception as e:
+            out(f"  [警告] 图 {f['id']}（第 {f['page']} 页）裁剪失败：{e}")
+    save_manifest(job, m)  # 宽高/file 先落（dry-run 或 API 失败时 zip 仍可用图）
+    if not crops:
+        doc.close()
+        if any("装饰线" in (f.get("desc") or "") for f in todo.values()):
+            out("[ok] 待补的图全是装饰线/表格线（无需识图），台账已标记")
+        else:
+            die("一张图都没裁出来，检查台账 rect（可跑 status 看figures记录）")
+        return
+    if a.dry_run:
+        doc.close()
+        out(f"[ok] dry-run：{len(crops)} 张已裁到 {fig_dir}，未调 API；确认裁得对后去掉 --dry-run 补描述")
+        return
+
+    # 2. 并发调视觉 API（单图失败重试一次；413 请求体过大按 dpi 减半重裁小图再试）
+    base, key, model = _load_vision_api()
+    workers = a.workers if a.workers is not None else m.get("config", {}).get("aivision_workers", 4)
+    out(f"[i] 视觉 API {model} @ {base.split('//')[-1].split('/')[0]}（key 已打码），并发 {workers}")
+    done, fails = 0, []
+
+    def ask(i: int, fp: Path) -> dict:
+        f = m["figures"][i]
+        try:
+            return _aivision_figure(base, key, model, fp, f["page"])
+        except Exception as e:
+            msg = f"{e}"
+            if "413" in msg or "Too Large" in msg:
+                small = fp.with_name(fp.stem + "_small.png")
+                crop_to(small, f["rect"], f["page"], max(96, a.dpi // 2))
+                return _aivision_figure(base, key, model, small, f["page"])
+            raise
+
+    with futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(ask, i, fp): i for i, fp in crops.items()}
+        for fu in futures.as_completed(futs):
+            i = futs[fu]
+            f = m["figures"][i]
+            try:
+                got = fu.result()
+            except Exception:
+                try:
+                    got = ask(i, crops[i])
+                    out(f"  · p{f['page']} 重试成功")
+                except Exception as e2:
+                    fails.append(f"{f['id']}@p{f['page']}")
+                    out(f"  · {f['id']}（p{f['page']}）失败：{str(e2)[:80]}")
+                    continue
+            if got.get("title"):
+                f["title"] = str(got["title"]).strip()
+            if got.get("desc"):
+                f["desc"] = str(got["desc"]).strip()
+            if got.get("kind") in ("photo", "table", "diagram"):
+                f["kind"] = got["kind"]
+            done += 1
+    doc.close()
+    save_manifest(job, m)
+    tail = f"，失败 {len(fails)} 张（{fails[:8]}{'…' if len(fails) > 8 else ''}）——重跑只补失败的" if fails else ""
+    out(f"[ok] figure-desc 完成：补语义 {done} 张{tail}")
+    if done:
+        out("下一步：pack 重写正文图占位行 + 产 KIT 图包")
+
+
 # ---------------------------------------------------------------- pull（文字层拔取）
 
 PNUM_RE = re.compile(r"^[\s·•.\-—]*\d{1,4}[\s·•.\-—]*$")
+
+
+def _embedded_fig_rects(page) -> list[list[float]]:
+    """页面上面积占比 0.015~0.85 的嵌入图块 rect（比例坐标 [左,上,右,下]）。
+    整页扫描底图/水印与小图标滤掉；pull 登记与 check 的目测坐标交叉校正共用。"""
+    H = page.rect.height
+    rects: list[list[float]] = []
+    for img in page.get_images(full=True):
+        try:
+            rs = page.get_image_rects(img[0])
+        except Exception:
+            continue
+        for r in rs:
+            area = (r.width * r.height) / (page.rect.width * H)
+            if 0.015 < area < 0.85:
+                rects.append([round(r.x0 / page.rect.width, 4), round(r.y0 / H, 4),
+                              round(r.x1 / page.rect.width, 4), round(r.y1 / H, 4)])
+    return rects
+
+
+def _rect_iou(a: list[float], b: list[float]) -> float:
+    """两个比例 rect 的交并比（0~1）。"""
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if inter <= 0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / (area_a + area_b - inter)
 
 def _page_lines(page: dict) -> list:
     """把一页的 dict 结构摊平成行：[{text,size,x0,y0,x1,y1}]，按阅读序排好。
@@ -521,30 +709,31 @@ def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = 
     # 段落重组：标题独立成行；正文行首缩进超 1.4 字号 = 新段
     left = min((l["x0"] for l in body), default=0.0)
     paras: list[str] = []
+    para_y0: list[float] = []  # 每段首行 y0（图占位行按 y 插段间用）
     for l in body:
         is_head = l["size"] >= body_size * 1.15 or CH_RE.match(l["text"]) or SEC_RE.match(l["text"])
         new_para = is_head or (l["x0"] - left > body_size * 1.4) or not paras
         if new_para or is_head:
             paras.append(l["text"])
+            para_y0.append(l["y0"])
         else:
             paras[-1] += l["text"]
 
-    # 嵌入真图：按实际图块坐标登记（比目测准），整页水印图跳过
-    figs = []
-    for img in page.get_images(full=True):
-        try:
-            rects = page.get_image_rects(img[0])
-        except Exception:
-            continue
-        for r in rects:
-            area = (r.width * r.height) / (page.rect.width * page.rect.height)
-            if 0.015 < area < 0.85:
-                figs.append({"page": page.number + 1,
-                             "rect": [round(r.x0 / page.rect.width, 4), round(r.y0 / H, 4),
-                                      round(r.x1 / page.rect.width, 4), round(r.y1 / H, 4)],
-                             "kind": "photo", "title": f"第{page.number + 1}页插图",
-                             "desc": "原书嵌入插图（坐标按原 PDF 图块精确提取）"})
+    # 嵌入真图：按实际图块坐标登记（比目测准），整页水印图跳过。
+    # title/desc 先写占位（pull 不看图内容），figure-desc 命令补语义、pack 重写正文占位行
+    figs = [{"page": page.number + 1, "rect": rr, "kind": "photo",
+             "title": f"第{page.number + 1}页插图", "desc": PULL_FIG_DESC}
+            for rr in _embedded_fig_rects(page)]
     chars = sum(len(re.sub(r"\s", "", p)) for p in paras)
+
+    # 图占位行按 y 插段间：图的 y0 落在第一个首行 y0 大于它的段之前（两段之间），
+    # 页顶图插最前、页底图插最后——正文里的图位保真，App 端 FIGURE 段位置与此一致。
+    # 占位行不计 chars（上面已算完），thin 图版页判定不受影响
+    for k, f in enumerate(sorted(figs, key=lambda x: x["rect"][1]), 1):
+        fy = f["rect"][1] * H
+        at = bisect.bisect_right(para_y0, fy)
+        paras.insert(at, f"〔图：第{f['page']}页插图{k}〕")
+        para_y0.insert(at, fy)
 
     # 跨页缝合依据：本页首/末行的缩进与标题属性（中文书段首缩进约两字、续行顶格）
     def _is_head(l: dict) -> bool:
@@ -596,6 +785,10 @@ def cmd_pull(a: argparse.Namespace) -> None:
             continue  # 图版页/空白页不参与
         if prev["last_is_head"] or cur["first_is_head"]:
             continue
+        # 图占位行不参与缝合：页顶有图（cur 首段是占位行）或页尾以图收（prev 末段是占位行）
+        # 时拼段会把文字粘到图行前后，图文交错关系失真
+        if prev["paras"][-1].startswith("〔图：") or cur["paras"][0].startswith("〔图："):
+            continue
         indent = (cur["first_x0"] - gleft) / (cur["first_size"] or 1)
         if indent < 0.6:
             tail, head = prev["paras"][-1][-1:], cur["paras"][0][:1]
@@ -621,7 +814,12 @@ def cmd_pull(a: argparse.Namespace) -> None:
                 parts.append(f"〔图：第{n}页图版〕")
                 parts.append("〔图版页〕")
             else:
-                parts.extend(d["paras"] or ["〔空白页〕"])
+                # 段间空行：与视觉路线 spec「段落之间空一行」对齐——App 端 splitBlocks 按
+                # 空行分块，无空行则一页多段被 softMerge 并成一段（段落结构丢失）
+                for j, para in enumerate(d["paras"] or ["〔空白页〕"]):
+                    if j:
+                        parts.append("")
+                    parts.append(para)
             parts.append("")  # 页间空行
             all_notes.extend(d["notes"])
             figs.extend(d["figs"])
@@ -779,10 +977,35 @@ def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
                 figs.append({"batch": bid, "page": int(f["page"]), "rect": [round(float(x), 4) for x in r],
                              "kind": str(f.get("kind", "figure")), "title": str(f.get("title", "")).strip(),
                              "desc": str(f.get("desc", "")).strip()})
-    base = len(m["figures"])
+    # rect 交叉校正：视觉路线的 rect 是模型按画面目测的，pack 按 rect 裁图会偏——
+    # 与原 PDF 嵌入图块坐标（程序级精确）比对，IoU 最大且 ≥0.3 即用程序坐标替换。
+    # pull 路线 rect 本就来自 PDF 坐标（IoU=1.0），替换等于不变，无副作用
+    if figs:
+        try:
+            fitz = load_fit()
+            doc = fitz.open(m["src_pdf"])
+            corrected = 0
+            for f in figs:
+                best, best_iou = None, 0.0
+                for pr in _embedded_fig_rects(doc[f["page"] - 1]):
+                    iou = _rect_iou(f["rect"], pr)
+                    if iou > best_iou:
+                        best, best_iou = pr, iou
+                if best is not None and 0.3 <= best_iou < 1.0:
+                    f["rect"] = list(best)
+                    f["rect_src"] = "pdf"
+                    corrected += 1
+            doc.close()
+            if corrected:
+                out(f"  [i] rect 交叉校正：{corrected}/{len(figs)} 张目测坐标已换成 PDF 图块精确坐标")
+        except Exception as e:
+            out(f"  [警告] rect 交叉校正跳过（{e}）")
+
+    kept = [x for x in m["figures"] if x["batch"] != bid]
+    base = len(kept)  # 删本批旧图后再计基数，防 id 重复
     for i, f in enumerate(figs):
         f["id"] = f"f{base + i + 1:03d}"
-    m["figures"] = [x for x in m["figures"] if x["batch"] != bid] + figs
+    m["figures"] = kept + figs
 
     n_notes = len([ln for ln in read_text(notes).splitlines() if ln.strip()]) if notes.exists() else 0
     b["status"], b["fail_reason"] = "done", None
@@ -1193,6 +1416,13 @@ def cmd_pack(a: argparse.Namespace) -> None:
         die(f"还有 {len(undone)} 批没完成（{undone[:5]}…），补完再 pack；确要出半本书加 --force")
     if not m["batches"]:
         die("还没有批次")
+    thin_pending = {bid: b.get("thin_pages") or [] for bid, b in m["batches"].items()
+                    if b.get("thin_pages")}
+    if thin_pending and not a.force:
+        pages = sorted(p for v in thin_pending.values() for p in v)
+        die(f"有 {len(pages)} 页图版页没补描述（{pages[:8]}{'…' if len(pages) > 8 else ''}）："
+            f"先跑 patch {a.job} 派视觉补图版描述，再 pack；确要带「〔图版页〕」占位打包加 --force")
+
     if not m.get("chapters") and not a.no_chapters:
         if a.auto_chapters:
             out("[i] 还没切章，先自动跑一次 chapters …")
@@ -1207,13 +1437,29 @@ def cmd_pack(a: argparse.Namespace) -> None:
     # 页号 → 段落（跨批拼接，页号排序兜底）
     book, notes = collect_book(job, m)
 
-    # 图位一次性确定性分配：每页按图在页面里的纵向位置排序；正文里第 k 个〔图：…〕
-    # 占位行吃掉第 k 张，没写占位行的图补在页尾。txt 与 PDF 用同一份分配，保证两边一致。
+    # 图位一次性确定性分配 + pull 占位行重写：每页按图在页面里的纵向位置排序；正文里
+    # 第 k 个〔图：…〕占位行吃掉第 k 张。pull 自动写的「第N页插图k」占位行重写为台账
+    # 最新 title/desc（figure-desc 补过语义即真实图题）；子代理/aivision 写的行保留原样；
+    # 没写占位行的图补在页尾。txt 与 PDF 用同一份重写结果，保证两边一致。
     figs_by_page: dict[int, list[dict]] = {}
     for page in sorted(book):
-        figs_by_page[page] = sorted(
+        figs_here = sorted(
             [f for f in m["figures"] if f["page"] == page], key=lambda f: f["rect"][1]
         )
+        figs_by_page[page] = figs_here
+        fi, rewritten = 0, []
+        for p in book[page]:
+            if FIG_MARK.match(p) and fi < len(figs_here):
+                f = figs_here[fi]
+                fi += 1
+                if PULL_FIG_MARK.match(p):
+                    p = f"〔图：{f['title'] or f['kind']}〕{f['desc'] or ''}".strip()
+            rewritten.append(p)
+        for f in figs_here[fi:]:
+            line = f"〔图：{f['title'] or f['kind']}〕{f['desc'] or ''}".strip()
+            if line:
+                rewritten.append(line)
+        book[page] = rewritten
 
     # ---- txt ----
     # 头部带 KIT 章界元数据块：App 端识别到即走「成品直入」通道（按章表切章，跳过通用正则猜测）
@@ -1226,17 +1472,15 @@ def cmd_pack(a: argparse.Namespace) -> None:
     txt_parts += [m["name"], ""]
     for page in sorted(book):
         paras = list(book[page])
-        figs_here = figs_by_page[page]
-        # 子代理已写〔图：…〕行的保留原样；记了台账但没写占位行的补在页尾
-        marked = sum(1 for p in paras if FIG_MARK.match(p))
-        for f in figs_here[marked:]:
-            line = f"〔图：{f['title'] or f['kind']}〕{f['desc']}".strip()
-            if line:
-                paras.append(line)
         # 保留〔页N〕页标记行：App 端（BookParser/KitBookParser）剥标记页码落库（阅读页
         # 显示页码、图归属按页），人读时可当页分隔符
         txt_parts.append(f"〔页{page}〕")
-        txt_parts.extend(paras + [""])
+        # 段间空行：App 端 splitBlocks 按空行分块（一块=一段），无空行一页多段会被并成一段
+        for j, para in enumerate(paras):
+            if j:
+                txt_parts.append("")
+            txt_parts.append(para)
+        txt_parts.append("")
     if notes:
         txt_parts += ["注释", ""]
         txt_parts += [f"{i}. {n}" if not re.match(r"^[①-⑳0-9]+", n) else n for i, n in enumerate(notes, 1)]
@@ -1251,14 +1495,16 @@ def cmd_pack(a: argparse.Namespace) -> None:
     save_manifest(job, m)
 
     # ---- 插图版 PDF ----
-    if a.no_pdf:
-        return
-    if "pdf" not in (m.get("config") or {}).get("output", ["txt", "pdf"]):
-        out("[i] config.output 未含 pdf，跳过插图版 PDF（txt 已产出）")
-        return
-    pdf_path = pack_pdf(job, m, book, notes, figs_by_page)
-    if pdf_path:
-        out(f"[ok] 插图版 PDF → {pdf_path}")
+    if not a.no_pdf and "pdf" in (m.get("config") or {}).get("output", DEFAULT_CONFIG["output"]):
+        pdf_path = pack_pdf(job, m, book, notes, figs_by_page)
+        if pdf_path:
+            out(f"[ok] 插图版 PDF → {pdf_path}")
+
+    # ---- KIT 图包（zip）：kit.json 章表+图清单 + book.txt + figures 裁真图，App 端一个文件直入 ----
+    if "zip" in (m.get("config") or {}).get("output", DEFAULT_CONFIG["output"]):
+        zip_path = pack_zip(job, m, out_txt, figs_by_page)
+        if zip_path:
+            out(f"[ok] KIT 图包 → {zip_path}")
 
 
 def pack_pdf(job: Path, m: dict, book: dict[int, list[str]], notes: list[str],
@@ -1318,17 +1564,18 @@ def pack_pdf(job: Path, m: dict, book: dict[int, list[str]], notes: list[str],
 
     def fig_png(f: dict) -> "Image | None":  # type: ignore[valid-type]
         try:
-            page = doc_src[f["page"] - 1]
-            r = page.rect
-            l, t, rr, bb = f["rect"]
-            clip = fitz.Rect(r.width * l, r.height * t, r.width * rr, r.height * bb)
-            if clip.width * clip.height < r.width * r.height * 0.01:
-                return None  # 裁剪区过小，疑似标错，跳过
-            pix = page.get_pixmap(dpi=m["dpi"], clip=clip)
-            if not m["color"] and pix.colorspace and pix.colorspace.n > 1:
-                pix = fitz.Pixmap(fitz.csGRAY, pix)
             fp = fig_dir / f"{f['id']}_p{f['page']:03d}.png"
-            pix.save(str(fp))
+            if not fp.exists() or fp.stat().st_size == 0:  # figure-desc/zip 已裁过则复用
+                page = doc_src[f["page"] - 1]
+                r = page.rect
+                l, t, rr, bb = f["rect"]
+                clip = fitz.Rect(r.width * l, r.height * t, r.width * rr, r.height * bb)
+                if clip.width * clip.height < r.width * r.height * 0.01:
+                    return None  # 裁剪区过小，疑似标错，跳过
+                pix = page.get_pixmap(dpi=m["dpi"], clip=clip)
+                if not m["color"] and pix.colorspace and pix.colorspace.n > 1:
+                    pix = fitz.Pixmap(fitz.csGRAY, pix)
+                pix.save(str(fp))
             iw, ih = ImageReader(str(fp)).getSize()
             w = min(14 * cm, iw * 72.0 / m["dpi"] * 1.6)
             return Image(str(fp), width=w, height=w * ih / iw)
@@ -1349,7 +1596,7 @@ def pack_pdf(job: Path, m: dict, book: dict[int, list[str]], notes: list[str],
                 fi += 1
                 img = fig_png(f)
                 if img:
-                    story += [img, Paragraph(fm.group(1) or f["title"], st_cap)]
+                    story += [img, Paragraph(f["title"] or fm.group(1), st_cap)]
                 else:
                     story.append(Paragraph(para, st_body))
                 continue
@@ -1378,6 +1625,78 @@ def pack_pdf(job: Path, m: dict, book: dict[int, list[str]], notes: list[str],
 
 def _esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _png_size(fp: Path) -> tuple[int, int]:
+    """读 PNG IHDR 拿宽高（大端，偏移 16）；非 PNG/读不了返回 (0, 0)。"""
+    try:
+        import struct
+        b = fp.read_bytes()[:24]
+        if b[:8] != b"\x89PNG\r\n\x1a\n":
+            return 0, 0
+        w, h = struct.unpack(">II", b[16:24])
+        return w, h
+    except Exception:
+        return 0, 0
+
+
+def pack_zip(job: Path, m: dict, txt_file: Path, figs_by_page: dict[int, list[dict]]):
+    """KIT 图包：一个 zip 让 App 端拿到「章表 + 正文 + 真图」全套（手机导入只选一个文件，
+    真图直接进 figures 表、阅读页图文混排）。结构：kit.json（kit:1 元数据 + figures 清单
+    带 file/w/h，App 免解码拿尺寸）+ book.txt（与 output txt 同内容）+ figures/*.png。
+    裁图与 figure-desc / 插图版 PDF 同名复用（figures/{id}_p{页号}.png）。"""
+    import zipfile
+    fitz = load_fit()
+    doc = fitz.open(m["src_pdf"])
+    fig_dir = job / "figures"
+    fig_dir.mkdir(exist_ok=True)
+    fig_entries = []
+    for page in sorted(figs_by_page):
+        for f in figs_by_page[page]:
+            fp = fig_dir / f"{f['id']}_p{f['page']:03d}.png"
+            if not fp.exists() or fp.stat().st_size == 0:
+                try:
+                    pg = doc[f["page"] - 1]
+                    r = pg.rect
+                    l, t, rr, bb = f["rect"]
+                    clip = fitz.Rect(r.width * l, r.height * t, r.width * rr, r.height * bb)
+                    if clip.width * clip.height < r.width * r.height * 0.01:
+                        out(f"  [警告] 图 {f['id']}（第 {f['page']} 页）rect 过小疑似标错，图包缺此图")
+                        continue
+                    pix = pg.get_pixmap(dpi=m["dpi"], clip=clip)
+                    if not m["color"] and pix.colorspace and pix.colorspace.n > 1:
+                        pix = fitz.Pixmap(fitz.csGRAY, pix)
+                    pix.save(str(fp))
+                    f["w"], f["h"] = pix.width, pix.height
+                except Exception as e:
+                    out(f"  [警告] 图 {f['id']}（第 {f['page']} 页）裁剪失败，图包缺此图：{e}")
+                    continue
+            if not f.get("w"):  # 旧台账无宽高（figure-desc 未跑过）：读 PNG 头补
+                w, h = _png_size(fp)
+                if w:
+                    f["w"], f["h"] = w, h
+            entry = {"page": f["page"], "rect": f["rect"], "kind": f.get("kind", "photo"),
+                     "title": f.get("title", ""), "desc": f.get("desc", ""),
+                     "file": f"figures/{fp.name}"}
+            if f.get("w"):
+                entry["w"], entry["h"] = f["w"], f["h"]
+            fig_entries.append(entry)
+    doc.close()
+    save_manifest(job, m)  # 宽高回写台账
+
+    meta = {"kit": 1, "v": "bookocr-kit 1.2", "title": m["name"], "pages": m["npages"],
+            "chapters": [{"t": c["t"], "p": c["p"], "lv": c["lv"], "r": c["r"], "a": c["a"]}
+                         for c in (m.get("chapters") or [])],
+            "figures": fig_entries}
+    out_zip = job / "output" / f"{m['name']}_Kit图包.zip"
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("kit.json", json.dumps(meta, ensure_ascii=False, indent=1))
+        z.write(txt_file, "book.txt")
+        for e in fig_entries:
+            fp = fig_dir / Path(e["file"]).name
+            if fp.exists():
+                z.write(fp, e["file"])
+    return out_zip
 
 
 def _style_of(para: str, h1, h2, body):
@@ -1411,6 +1730,13 @@ def main() -> None:
     p.add_argument("job")
     p.add_argument("--batch", default=None, help="只处理指定批（缺省=所有含图版页的批）")
     p.set_defaults(fn=cmd_patch)
+
+    p = sub.add_parser("figure-desc")
+    p.add_argument("job")
+    p.add_argument("--workers", type=int, default=None, help="并发数（缺省=config.aivision_workers，默认 5）")
+    p.add_argument("--dpi", type=int, default=200, help="裁图 dpi（与页图渲染同级即可）")
+    p.add_argument("--dry-run", action="store_true", help="只裁图不调 API（先看裁得对不对）")
+    p.set_defaults(fn=cmd_figdesc)
 
     p = sub.add_parser("next")
     p.add_argument("job")

@@ -24,7 +24,10 @@ import com.studyfriend.app.data.importer.CancelledImportException
 import com.studyfriend.app.data.importer.CustomRegexNoMatchException
 import com.studyfriend.app.data.importer.DecodeException
 import com.studyfriend.app.data.importer.KitBookParser
+import com.studyfriend.app.data.importer.KitFigureMatcher
+import com.studyfriend.app.data.importer.KitFigureMeta
 import com.studyfriend.app.data.importer.KitMeta
+import com.studyfriend.app.data.importer.KitZipReader
 import com.studyfriend.app.data.importer.ParsedChapter
 import com.studyfriend.app.data.importer.PdfExtractResult
 import com.studyfriend.app.data.importer.PdfImportException
@@ -148,6 +151,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     /** KIT 成品书元数据（bookocr-kit pack 的 txt 头部协议块命中时非空）：
      *  parse() 据此分流 KitBookParser（电脑侧章界直入）；换文件/粘贴/失败时清空 */
     private var kitMeta: KitMeta? = null
+
+    /** KIT 图包（书名_Kit图包.zip）的图清单（KitZipReader 解出）；非 zip 导入恒空。
+     *  parse() 后与 FIGURE 段配对成 pendingFigures（真图文混排），换文件/粘贴清空 */
+    private var kitZipFigures: List<KitFigureMeta> = emptyList()
     private var sourceType = DbValues.SRC_PASTE
     private var sourceUri = ""
     /** 最近一次尝试读取的文件，手动改编码后据此重读 */
@@ -226,6 +233,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 lastUri = null
                 isPdf = false
                 kitMeta = null // 粘贴不走 KIT 直入（几 MB 成品 txt 贴不进输入框，文件导入才是主链路）
+                kitZipFigures = emptyList()
                 currentRegex = null
                 editedTitles.clear()
                 deleted = emptySet()
@@ -266,7 +274,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 pendingVisionItems = null // 旧书的队列暂存同步作废（否则换书确认会错入队）
                 failedVisionItems = null
                 ocrImported = false
-                kitMeta = null // 上一本的 KIT 元数据作废（txt 分支命中时重设）
+                kitMeta = null // 上一本的 KIT 元数据作废（txt/zip 分支命中时重设）
+                kitZipFigures = emptyList() // 上一本图包清单与暂存图同步作废
                 clearFigures() // P4：旧书幸存图同步作废
                 // 新文件开始先清上一本的探针态（PDF 路径 runTocProbe 会重跑；TXT 保持 Idle）
                 tocState = TocProbeState.Idle
@@ -277,6 +286,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     val displayName = queryDisplayName(uri) ?: uri.lastPathSegment.orEmpty()
                     val isPdfFile = displayName.endsWith(".pdf", ignoreCase = true) ||
                         app.contentResolver.getType(uri) == "application/pdf"
+                    val isZipFile = displayName.endsWith(".zip", ignoreCase = true) ||
+                        app.contentResolver.getType(uri)?.contains("zip") == true
                     val content: String
                     if (isPdfFile) {
                         phase = "提取 PDF 文字"
@@ -320,6 +331,21 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                             // P3a 字号证据链：PDF 路径打〔标题〕前缀，parse 侧按 isPdf 同步认标
                             content = result.assembleText(styleAware = true)
                         }
+                    } else if (isZipFile) {
+                        // KIT 图包（书名_Kit图包.zip）：kit.json 章表+图清单 + book.txt + 真图，
+                        // 一个文件直入——章界照电脑侧章表，插图经 pendingFigures 原位落库
+                        phase = "读取 KIT 图包"
+                        val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: ByteArray(0)
+                        val staging = File(app.cacheDir, "kit_zip_staging")
+                            .apply { deleteRecursively(); mkdirs() }
+                        val zipData = KitZipReader.read(bytes, staging)
+                            ?: throw PdfImportException(
+                                "这个 zip 不是有效的 bookocr KIT 图包（缺 kit.json/book.txt 或已损坏）",
+                            )
+                        kitMeta = zipData.meta
+                        kitZipFigures = zipData.figures
+                        content = KitBookParser.stripMeta(zipData.text)
                     } else {
                         phase = "读取文件"
                         val decoded = TextLoader.decode(
@@ -934,7 +960,18 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             }
             // P4 双层文案（r8-P2-4）：主文案进 parseNote，技术明细走 figureNoteDetail
             val figureNote = FigureParseNote.main(figureStats, figureBypassed)
-            val kitNote = if (kit != null) "bookocr 成品书：章界已由电脑侧确认" else null
+            // KIT 图包：图清单与 FIGURE 段配对成幸存图（真图文混排），与 PDF 抽图互斥
+            val kitFigures = if (kit != null && kitZipFigures.isNotEmpty()) {
+                KitFigureMatcher.match(structured, kitZipFigures).also { pendingFigures = it }
+            } else {
+                emptyList()
+            }
+            val kitNote = if (kit != null) {
+                "bookocr 成品书：章界已由电脑侧确认" +
+                    if (kitFigures.isNotEmpty()) "，${kitFigures.size} 张插图原位导入" else ""
+            } else {
+                null
+            }
             parseNote = listOfNotNull(kitNote, blindNote, figureNote, visionStatsNote, frontNote, tocProbeNote)
                 .joinToString("；")
                 .ifEmpty { null }

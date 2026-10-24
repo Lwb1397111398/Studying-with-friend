@@ -152,6 +152,23 @@ def main() -> None:
                                         page.rect.width * 0.9, page.rect.height * 0.9),
                               pixmap=tiny)
             continue
+        if i == 8:  # 第 9 页：普通正文页中间嵌真图 → pull 应按 y 坐标在段间插图占位行
+            # 段首 x=94（缩进两字）/续行 x=72（顶格）：pull 分段靠这组缩进证据
+            page.insert_text((94, 140), "第9页测试一。要约是希望与他人订立合同的意思表示。",
+                             fontname="china-s", fontsize=11)
+            page.insert_text((72, 158), "依法成立的合同，自成立时生效。",
+                             fontname="china-s", fontsize=11)
+            page.insert_text((94, 190), "第9页测试二。承诺生效时合同成立。",
+                             fontname="china-s", fontsize=11)
+            page.insert_text((72, 208), "但是法律另有规定的除外。",
+                             fontname="china-s", fontsize=11)
+            page.insert_image(fitz.Rect(page.rect.width * 0.2, 240, page.rect.width * 0.8, 320),
+                              pixmap=tiny)
+            page.insert_text((94, 350), "第9页测试三。当事人订立合同可以采取要约承诺方式。",
+                             fontname="china-s", fontsize=11)
+            page.insert_text((72, 368), "其他方式订立合同的情形依照其规定处理。",
+                             fontname="china-s", fontsize=11)
+            continue
         if i + 1 in LINES:
             for y, x, txt in LINES[i + 1]:
                 page.insert_text((x, y), txt, fontname="china-s", fontsize=11)
@@ -211,13 +228,21 @@ def main() -> None:
     run("check _selftest b002")
     run("next _selftest")                                    # 派出 b003
     write_batch("b003", [9, 10, 11, 12], low=True,           # 每页约 70 字 → 应被拦
-                heads={10: "第二章 合同的效力", 11: "第三章 违约责任", 12: "附录"})
+                heads={10: "第二章 合同的效力", 11: "第三章 违约责任", 12: "附录"},
+                figs=[{"page": 9, "rect": [0.25, 0.27, 0.85, 0.42], "kind": "photo",
+                       "title": "目测图", "desc": "视觉路线目测坐标（故意写偏）"}])
     o = run("check _selftest b003", expect_fail=True)
     check("页均" in o, "图表页字数过低被拦（b003）")
     run("retry _selftest --all-failed")
     run("next _selftest")
     o = run("check _selftest b003 --force")                 # 图表页 --force 放行
     check("质检通过" in o, "b003 --force 放行")
+    m = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
+    corr = [f for f in m["figures"] if f.get("title") == "目测图"]
+    check(len(corr) == 1 and corr[0].get("rect_src") == "pdf",
+          "rect 交叉校正：目测坐标被 PDF 图块精确坐标替换（rect_src=pdf）")
+    check(corr and abs(corr[0]["rect"][0] - 0.2) < 0.01 and abs(corr[0]["rect"][2] - 0.8) < 0.01,
+          "校正后 rect 与第 9 页嵌入图块真值一致（x 0.2~0.8）")
     o = run("status _selftest")
     check("完成 3" in o, "status 显示 3 批全完成")
 
@@ -235,18 +260,37 @@ def main() -> None:
     check("命中 4" in o and "无疑点" in o, "目录 4 条目全部对账命中、无疑点")
     check(m.get("chapter_review_pending") is False, "无疑点时不需要裁决")
 
-    print("== pack 双产出 ==")
+    print("== pack 三产出（txt / 插图版 PDF / KIT 图包 zip） ==")
     o = run("pack _selftest")
     txt = JOB / "output" / "_selftest.txt"
     pdf = JOB / "output" / "_selftest_插图版.pdf"
+    zipf = JOB / "output" / "_selftest_Kit图包.zip"
     check(txt.exists() and "txt →" in o, "txt 产出")
     check(pdf.exists() and "插图版 PDF →" in o, "插图版 PDF 产出")
+    check(zipf.exists() and "KIT 图包 →" in o, "KIT 图包 zip 产出")
     body = txt.read_text(encoding="utf-8-sig")
     check(re.search(r"〔页\d+〕", body) is not None, "txt 保留〔页N〕页标记行（App 端剥标记记页码）")
     check("王泽鉴" in body and "注释" in body, "脚注归入书末注释区")
     check("表3-1" in body, "图描述保留在 txt 正文")
     mm = re.search(r"〔KIT-书 开始〕\r?\n(.*?)\r?\n〔KIT-书 结束〕", body, re.S)
     check(mm is not None, "txt 头部有 KIT 元数据块")
+
+    import zipfile as _zf
+    with _zf.ZipFile(zipf) as z:
+        names = z.namelist()
+        kjson = json.loads(z.read("kit.json").decode("utf-8"))
+        book_in_zip = z.read("book.txt").decode("utf-8-sig")
+    check("kit.json" in names and "book.txt" in names, "图包含 kit.json 与 book.txt")
+    check(kjson.get("kit") == 1 and kjson.get("v") == "bookocr-kit 1.2", "kit.json 协议版本正确")
+    check(kjson.get("chapters") and kjson["chapters"][0]["t"] == "第二版序", "kit.json 带章表")
+    figs_in_zip = kjson.get("figures") or []
+    check(any(f.get("file", "").startswith("figures/") for f in figs_in_zip),
+          "kit.json figures 清单带 file 路径")
+    check(any(f.get("w") for f in figs_in_zip), "figure-desc/裁图回填的宽高进了 kit.json")
+    fig_files = [n for n in names if n.startswith("figures/")]
+    check(len(fig_files) >= 1, f"图包内嵌真图文件（{len(fig_files)} 张）")
+    check(book_in_zip.replace("\r\n", "\n") == body.replace("\r\n", "\n"),
+          "book.txt 与产出 txt 内容一致（忽略换行符差异）")
     meta = json.loads(mm.group(1)) if mm else {}
     check(meta.get("kit") == 1 and meta.get("title") == "_selftest", "元数据 JSON 可解析、书名正确")
     check(len(meta.get("chapters") or []) == 6 and meta["chapters"][0]["r"] == "FRONT",
@@ -283,6 +327,26 @@ def main() -> None:
     check(mp["batches"]["b003"]["thin_pages"] == [11], "纯图版页记入 thin_pages（不再整批跳过）")
     b3txt = (JOB2 / "batches" / "b003.txt").read_text(encoding="utf-8")
     check("〔图版页〕" in b3txt and "〔图：第11页图版〕" in b3txt, "图版页占位写入正文")
+    # 图占位行按 y 插段间：第 9 页嵌入图在段2/段3 之间 → 占位行夹在两段之间（非页尾堆放）
+    l9 = b3txt.split("〔页9〕")[1].split("〔页")[0].strip().splitlines()
+    l9 = [x for x in l9 if x.strip()]
+    try:
+        i_fig = next(i for i, x in enumerate(l9) if x.strip() == "〔图：第9页插图1〕")
+        fig_ok = (i_fig == 2 and l9[1].startswith("第9页测试二") and l9[3].startswith("第9页测试三"))
+    except StopIteration:
+        fig_ok = False
+    check(fig_ok, "pull 图占位行按 y 坐标插在段间（段2 后段3 前），非页尾")
+    check("\n\n" in b3txt.split("〔页9〕")[1].split("〔图：第9页")[0],
+          "pull 批文件段落间空行（App 端 splitBlocks 按空行分块，一段一块）")
+    # figure-desc dry-run：只裁图不调 API，宽高/file 入账、desc 仍是占位
+    o = run("figure-desc _selftest_pull --dry-run")
+    check("dry-run" in o, "figure-desc --dry-run 不调 API")
+    mp = json.loads((JOB2 / "manifest.json").read_text(encoding="utf-8"))
+    fd = [f for f in mp["figures"] if f["page"] == 9]
+    check(len(fd) == 1 and fd[0].get("w") and fd[0].get("file", "").startswith("figures/"),
+          "dry-run 后裁图宽高与 file 入账")
+    check(fd[0]["desc"] == "原书嵌入插图（坐标按原 PDF 图块精确提取）", "dry-run 不改 desc（仍占位待补语义）")
+    check((JOB2 / "figures" / (fd[0]["file"].split("/")[-1])).exists(), "裁图文件落盘 figures/")
     o = run("patch _selftest_pull")
     check("b003" in o and "0011.png" in o, "patch 输出图版页任务卡（只含 p11）")
     mp = json.loads((JOB2 / "manifest.json").read_text(encoding="utf-8"))
@@ -296,6 +360,14 @@ def main() -> None:
     check(all(b["status"] == "done" for b in mp3["batches"].values()),
           "init → pull 零渲染完成全批（文字层书不需要页图）")
     check(len(list((JOB3 / "images").glob("*.png"))) == 0, "一张页图都没渲染（省时省盘）")
+    # 图版页挂账（thin_pages 未 patch）→ pack 先拦，防「〔图版页〕」占位混进成品
+    o = run("pack _selftest_pull2 --no-pdf --auto-chapters", expect_fail=True)
+    check("图版页没补描述" in o, "pack 拦截：图版页挂账（先 patch 再 pack）")
+    mp3 = json.loads((JOB3 / "manifest.json").read_text(encoding="utf-8"))
+    for b in mp3["batches"].values():
+        b["thin_pages"] = []  # 模拟 patch 派卡完成（patch 发卡即清账防重派）
+    (JOB3 / "manifest.json").write_text(
+        json.dumps(mp3, ensure_ascii=False, indent=1), encoding="utf-8")
     o = run("pack _selftest_pull2 --no-pdf --auto-chapters")
     check("切章完成" in o and "txt →" in o, "pack --auto-chapters 一条龙：自动切章后打包")
     body2 = (JOB3 / "output" / "_selftest_pull2.txt").read_text(encoding="utf-8-sig")
