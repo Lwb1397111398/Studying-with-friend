@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bookocr-kit 自测：合成一本 12 页假书，把 init→prep→next→check→retry→pack 全链路
-跑一遍并断言。不依赖任何真实样本，换电脑装好依赖即可回归。
+bookocr-kit 自测：合成一本 12 页假书，把 init→prep→next→check→retry→chapters→pack 全链路
+跑一遍并断言（含切章/目录对账/疑点裁决/KIT 元数据块）。不依赖任何真实样本，换电脑装好依赖即可回归。
 
 跑法：python selftest.py   （全部通过输出 ALL PASS，任何失败退出码 1）
 """
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -59,12 +60,19 @@ def filler(page: int, n_paras: int = 4) -> str:
 
 
 def write_batch(bid: str, pages: list[int], *, marks: list[int] | None = None,
-                low: bool = False, figs: list[dict] | None = None, notes: str = "") -> None:
+                low: bool = False, figs: list[dict] | None = None, notes: str = "",
+                heads: dict[int, str] | None = None) -> None:
     mk = marks if marks is not None else pages
-    body = "\n\n".join(
-        (f"〔页{p}〕\n" + ("〔图：表3-1 测试表格〕\n这是图的说明文字。" if (p == 3 and not low) else filler(p, 1 if low else 4)))
-        for p in mk
-    )
+
+    def page_body(p: int) -> str:
+        if p == 3 and not low:
+            return "〔图：表3-1 测试表格〕\n这是图的说明文字。"
+        pre = ""
+        if heads and p in heads:
+            pre = heads[p] + "\n\n"
+        return pre + filler(p, 1 if low else 4)
+
+    body = "\n\n".join(f"〔页{p}〕\n" + page_body(p) for p in mk)
     (JOB / "batches" / f"{bid}.txt").write_text(body, encoding="utf-8")
     (JOB / "batches" / f"{bid}_notes.txt").write_text(notes, encoding="utf-8")
     (JOB / "batches" / f"{bid}_figures.json").write_text(
@@ -82,6 +90,8 @@ def main() -> None:
     import pymupdf as fitz
     src = KIT / "jobs" / "_selftest_src.pdf"
     JOB.parent.mkdir(exist_ok=True)
+    for stale in KIT.glob("jobs/_selftest*"):  # 上次异常退出可能残留工程，先清干净
+        shutil.rmtree(stale, ignore_errors=True) if stale.is_dir() else stale.unlink(missing_ok=True)
     doc = fitz.open()
     tiny = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)  # 8x8 深色小图，供第 11 页嵌图
     tiny.set_rect(tiny.irect, (90, 90, 90))
@@ -110,11 +120,27 @@ def main() -> None:
             (200, 94, "第8页测试二。当事人订立合同，可以采取要约、承诺方式。"),
             (220, 72, "其他方式订立合同的情形依照其规定处理。")],
     }
+    def put_paras(page, pageno: int, n_paras: int, y0: int = 140) -> None:
+        """逐段两行摆放：段首行 x=94（缩进两字）、续行 x=72（顶格）——模拟真实书的排版证据，
+        pull 的段落重组与跨页缝合都靠缩进判据，整块 textbox 顶格会让段落全拼成一坨。"""
+        sents = [
+            "当事人订立合同，应当具有相应的民事权利能力和民事行为能力。",
+            "依法成立的合同，自成立时生效，但是法律另有规定或者当事人另有约定的除外。",
+            "要约是希望与他人订立合同的意思表示，该意思表示应当符合下列规定。",
+            "承诺生效时合同成立，但是法律另有规定或者当事人另有约定的除外。",
+        ]
+        y = y0
+        for i in range(n_paras):
+            first = f"第{pageno}页测试{i}。" + sents[(pageno + i) % 4]
+            rest = sents[(pageno + i + 1) % 4]
+            page.insert_text((94, y), first, fontname="china-s", fontsize=11)
+            page.insert_text((72, y + 18), rest, fontname="china-s", fontsize=11)
+            y += 52
+
     for i in range(12):
         page = doc.new_page()
         if i == 0:
-            page.insert_textbox(fitz.Rect(72, 72, page.rect.width - 72, 120),
-                                "第一章 总则", fontname="china-s", fontsize=16)
+            page.insert_text((94, 110), "第一章 总则", fontname="china-s", fontsize=16)
         if i == 2:  # 第 3 页画一块"插图"区
             page.draw_rect(fitz.Rect(page.rect.width * 0.1, page.rect.height * 0.55,
                                      page.rect.width * 0.9, page.rect.height * 0.85),
@@ -130,8 +156,7 @@ def main() -> None:
             for y, x, txt in LINES[i + 1]:
                 page.insert_text((x, y), txt, fontname="china-s", fontsize=11)
             continue
-        page.insert_textbox(fitz.Rect(72, 140, page.rect.width - 72, page.rect.height - 90),
-                            filler(i + 1, 6), fontname="china-s", fontsize=11)
+        put_paras(page, i + 1, 3 if i == 2 else 6, y0=150 if i == 0 else 140)
     doc.save(str(src))
     doc.close()
 
@@ -168,7 +193,10 @@ def main() -> None:
                       {"page": 3, "rect": [0.9, 0.1, 0.2, 0.5], "kind": "photo",  # rect 反 → 应被过滤
                        "title": "坏数据", "desc": ""},
                       {"page": 99, "rect": [0.1, 0.1, 0.9, 0.5], "kind": "photo",  # 页不在本批 → 过滤
-                       "title": "越界", "desc": ""}])
+                       "title": "越界", "desc": ""}],
+                heads={1: "第二版序",
+                       2: "目录\n第一章 合同的成立 ……3\n第二章 合同的效力 ……9\n第三章 违约责任 ……10\n附录 ……11",
+                       4: "第一章 合同的成立"})
     run("check _selftest b001")
     m = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
     check(m["batches"]["b001"]["status"] == "done", "b001 质检通过")
@@ -182,7 +210,8 @@ def main() -> None:
     write_batch("b002", [5, 6, 7, 8], notes="① 王泽鉴：《民法思维》，第35页。\n② 测试脚注二。")
     run("check _selftest b002")
     run("next _selftest")                                    # 派出 b003
-    write_batch("b003", [9, 10, 11, 12], low=True)           # 每页约 70 字 → 应被拦
+    write_batch("b003", [9, 10, 11, 12], low=True,           # 每页约 70 字 → 应被拦
+                heads={10: "第二章 合同的效力", 11: "第三章 违约责任", 12: "附录"})
     o = run("check _selftest b003", expect_fail=True)
     check("页均" in o, "图表页字数过低被拦（b003）")
     run("retry _selftest --all-failed")
@@ -191,6 +220,20 @@ def main() -> None:
     check("质检通过" in o, "b003 --force 放行")
     o = run("status _selftest")
     check("完成 3" in o, "status 显示 3 批全完成")
+
+    print("== chapters 切章 + 目录对账 ==")
+    o = run("chapters _selftest")
+    m = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
+    ch = m["chapters"]
+    check("切章完成：6 章" in o, "chapters 切出 6 章（版序/目录/三个正文章/附录）")
+    check([c["t"] for c in ch] == ["第二版序", "目录", "第一章 合同的成立", "第二章 合同的效力",
+                                   "第三章 违约责任", "附录"], "章表顺序与标题正确")
+    check([c["p"] for c in ch] == [1, 2, 4, 10, 11, 12], "各章起始页正确（页号锚定）")
+    check([c["r"] for c in ch] == ["FRONT", "TOC", "BODY", "BODY", "BODY", "BACK"],
+          "章角色正确（前置/目录/正文/后置）")
+    check(ch[2]["a"] == ch[2]["t"][:8] and ch[2]["lv"] == 1, "章锚=标题前8字、层级 1")
+    check("命中 4" in o and "无疑点" in o, "目录 4 条目全部对账命中、无疑点")
+    check(m.get("chapter_review_pending") is False, "无疑点时不需要裁决")
 
     print("== pack 双产出 ==")
     o = run("pack _selftest")
@@ -202,6 +245,15 @@ def main() -> None:
     check("〔页" not in body, "txt 里无页标记残留")
     check("王泽鉴" in body and "注释" in body, "脚注归入书末注释区")
     check("表3-1" in body, "图描述保留在 txt 正文")
+    mm = re.search(r"〔KIT-书 开始〕\r?\n(.*?)\r?\n〔KIT-书 结束〕", body, re.S)
+    check(mm is not None, "txt 头部有 KIT 元数据块")
+    meta = json.loads(mm.group(1)) if mm else {}
+    check(meta.get("kit") == 1 and meta.get("title") == "_selftest", "元数据 JSON 可解析、书名正确")
+    check(len(meta.get("chapters") or []) == 6 and meta["chapters"][0]["r"] == "FRONT",
+          "元数据含 6 章章表（首章为前置）")
+    mpk = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
+    check(mpk.get("packed") is True, "pack 后台账记 packed")
+    check("已打包" in run("status _selftest"), "status 显示已打包")
 
     d = fitz.open(str(pdf))
     check(d.page_count >= 3, f"PDF 排版 {d.page_count} 页")
@@ -244,11 +296,57 @@ def main() -> None:
     check(all(b["status"] == "done" for b in mp3["batches"].values()),
           "init → pull 零渲染完成全批（文字层书不需要页图）")
     check(len(list((JOB3 / "images").glob("*.png"))) == 0, "一张页图都没渲染（省时省盘）")
+    o = run("pack _selftest_pull2 --no-pdf --auto-chapters")
+    check("切章完成" in o and "txt →" in o, "pack --auto-chapters 一条龙：自动切章后打包")
+    body2 = (JOB3 / "output" / "_selftest_pull2.txt").read_text(encoding="utf-8-sig")
+    mm2 = re.search(r"〔KIT-书 开始〕\r?\n(.*?)\r?\n〔KIT-书 结束〕", body2, re.S)
+    check(mm2 is not None, "pull 书 txt 也带头部元数据块")
+    meta2 = json.loads(mm2.group(1)) if mm2 else {}
+    check([c["t"] for c in meta2.get("chapters") or []] == ["第一章 总则", "第二章 跨页标题测试"],
+          "pull 书自动切章正确（PDF 里的两个章标题）")
+
+    print("== chapters 疑点与裁决（toc_miss/gap/thin + --apply） ==")
+    run(f"init _selftest_ch2 --src {src} --batch 12")
+    JOB4 = KIT / "jobs" / "_selftest_ch2"
+    run("prep _selftest_ch2")
+    run("next _selftest_ch2")
+    parts = ["〔页1〕", "目录", "",
+             "第一章 起点 ……2", "第二章 终点 ……5", "第四章 缺章 ……9", "",
+             "〔页2〕", "第一章 起点", filler(2, 1), ""]
+    parts += [x for p in (3, 4) for x in (f"〔页{p}〕", filler(p, 1), "")]
+    parts += ["〔页5〕", "第二章 终点", filler(5, 1), ""]
+    parts += [x for p in range(6, 12) for x in (f"〔页{p}〕", filler(p, 1), "")]
+    parts += ["〔页12〕", "第五章 误切", "只有几个字。", ""]
+    (JOB4 / "batches" / "b001.txt").write_text("\n".join(parts), encoding="utf-8")
+    (JOB4 / "batches" / "b001_notes.txt").write_text("", encoding="utf-8")
+    (JOB4 / "batches" / "b001_figures.json").write_text("[]", encoding="utf-8")
+    run("check _selftest_ch2 b001 --force")
+    run("chapters _selftest_ch2")
+    m4 = json.loads((JOB4 / "manifest.json").read_text(encoding="utf-8"))
+    kinds = sorted(w["kind"] for w in m4["chapter_warnings"])
+    check("toc_miss" in kinds and "gap" in kinds and "thin" in kinds,
+          "三类疑点齐出：目录缺章/章号断号/薄章")
+    check(m4.get("chapter_review_pending") is True, "有疑点 → 待裁决")
+    check((JOB4 / "chapters_review_task.txt").exists(), "裁决任务卡落盘")
+    review = JOB4 / "chapters_review.txt"
+    review.write_text(
+        "toc_miss:9:第四章缺章 | ADD | 9 | 第四章 缺章\n"
+        "thin:12:第五章误切 | DROP | 12 | 第五章 误切\n"
+        "gap:3 | IGNORE\n"
+        "gap:4 | IGNORE\n", encoding="utf-8")
+    run(f"chapters _selftest_ch2 --apply {review}")
+    m4 = json.loads((JOB4 / "manifest.json").read_text(encoding="utf-8"))
+    titles = [c["t"] for c in m4["chapters"]]
+    check("第四章 缺章" in titles, "ADD 裁决补进漏切章")
+    check("第五章 误切" not in titles, "DROP 裁决删掉误切章")
+    check(m4.get("chapter_review_pending") is False, "IGNORE 后疑点清零、可 pack")
+    check(m4["chapter_rulings"].get("p9:第四章 缺章") == "ADD|第四章 缺章", "裁决持久入台账（重跑不丢）")
 
     print("== 清理 ==")
     shutil.rmtree(JOB, ignore_errors=True)
     shutil.rmtree(JOB2, ignore_errors=True)
     shutil.rmtree(JOB3, ignore_errors=True)
+    shutil.rmtree(JOB4, ignore_errors=True)
     src.unlink(missing_ok=True)
     if FAILS:
         print(f"SELFTEST FAIL：{len(FAILS)} 项未过")

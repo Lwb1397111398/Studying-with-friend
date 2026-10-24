@@ -12,22 +12,62 @@ bookocr — 扫描版 PDF → txt / 插图版 PDF 识别台（agent 驱动，操
   next   <书名或工程路径>                                            领下一批（输出子代理任务卡）
   check  <书名或工程路径> <批号> [--force] [--min 100]               质检一批
   retry  <书名或工程路径> <批号|--all-failed>                        重置一批待重转
+  chapters <书名或工程路径> [--apply 裁决文件] [--no-review]          全书切章 + 目录对账（疑点出裁决任务卡）
   status <书名或工程路径>                                            进度一览
-  pack   <书名或工程路径> [--no-pdf] [--force]                       打包 txt / 插图版 PDF
+  pack   <书名或工程路径> [--no-pdf] [--force]                       打包 txt / 插图版 PDF（txt 头部带章界元数据）
 
+全局设置读 kit 目录 config.json（route 路线 / pages_per_batch / dpi / aivision_workers /
+chapter_review / output），init 时快照进台账；缺省值见 DEFAULT_CONFIG。
 台账在 jobs/<书名>/manifest.json（单文件状态机），所有命令可随时中断重跑。
 设计要点：正文永远只落文件（batches/），台账里只存统计数字，不存正文。
 """
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
+import statistics
 import sys
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent
 JOBS = KIT / "jobs"
+
+
+# ---------------------------------------------------------------- 全局设置
+
+DEFAULT_CONFIG = {
+    # 识别路线：subagent=AI 逐页看（子代理看图，老板默认） / aivision=AI 逐页看（视觉 API 直连）
+    #           pull-first=高效模式（先拔文字层，拔不动的批再走视觉 API） / pull-only=只拔文字层
+    "route": "subagent",
+    "pages_per_batch": 10,
+    "dpi": 200,
+    "aivision_workers": 5,
+    "chapter_review": True,    # 章界疑点是否派子代理裁决（无疑点自动跳过）
+    "output": ["txt", "pdf"],  # 产出物开关（txt 永远产出；"pdf" 不在列表则不出插图版）
+}
+VALID_ROUTES = ("subagent", "aivision", "pull-first", "pull-only")
+
+
+def load_config() -> dict:
+    """读 kit 目录 config.json（无密钥、可入库），缺键/坏文件用默认值兜底。"""
+    cfg = dict(DEFAULT_CONFIG)
+    p = KIT / "config.json"
+    if p.exists():
+        try:
+            user = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(user, dict):
+                for k in DEFAULT_CONFIG:
+                    if user.get(k) is not None:
+                        cfg[k] = user[k]
+        except (json.JSONDecodeError, OSError) as e:
+            out(f"[警告] config.json 读不了（{e}），全用默认设置")
+    if cfg["route"] not in VALID_ROUTES:
+        die(f"config.json 的 route 取值不认识：{cfg['route']}（可选 {'/'.join(VALID_ROUTES)}）")
+    if not isinstance(cfg["output"], list) or "txt" not in cfg["output"]:
+        die('config.json 的 output 必须是列表且含 "txt"（如 ["txt", "pdf"]）')
+    return cfg
 
 # 子代理产出协议：〔页N〕整行 = 一页开始；〔图：标题〕整行 = 真图占位
 PAGE_MARK = re.compile(r"^\s*〔页\s*(\d+)\s*〕\s*$")
@@ -102,6 +142,10 @@ def cmd_init(a: argparse.Namespace) -> None:
     if npages <= 0:
         die("这个 PDF 没有页面")
 
+    cfg = load_config()
+    bs = a.batch if a.batch is not None else cfg["pages_per_batch"]
+    dpi = a.dpi if a.dpi is not None else cfg["dpi"]
+
     name = re.sub(r'[\\/:*?"<>|]', "_", a.name).strip() or "未命名"
     job = JOBS / name
     if job.exists():
@@ -113,18 +157,18 @@ def cmd_init(a: argparse.Namespace) -> None:
     m = {
         "name": name,
         "src_pdf": str(src),
-        "dpi": a.dpi,
+        "dpi": dpi,
         "color": a.color,
-        "batch_size": a.batch,
+        "batch_size": bs,
         "min_chars_per_page": 100,
         "spec": str(KIT / "spec.md"),
         "npages": npages,
+        "config": cfg,   # 设置快照：改全局 config.json 不影响进行中的书
         "pages": [{"no": i + 1, "image": f"images/{i + 1:04d}.png"} for i in range(npages)],
         "rendered": [],    # 已渲染出 PNG 的页号（pull 不需要渲染；prep 填充）
         "batches": {},     # bXXX -> {pages, status, body, notes, figures, stats, fail_reason, thin_pages}
         "figures": [],     # [{id, batch, page, rect, kind, title, desc, file}]
     }
-    bs = a.batch
     for bi, start in enumerate(range(0, npages, bs), 1):
         grp = list(range(start + 1, min(start + bs, npages) + 1))
         m["batches"][f"b{bi:03d}"] = {
@@ -139,8 +183,14 @@ def cmd_init(a: argparse.Namespace) -> None:
         }
     save_manifest(job, m)
     out(f"[ok] 工程 {job}")
-    out(f"     书名「{name}」 PDF {src}（{npages} 页） dpi={a.dpi} 每批 {bs} 页 → 共 {len(m['batches'])} 批")
-    out("下一步：先 pull 试试文字层拔取（分钟级）；拔不动再 prep 渲染页图走视觉")
+    out(f"     书名「{name}」 PDF {src}（{npages} 页） dpi={dpi} 每批 {bs} 页 → 共 {len(m['batches'])} 批 路线={cfg['route']}")
+    tips = {
+        "subagent": "下一步（AI 逐页看）：prep 渲染页图 → next 领批 → 派子代理看图转写",
+        "aivision": "下一步（AI 逐页看·API 直连）：prep 渲染页图 → aivision 并发识别",
+        "pull-first": "下一步（高效模式）：先 pull 试文字层拔取（分钟级），拔不动的批再走视觉",
+        "pull-only": "下一步（只拔文字层）：pull；拔不动的批会标出来，由调度 agent 决定",
+    }
+    out(tips[cfg["route"]])
 
 
 # ---------------------------------------------------------------- prep
@@ -332,6 +382,7 @@ def cmd_aivision(a: argparse.Namespace) -> None:
         die("还没有批次，先跑 init")
     base, key, model = _load_vision_api()
     spec = (KIT / "spec.md").read_text(encoding="utf-8")
+    workers = a.workers if a.workers is not None else m.get("config", {}).get("aivision_workers", 4)
 
     if a.batch:
         targets = [normalize_bid(m, a.batch)]
@@ -340,7 +391,7 @@ def cmd_aivision(a: argparse.Namespace) -> None:
     if not targets:
         out("[ok] 没有待识别的批（pending/failed 为空）")
         return
-    out(f"[i] 视觉 API {model} @ {base.split('//')[-1].split('/')[0]}（key 已打码），目标 {len(targets)} 批，并发 {a.workers}")
+    out(f"[i] 视觉 API {model} @ {base.split('//')[-1].split('/')[0]}（key 已打码），目标 {len(targets)} 批，并发 {workers}")
 
     for bid in targets:
         b = m["batches"][bid]
@@ -351,7 +402,7 @@ def cmd_aivision(a: argparse.Namespace) -> None:
         jobs = {n: job / m["pages"][n - 1]["image"] for n in b["pages"]}
         results: dict[int, str] = {}
         fails: list[int] = []
-        with futures.ThreadPoolExecutor(max_workers=a.workers) as ex:
+        with futures.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(_aivision_page, base, key, model, spec, img, n): n for n, img in jobs.items()}
             for fu in futures.as_completed(futs):
                 n = futs[fu]
@@ -784,6 +835,335 @@ def cmd_status(a: argparse.Namespace) -> None:
         tail = f" {s['chars']}字/{s['figures']}图" if s else (f" ✗ {b['fail_reason']}" if b["fail_reason"] else "")
         mark = {"done": "✓", "assigned": "…", "pending": "·", "failed": "✗"}[b["status"]]
         out(f"  {mark} {bid} p{b['pages'][0]}–{b['pages'][-1]}{tail}")
+    ch = m.get("chapters")
+    if ch:
+        extra = f"切章 {len(ch)} 章"
+        if m.get("chapter_review_pending"):
+            extra += f"（{len(m.get('chapter_warnings') or [])} 疑点待裁决）"
+        extra += " | 已打包" if m.get("packed") else " | 未打包"
+        out(f"  ◆ {extra}")
+
+
+# ---------------------------------------------------------------- chapters（全书切章 + 目录对账）
+
+# 章号族（1 级正文章）：第X章/编/部/篇/卷/回；「第X版序」是前置标题变体族
+CH_NUM_RE = re.compile(r"^第\s*([0-9〇零一二三四五六七八九十百千]+)\s*[章编部篇卷回]")
+RE_EDITION_PRE = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十]+\s*版序")
+CH_WORD_FRONT = ("前言", "序言", "自序", "再版序", "初版序", "重排版序", "增订版序", "修订版序",
+                 "总序", "译序", "代序", "导读", "引言", "导论", "导言", "写在前面", "绪论",
+                 "开场白", "凡例", "作者简介", "出版说明", "编译说明")
+CH_WORD_BACK = ("结语", "结论", "结束语", "后记", "再版后记", "译后记", "附录", "参考文献",
+                "参考书目", "致谢", "谢辞", "索引", "大事记", "年表")
+TOC_TITLE_RE = re.compile(r"^(目\s*录|目\s*次|contents)\s*$", re.I)
+# 目录条目行：标题 + 可选点线 + 行尾页码（行尾带数字的行一律视为目录形态，不当标题）
+TOC_ENTRY_RE = re.compile(r"^(.{2,60}?)[\s.·•…\-—]*?(\d{1,4})\s*$")
+SEC_NUM_RE = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十百千]+\s*[节讲]")
+_ZH_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+              "七": 7, "八": 8, "九": 9, "两": 2}
+
+
+def _zh_to_int(s: str):
+    """中文/阿拉伯章号 → int（十/百位组合），认不出返回 None。"""
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    total = num = 0
+    for ch in s:
+        if ch in _ZH_DIGITS:
+            num = _ZH_DIGITS[ch]
+        elif ch == "十":
+            total += (num or 1) * 10
+            num = 0
+        elif ch == "百":
+            total += (num or 1) * 100
+            num = 0
+        else:
+            return None
+    return total + num
+
+
+def _title_kind(s: str):
+    """一行文本 → None（不是标题）或 ('num',序号)/('front',)/('back',)/('sec',)。
+    护栏与 App 端 BookParser 同族：全行锚定、≤40 字、无逗号分号、不以句读结尾、
+    行尾带数字（目录形态）不认。"""
+    if not s or len(s) > 40 or TOC_ENTRY_RE.match(s):
+        return None
+    if s[-1:] in "。！？；，,;?!" or any(c in s for c in "，,；;"):
+        return None
+    mm = CH_NUM_RE.match(s)
+    if mm:
+        return ("num", mm.group(1))
+    if RE_EDITION_PRE.match(s):
+        return ("front",)
+    for w in CH_WORD_FRONT:
+        if s == w or (s.startswith(w) and len(s) > len(w) and s[len(w)] in "：:．.、(（"):
+            return ("front",)
+    if s == "序" or s.startswith("序：") or s.startswith("序:"):
+        return ("front",)
+    for w in CH_WORD_BACK:
+        if s == w or s.startswith(w):
+            return ("back",)
+    if s == "跋" or s.startswith("跋：") or s.startswith("跋:"):
+        return ("back",)
+    if SEC_NUM_RE.match(s):
+        return ("sec",)
+    return None
+
+
+def _detect_toc(book: dict[int, list[str]]) -> dict:
+    """识别目录区：{pages: [页号…], entries: [(条目标题, 书内页码)…]}；无目录返回空。
+    目录页码是印刷页码（≠PDF 页号），对账时用匹配对偏移换算。"""
+    start = None
+    for p in sorted(book):
+        if any(TOC_TITLE_RE.match(ln) for ln in book[p]):
+            start = p
+            break
+    if start is None:
+        return {"pages": [], "entries": []}
+    pages, entries = [], []
+    for p in sorted(book):
+        if p < start:
+            continue
+        hits = [ln for ln in book[p] if TOC_ENTRY_RE.match(ln) and not TOC_TITLE_RE.match(ln)]
+        # 目录标题页强制划入；其后条目占比达标的连续页划入，遇到不达标页即止
+        if p == start or (pages and len(hits) >= 2 and len(hits) >= len(book[p]) * 0.4):
+            pages.append(p)
+            for ln in hits:
+                mm = TOC_ENTRY_RE.match(ln)
+                entries.append((mm.group(1).strip(), int(mm.group(2))))
+        elif pages:
+            break
+    return {"pages": pages, "entries": entries}
+
+
+def collect_book(job: Path, m: dict) -> tuple[dict[int, list[str]], list[str]]:
+    """合并全部 done 批 → ({页号: [段落…]}, 脚注列表)。pack 与 chapters 共用。"""
+    book: dict[int, list[str]] = {}
+    notes: list[str] = []
+    for bid in sorted(m["batches"]):
+        b = m["batches"][bid]
+        if b["status"] != "done":
+            continue
+        book.update(split_pages(read_text(job / b["body"])))
+        for ln in read_text(job / b["notes"]).splitlines():
+            if ln.strip():
+                notes.append(ln.strip())
+    return book, notes
+
+
+def _scan_chapters(book: dict[int, list[str]], rulings: dict) -> tuple[list[dict], dict]:
+    """扫描全书切章。返回 (chapters, toc)；chapters 元素 {t,p,lv,r,a}：
+    t=标题 p=起始页 lv=1章/2节 r=FRONT前置/TOC目录/BODY正文/BACK后置 a=标题前8字锚（App 端定位章界用）。"""
+    toc = _detect_toc(book)
+    toc_pages = set(toc["pages"])
+
+    cands, seen = [], set()
+    for p in sorted(book):
+        if p in toc_pages:
+            continue
+        for ln in book[p]:
+            k = _title_kind(ln)
+            if k and (p, ln) not in seen:
+                seen.add((p, ln))
+                cands.append({"p": p, "t": ln, "k": k})
+    # 应用持久裁决：DROP 剔除误切章；ADD 补漏切章（按正文 1 级处理）
+    cands = [c for c in cands if rulings.get(f"p{c['p']}:{c['t'][:12]}") != "DROP"]
+    have = {f"p{c['p']}:{c['t'][:12]}" for c in cands}
+    for key, val in rulings.items():
+        if isinstance(val, str) and val.startswith("ADD|"):
+            page = key.split(":", 1)[0][1:]
+            if page.isdigit() and key not in have:
+                cands.append({"p": int(page), "t": val[4:], "k": ("num", None)})
+    cands.sort(key=lambda c: c["p"])
+
+    first_body_p = min((c["p"] for c in cands if c["k"][0] == "num"), default=None)
+    chapters: list[dict] = []
+    if toc["pages"]:
+        chapters.append({"t": "目录", "p": toc["pages"][0], "lv": 1, "r": "TOC"})
+    for c in cands:
+        kind = c["k"][0]
+        if kind in ("num", "sec"):
+            r = "BODY"
+        elif kind == "front":
+            r = "FRONT" if first_body_p is None or c["p"] < first_body_p else "BACK"
+        else:
+            r = "BACK"
+        chapters.append({"t": c["t"], "p": c["p"], "lv": 2 if kind == "sec" else 1, "r": r})
+    chapters.sort(key=lambda c: c["p"])
+    if not chapters or chapters[0]["p"] > 1:
+        chapters.insert(0, {"t": "开篇", "p": 1, "lv": 1, "r": "FRONT"})
+    for c in chapters:
+        c["a"] = c["t"][:8]
+    return chapters, toc
+
+
+def _norm_t(s: str) -> str:
+    return re.sub(r"[\s·•.。:：、，,;；\-—…（）()「」『』〔〕\[\]]+", "", s)
+
+
+def _reconcile(book: dict[int, list[str]], chapters: list[dict], toc: dict) -> tuple[list[dict], dict]:
+    """三方体检：目录条目对账 + 章号断号 + 薄章检测 → (疑点列表, 统计)。"""
+    warns: list[dict] = []
+    lv1 = [c for c in chapters if c["lv"] == 1 and c["r"] != "TOC"]
+    entries = toc["entries"]
+
+    # 目录条目 ↔ 章：difflib 相似度，每条目取最高分章
+    best: dict[int, tuple[int, float]] = {}
+    for ei, (et, _) in enumerate(entries):
+        ne = _norm_t(et)
+        if not ne:
+            continue
+        for ci, c in enumerate(lv1):
+            r = difflib.SequenceMatcher(None, ne, _norm_t(c["t"])).ratio()
+            if ei not in best or r > best[ei][1]:
+                best[ei] = (ci, r)
+    # 印刷页码 → PDF 页号偏移：用命中对的 (章页 - 目录页码) 众数
+    offsets = []
+    for ei, (ci, r) in best.items():
+        if r >= 0.55:
+            offsets.append(lv1[ci]["p"] - entries[ei][1])
+    off = statistics.mode(offsets) if offsets else None
+    matched_n = sum(1 for _, r in best.values() if r >= 0.55)
+    for ei, (et, ep) in enumerate(entries):
+        ci, r = best.get(ei, (None, 0.0))
+        if r >= 0.55:
+            continue
+        near = f"（最接近：{lv1[ci]['t'][:20]}@p{lv1[ci]['p']} 相似度 {r:.2f}）" if ci is not None else ""
+        calc = (ep + off) if off is not None else None
+        note = f"目录条目「{et[:30]} …{ep}」没切出对应章{near}"
+        if calc:
+            note += f"；若确有此章，ADD 页 ≈ {calc}"
+        warns.append({"id": f"toc_miss:{ep}:{_norm_t(et)[:10]}", "kind": "toc_miss",
+                      "page": calc, "entry": et, "book_page": ep, "note": note})
+
+    # 章号断号（分册重新编号的书序号有重复，自动跳过检测）
+    seq = []
+    for c in lv1:
+        if c["r"] != "BODY":
+            continue
+        mm = CH_NUM_RE.match(c["t"])
+        n = _zh_to_int(mm.group(1)) if mm else None
+        if n:
+            seq.append(n)
+    if len(seq) >= 2 and len(set(seq)) == len(seq):
+        for miss in sorted(set(range(min(seq), max(seq) + 1)) - set(seq)):
+            warns.append({"id": f"gap:{miss}", "kind": "gap", "page": None,
+                          "note": f"章号断号：第{min(seq)}~{max(seq)}章之间缺「第{miss}」——"
+                                  f"分册重新编号选 IGNORE，真漏切翻到对应位置找到标题后 ADD"})
+
+    # 薄章（疑似误切；图版页/过渡页字少属正常）
+    page_chars = {p: sum(len(re.sub(r"\s", "", ln)) for ln in lines) for p, lines in book.items()}
+    for i, c in enumerate(chapters):
+        if c["r"] != "BODY" or c["lv"] != 1:
+            continue
+        nxt_p = chapters[i + 1]["p"] if i + 1 < len(chapters) else 10 ** 9
+        chars = sum(v for p, v in page_chars.items() if c["p"] <= p < nxt_p)
+        if chars < 50:
+            warns.append({"id": f"thin:{c['p']}:{_norm_t(c['t'])[:10]}", "kind": "thin",
+                          "page": c["p"], "ch_title": c["t"],
+                          "note": f"章「{c['t'][:24]}」(p{c['p']}) 全章不足 50 字——误切选 DROP，图版/过渡页选 IGNORE"})
+    return warns, {"entries": len(entries), "matched": matched_n}
+
+
+def _parse_review(fp: Path) -> tuple[dict, list[str]]:
+    """解析裁决文件 → (rulings, ignored_ids)。行格式：id | 动作 [| 页 | 标题]，# 开头为注释。"""
+    rulings, ignored = {}, []
+    for ln in read_text(fp).splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        parts = [x.strip() for x in ln.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        wid, act = parts[0], parts[1].upper()
+        if act == "IGNORE":
+            ignored.append(wid)
+        elif act == "DROP" and len(parts) >= 4 and parts[2].isdigit() and parts[3]:
+            rulings[f"p{parts[2]}:{parts[3][:12]}"] = "DROP"
+        elif act == "ADD" and len(parts) >= 4 and parts[2].isdigit() and parts[3]:
+            rulings[f"p{parts[2]}:{parts[3][:12]}"] = f"ADD|{parts[3]}"
+    return rulings, ignored
+
+
+def _review_task_lines(m: dict, warns: list[dict], book: dict[int, list[str]]) -> list[str]:
+    """疑点裁决任务卡（给纯文本子代理，不用看图；正文摘录仅上下文必要行）。"""
+    lines = [f"书名「{m['name']}」切章疑点裁决（共 {len(warns)} 条）", "",
+             "逐条判定，把下面每条的「裁决行」补全动作后原样写进 chapters_review.txt（每条一行，四段用 | 分隔）。",
+             "动作三选一：ADD=这里确实有个章但程序没切出（填页号+标题）；DROP=程序切错了删掉这章；",
+             "IGNORE=维持现状不改（目录错列/分册重编号/图版页字少都属正常）。除该文件外不要写任何文件，",
+             "不要把书稿正文粘贴到对话里。", ""]
+    for i, w in enumerate(warns, 1):
+        lines.append(f"#{i} [{w['kind']}] {w['note']}")
+        p = w.get("page")
+        if p and p in book:
+            lines.append(f"   第 {p} 页开头：{' / '.join(book[p][:3])[:100]}")
+        if w["kind"] == "thin":
+            lines.append(f"   裁决行：{w['id']} | 动作 | {w.get('page')} | {w.get('ch_title', '')}")
+        elif w["kind"] == "toc_miss":
+            lines.append(f"   裁决行：{w['id']} | 动作 | {w.get('page') or ''} | {w.get('entry', '')[:20]}")
+        else:
+            lines.append(f"   裁决行：{w['id']} | 动作 |  | ")
+        lines.append("")
+    return lines
+
+
+def cmd_chapters(a: argparse.Namespace) -> None:
+    """全书切章 + 目录对账。疑点出裁决任务卡，--apply 吸收子代理裁决后重切。"""
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    undone = [k for k, v in m["batches"].items() if v["status"] != "done"]
+    if undone:
+        die(f"还有 {len(undone)} 批没完成（{undone[:5]}…），切章需要全书视野，补完再来")
+    book, _ = collect_book(job, m)
+
+    rulings = dict(m.get("chapter_rulings") or {})
+    ignored = set(m.get("chapter_ignored") or [])
+    if a.apply:
+        if not Path(a.apply).exists():
+            die(f"裁决文件不存在：{a.apply}")
+        new_r, new_i = _parse_review(Path(a.apply))
+        if not new_r and not new_i:
+            die("裁决文件一条都没解析出来（检查格式：id | 动作 | 页 | 标题）")
+        rulings.update(new_r)
+        ignored |= set(new_i)
+        out(f"[ok] 吸收裁决：{len(new_r)} 条章界改动，{len(new_i)} 条忽略")
+
+    chapters, toc = _scan_chapters(book, rulings)
+    warns_all, stats = _reconcile(book, chapters, toc)
+    warns = [w for w in warns_all if w["id"] not in ignored]
+
+    m["chapters"] = chapters
+    m["chapter_rulings"] = rulings
+    m["chapter_ignored"] = sorted(ignored)
+    m["chapter_warnings"] = warns
+    m["chapter_review_pending"] = bool(warns)
+    save_manifest(job, m)
+
+    n = {r: sum(1 for c in chapters if c["r"] == r) for r in ("FRONT", "TOC", "BODY", "BACK")}
+    out(f"[ok] 切章完成：{len(chapters)} 章（前置 {n['FRONT']} 目录 {n['TOC']} 正文 {n['BODY']} 后置 {n['BACK']}）")
+    for c in chapters[:30]:
+        out(f"  p{c['p']:>4}  {'·' if c['lv'] == 2 else ''}{c['t']}")
+    if len(chapters) > 30:
+        out(f"  …（共 {len(chapters)} 章，略）")
+    if toc["entries"]:
+        out(f"目录对账：条目 {stats['entries']}，命中 {stats['matched']}"
+            + (f"，疑点 {len(warns)} 条" if warns else "，无疑点"))
+
+    if not warns:
+        out("[ok] 可直接 pack")
+        return
+    out(f"[!] 疑点 {len(warns)} 条（不阻塞，但建议裁决后再 pack）：")
+    for i, w in enumerate(warns, 1):
+        out(f"  #{i} [{w['kind']}] {w['note']}")
+    if a.no_review or not (m.get("config") or {}).get("chapter_review", True):
+        out("（--no-review 或 config 已关裁决：疑点只记台账，pack 不拦）")
+        return
+    task = job / "chapters_review_task.txt"
+    task.write_text("\n".join(_review_task_lines(m, warns, book)), encoding="utf-8")
+    out(f"[i] 裁决任务卡已写：{task}")
+    out("    派一个纯文本子代理（不用看图）读任务卡，把每条裁决行补全动作写进：")
+    out(f"    {job / 'chapters_review.txt'}")
+    out(f"    然后吸收：python bookocr.py chapters {a.job} --apply {job / 'chapters_review.txt'}")
 
 
 # ---------------------------------------------------------------- pack
@@ -813,18 +1193,19 @@ def cmd_pack(a: argparse.Namespace) -> None:
         die(f"还有 {len(undone)} 批没完成（{undone[:5]}…），补完再 pack；确要出半本书加 --force")
     if not m["batches"]:
         die("还没有批次")
+    if not m.get("chapters") and not a.no_chapters:
+        if a.auto_chapters:
+            out("[i] 还没切章，先自动跑一次 chapters …")
+            cmd_chapters(argparse.Namespace(job=a.job, apply=None, no_review=False))
+            m = load_manifest(job)
+            if not m.get("chapters"):
+                die("自动切章没产出章表，人工检查：python bookocr.py chapters <书名>")
+        else:
+            die("还没切章。先跑：python bookocr.py chapters <书名>（或 pack --auto-chapters 一条龙；"
+                "确要无章界元数据的旧格式用 --no-chapters）")
 
     # 页号 → 段落（跨批拼接，页号排序兜底）
-    book: dict[int, list[str]] = {}
-    notes: list[str] = []
-    for bid in sorted(m["batches"]):
-        b = m["batches"][bid]
-        if b["status"] != "done":
-            continue
-        book.update(split_pages(read_text(job / b["body"])))
-        for ln in read_text(job / b["notes"]).splitlines():
-            if ln.strip():
-                notes.append(ln.strip())
+    book, notes = collect_book(job, m)
 
     # 图位一次性确定性分配：每页按图在页面里的纵向位置排序；正文里第 k 个〔图：…〕
     # 占位行吃掉第 k 张，没写占位行的图补在页尾。txt 与 PDF 用同一份分配，保证两边一致。
@@ -835,7 +1216,14 @@ def cmd_pack(a: argparse.Namespace) -> None:
         )
 
     # ---- txt ----
-    txt_parts: list[str] = [m["name"], ""]
+    # 头部带 KIT 章界元数据块：App 端识别到即走「成品直入」通道（按章表切章，跳过通用正则猜测）
+    txt_parts: list[str] = []
+    if m.get("chapters") and not a.no_chapters:
+        meta = {"kit": 1, "v": "bookocr-kit 1.1", "title": m["name"], "pages": m["npages"],
+                "chapters": [{"t": c["t"], "p": c["p"], "lv": c["lv"], "r": c["r"], "a": c["a"]}
+                             for c in m["chapters"]]}
+        txt_parts += ["〔KIT-书 开始〕", json.dumps(meta, ensure_ascii=False), "〔KIT-书 结束〕"]
+    txt_parts += [m["name"], ""]
     for page in sorted(book):
         paras = list(book[page])
         figs_here = figs_by_page[page]
@@ -853,10 +1241,17 @@ def cmd_pack(a: argparse.Namespace) -> None:
     out_txt.write_text("\n".join(txt_parts).rstrip() + "\n", encoding="utf-8-sig")
 
     total_chars = len(re.sub(r"\s", "", "\n".join(txt_parts)))
-    out(f"[ok] txt → {out_txt}（{total_chars} 字）")
+    out(f"[ok] txt → {out_txt}（{total_chars} 字）"
+        + ("（含章界元数据块）" if len(txt_parts) > 2 else ""))
+
+    m["packed"] = True
+    save_manifest(job, m)
 
     # ---- 插图版 PDF ----
     if a.no_pdf:
+        return
+    if "pdf" not in (m.get("config") or {}).get("output", ["txt", "pdf"]):
+        out("[i] config.output 未含 pdf，跳过插图版 PDF（txt 已产出）")
         return
     pdf_path = pack_pdf(job, m, book, notes, figs_by_page)
     if pdf_path:
@@ -999,8 +1394,8 @@ def main() -> None:
     p = sub.add_parser("init")
     p.add_argument("name")
     p.add_argument("--src", required=True)
-    p.add_argument("--batch", type=int, default=10)
-    p.add_argument("--dpi", type=int, default=200)
+    p.add_argument("--batch", type=int, default=None, help="每批页数（缺省=config.pages_per_batch，默认 10）")
+    p.add_argument("--dpi", type=int, default=None, help="渲染 dpi（缺省=config.dpi，默认 200）")
     p.add_argument("--color", action="store_true")
     p.set_defaults(fn=cmd_init)
 
@@ -1034,7 +1429,7 @@ def main() -> None:
     p = sub.add_parser("aivision")
     p.add_argument("job")
     p.add_argument("--batch", default=None, help="只识别指定批（缺省=全部 pending/failed 批）")
-    p.add_argument("--workers", type=int, default=4, help="页级并发数")
+    p.add_argument("--workers", type=int, default=None, help="页级并发数（缺省=config.aivision_workers，默认 5）")
     p.add_argument("--force", action="store_true")
     p.add_argument("--min", type=int, default=100)
     p.set_defaults(fn=cmd_aivision)
@@ -1045,6 +1440,12 @@ def main() -> None:
     p.add_argument("--all-failed", action="store_true")
     p.set_defaults(fn=cmd_retry)
 
+    p = sub.add_parser("chapters")
+    p.add_argument("job")
+    p.add_argument("--apply", default=None, help="吸收裁决文件（chapters_review.txt）后重切章")
+    p.add_argument("--no-review", action="store_true", help="不生成裁决任务卡（疑点只记台账，pack 不拦）")
+    p.set_defaults(fn=cmd_chapters)
+
     p = sub.add_parser("status")
     p.add_argument("job")
     p.set_defaults(fn=cmd_status)
@@ -1053,6 +1454,8 @@ def main() -> None:
     p.add_argument("job")
     p.add_argument("--no-pdf", action="store_true")
     p.add_argument("--force", action="store_true", help="允许带未完成批打包（出半本书）")
+    p.add_argument("--auto-chapters", action="store_true", help="还没切章时自动先跑一次 chapters")
+    p.add_argument("--no-chapters", action="store_true", help="txt 不带章界元数据块（旧格式）")
     p.set_defaults(fn=cmd_pack)
 
     a = ap.parse_args()

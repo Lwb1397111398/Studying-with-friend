@@ -1,0 +1,8 @@
+{
+  "route": "subagent",
+  "pages_per_batch": 10,
+  "dpi": 200,
+  "aivision_workers": 5,
+  "chapter_review": true,
+  "output": ["txt", "pdf"]
+}
