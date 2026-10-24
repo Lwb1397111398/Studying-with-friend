@@ -429,7 +429,7 @@ object BookParser {
      * 各自成块、无标记）。只剩标记的块（空页）丢弃；任何块产生前无标记（TXT 开头）
      * 页号为 null。标记永远在各页正文首行之前（assembleText 保证），块中标记即页界。
      */
-    private fun stripPageMarks(blocks: List<List<String>>): Pair<List<List<String>>, List<Int?>> {
+    internal fun stripPageMarks(blocks: List<List<String>>): Pair<List<List<String>>, List<Int?>> {
         val outBlocks = mutableListOf<List<String>>()
         val outPages = mutableListOf<Int?>()
         var last: Int? = null
@@ -638,8 +638,9 @@ object BookParser {
 
     // ---- 块与段落 ----
 
-    /** 按空行分块（空行 = isBlank，含全角空格行）；返回每块的物理行列表 */
-    private fun splitBlocks(text: String): List<List<String>> {
+    /** 按空行分块（空行 = isBlank，含全角空格行）；返回每块的物理行列表。
+     *  internal：KitBookParser（KIT 成品书直入）复用同一分块口径保证锚定行一致 */
+    internal fun splitBlocks(text: String): List<List<String>> {
         val blocks = mutableListOf<List<String>>()
         var cur = mutableListOf<String>()
         for (line in text.split('\n')) {

@@ -179,10 +179,13 @@ fun ReadScreen(
                 },
             )
 
-            // OPT-C C4：计数用正文视图（TOC/脚注段永远无标注，混入计数会让"部分标注"态无法收敛）；
-            // LazyColumn 渲染仍用全量列表（目录条目/脚注按次级样式展示）
+            // OPT-C C4：计数用正文视图（TOC/脚注/图描述段永远无标注，混入计数会让"部分标注"态无法收敛）；
+            // LazyColumn 渲染仍用全量列表（目录条目/脚注/图描述按次级样式展示）
             val bodyParagraphs = remember(paragraphs) {
-                paragraphs.filter { it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE }
+                paragraphs.filter {
+                    it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE &&
+                        it.role != DbValues.ROLE_FIGURE
+                }
             }
             val markedCount = bodyParagraphs.count { it.aiAction != DbValues.ACT_NONE }
 

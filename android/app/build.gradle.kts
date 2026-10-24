@@ -121,6 +121,8 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.room:room-testing:2.6.1")
+    // JVM 单测里 org.json 是 Android stub（方法全抛 not mocked），KitBookParserTest 用真实现顶替
+    testImplementation("org.json:json:20240303")
     // Compose UI 冒烟测试（M4a：章目录/阅读页渲染）；manifest 须随 debug 变体合并
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

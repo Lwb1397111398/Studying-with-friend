@@ -23,6 +23,8 @@ import com.studyfriend.app.data.importer.BookParser
 import com.studyfriend.app.data.importer.CancelledImportException
 import com.studyfriend.app.data.importer.CustomRegexNoMatchException
 import com.studyfriend.app.data.importer.DecodeException
+import com.studyfriend.app.data.importer.KitBookParser
+import com.studyfriend.app.data.importer.KitMeta
 import com.studyfriend.app.data.importer.ParsedChapter
 import com.studyfriend.app.data.importer.PdfExtractResult
 import com.studyfriend.app.data.importer.PdfImportException
@@ -142,6 +144,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private var sourceText: String? = null
+
+    /** KIT 成品书元数据（bookocr-kit pack 的 txt 头部协议块命中时非空）：
+     *  parse() 据此分流 KitBookParser（电脑侧章界直入）；换文件/粘贴/失败时清空 */
+    private var kitMeta: KitMeta? = null
     private var sourceType = DbValues.SRC_PASTE
     private var sourceUri = ""
     /** 最近一次尝试读取的文件，手动改编码后据此重读 */
@@ -219,6 +225,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 sourceType = DbValues.SRC_PASTE
                 lastUri = null
                 isPdf = false
+                kitMeta = null // 粘贴不走 KIT 直入（几 MB 成品 txt 贴不进输入框，文件导入才是主链路）
                 currentRegex = null
                 editedTitles.clear()
                 deleted = emptySet()
@@ -259,6 +266,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 pendingVisionItems = null // 旧书的队列暂存同步作废（否则换书确认会错入队）
                 failedVisionItems = null
                 ocrImported = false
+                kitMeta = null // 上一本的 KIT 元数据作废（txt 分支命中时重设）
                 clearFigures() // P4：旧书幸存图同步作废
                 // 新文件开始先清上一本的探针态（PDF 路径 runTocProbe 会重跑；TXT 保持 Idle）
                 tocState = TocProbeState.Idle
@@ -314,11 +322,14 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     } else {
                         phase = "读取文件"
-                        content = TextLoader.decode(
+                        val decoded = TextLoader.decode(
                             app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                                 ?: ByteArray(0),
                             encoding,
                         ).text
+                        // KIT 成品书检测：头部协议块命中 → 剥块、记元数据，parse 走电脑侧章界
+                        kitMeta = KitBookParser.extract(decoded)
+                        content = if (kitMeta != null) KitBookParser.stripMeta(decoded) else decoded
                     }
                     Triple(displayName, isPdfFile, content)
                 }
@@ -367,6 +378,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     private fun failRead(message: String?) {
         error = message
         sourceText = null
+        kitMeta = null
         parseNote = null
         figureNoteDetail = null
         clearFigures()
@@ -661,7 +673,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         if (!isPdf) lastUri?.let { loadFile(it) }
     }
 
-    /** 换识别规则重切（§2.3）；null 恢复内置正则族。失败时保留当前解析结果 */
+    /** 换识别规则重切（§2.3）；null 恢复内置正则族。失败时保留当前解析结果。
+     *  KIT 成品书不参与：章界权威在电脑侧，parse() 分流忽略 regex（重切结果不变） */
     fun reparse(regex: String?) {
         if (busy) return
         viewModelScope.launch {
@@ -790,6 +803,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     fun reset() {
         drainImportDone()
         sourceText = null
+        kitMeta = null
         sourceType = DbValues.SRC_PASTE
         sourceUri = ""
         lastUri = null
@@ -874,23 +888,30 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         parseNote = null
         phase = "解析章节结构"
         try {
+            val kit = kitMeta
             // 解析与锚点对账都是 CPU 密集（锚点要全书逐行正则扫描，几百页数秒级），一并放 Default
             val (result, anchors) = withContext(Dispatchers.Default) {
-                // styleAware 与 assembleText 打标同源（isPdf）：PDF=true 认〔标题〕前缀并
-                // 启用字号门槛，TXT=false 完全保持 P2 行为
-                val parsed = BookParser.parse(text, currentRegex, styleAware = isPdf)
-                // P6b S4 章节锚点对账（v1.2 P1-3）：行首「第X章」锚数 vs 检出章节数，
-                // 锚 ≥3 且检出 <70% 追加提示。点线行（目录条目）不计锚，行首锚定滤段中引用；
-                // OCR 拆行致锚少报 → 判据趋保守（少提示），UNMEASURED 待 S7 真书复核。
-                val anchorCount = if (ocrImported) {
-                    val anchorRe = Regex("^第[0-9零〇一二三四五六七八九十百千两]+章")
-                    val dots = Regex("[…⋯·•‧]")
-                    text.lineSequence()
-                        .map { it.trim() }
-                        .filter { anchorRe.containsMatchIn(it) && !dots.containsMatchIn(it) }
-                        .count()
-                } else 0
-                parsed to anchorCount
+                if (kit != null) {
+                    // KIT 成品书：章界权威在电脑侧章表（bookocr-kit chapters 对账产物），
+                    // 正则切章/目录探针/前置分块/盲切全跳过，reparse 的 regex 同样不参与
+                    KitBookParser.parse(text, kit) to 0
+                } else {
+                    // styleAware 与 assembleText 打标同源（isPdf）：PDF=true 认〔标题〕前缀并
+                    // 启用字号门槛，TXT=false 完全保持 P2 行为
+                    val parsed = BookParser.parse(text, currentRegex, styleAware = isPdf)
+                    // P6b S4 章节锚点对账（v1.2 P1-3）：行首「第X章」锚数 vs 检出章节数，
+                    // 锚 ≥3 且检出 <70% 追加提示。点线行（目录条目）不计锚，行首锚定滤段中引用；
+                    // OCR 拆行致锚少报 → 判据趋保守（少提示），UNMEASURED 待 S7 真书复核。
+                    val anchorCount = if (ocrImported) {
+                        val anchorRe = Regex("^第[0-9零〇一二三四五六七八九十百千两]+章")
+                        val dots = Regex("[…⋯·•‧]")
+                        text.lineSequence()
+                            .map { it.trim() }
+                            .filter { anchorRe.containsMatchIn(it) && !dots.containsMatchIn(it) }
+                            .count()
+                    } else 0
+                    parsed to anchorCount
+                }
             }
             if (result.all { it.paras.isEmpty() }) {
                 error = "未能解析出任何内容，请检查文件"
@@ -913,7 +934,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             }
             // P4 双层文案（r8-P2-4）：主文案进 parseNote，技术明细走 figureNoteDetail
             val figureNote = FigureParseNote.main(figureStats, figureBypassed)
-            parseNote = listOfNotNull(blindNote, figureNote, visionStatsNote, frontNote, tocProbeNote)
+            val kitNote = if (kit != null) "bookocr 成品书：章界已由电脑侧确认" else null
+            parseNote = listOfNotNull(kitNote, blindNote, figureNote, visionStatsNote, frontNote, tocProbeNote)
                 .joinToString("；")
                 .ifEmpty { null }
             // P6b S4 章节锚点对账（v1.2 P1-3）：行首「第X章」锚数 vs 检出章节数，

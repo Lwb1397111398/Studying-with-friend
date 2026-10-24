@@ -85,7 +85,10 @@ fun findHighlightIndex(paras: List<ParagraphEntity>, highlight: String): Int? {
     val key = normalizeHighlight(highlight)
     if (key.isEmpty()) return null
     val candidates = paras.withIndex()
-        .filter { it.value.role != DbValues.ROLE_TOC && it.value.role != DbValues.ROLE_FOOTNOTE }
+        .filter {
+            it.value.role != DbValues.ROLE_TOC && it.value.role != DbValues.ROLE_FOOTNOTE &&
+                it.value.role != DbValues.ROLE_FIGURE
+        }
         .map { it.index to normalizeHighlight(it.value.text) }
         .filter { it.second.isNotEmpty() }
     candidates.firstOrNull { it.second == key }?.let { return it.first }

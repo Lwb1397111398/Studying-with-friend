@@ -6,14 +6,15 @@ import com.studyfriend.app.data.db.DbValues
 object ReadStyles {
     /**
      * 次级视觉（小字次级色、无重点竖条/无 AI 徽标）适用的段角色：目录条目/页脚注/
-     * 前置版权页/后置版权页。FRONT/BACK 仅展示降级，不改动 AI 规划行为（P5-F 定案：
-     * FRONT/BACK 保留 AI 参与，粗读规划、正文计数等加工口径维持现状）。
+     * 前置版权页/后置版权页/bookocr 图描述行。FRONT/BACK 仅展示降级，不改动 AI 规划
+     * 行为（P5-F 定案：FRONT/BACK 保留 AI 参与，粗读规划、正文计数等加工口径维持现状）。
      */
     fun isSecondaryRole(role: String): Boolean = when (role) {
         DbValues.ROLE_TOC,
         DbValues.ROLE_FOOTNOTE,
         DbValues.ROLE_FRONT,
         DbValues.ROLE_BACK,
+        DbValues.ROLE_FIGURE,
         -> true
         else -> false
     }

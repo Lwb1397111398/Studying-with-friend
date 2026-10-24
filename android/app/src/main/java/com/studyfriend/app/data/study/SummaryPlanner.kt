@@ -61,8 +61,10 @@ class SummaryPlanner(
         val cfg = settings.load()
         // OPT-C C4：TOC 段不进总结包（章节要点/讲解卡/题目都不含目录条目）
         // OPT-E：脚注段同样跳过（页面引注不属于章节正文）
+        // KIT：图描述行跳过（〔图：…〕是给读者翻图的提示，不是正文）
         val paragraphs = db.paragraphDao().byChapter(chapterId).filter {
-            it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE
+            it.role != DbValues.ROLE_TOC && it.role != DbValues.ROLE_FOOTNOTE &&
+                it.role != DbValues.ROLE_FIGURE
         }
         if (paragraphs.isEmpty()) {
             throw PlannerException("本章是目录或无正文内容，无需总结")
