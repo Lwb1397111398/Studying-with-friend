@@ -28,6 +28,50 @@ object BookParser {
     private val RE_A_LATIN = Regex("^(Chapter|Unit)\\s+\\d+", RegexOption.IGNORE_CASE)
     private val FIXED_WORDS = setOf("前言", "序言", "引言", "目录", "附录", "后记", "参考文献")
 
+    // P8 前置/后置标题变体族（老板「按内容分块」诉求）：固定词外的常见变体（写在前面/
+    // 第X版序/总序/译序/凡例/作者简介/致谢/跋…）。全行精确锚定（^…$）——正文行文不可能
+    // 整行恰好等于这些词，比 contains 安全；命中走 A_FIXED 档（PDF 路径同受〔标题〕字号
+    // 证据门槛约束，TXT 路径纯形态护栏）。多版序（初版序/第二版序）标题不同 → 各自成章。
+    private val RE_FRONT_TITLE = Regex(
+        "^(?:" +
+            "(?:第?[0-9一二三四五六七八九十百]{1,3}版|初版|再版|新版|修订版|增订版)?序(?:言|[一二三四五六七八九十])?" +
+            "|(?:丛书)?总序|自序|代序|小序" +
+            "|写在前面(?:的话)?|写在卷首|作者的话|译者的话" +
+            "|(?:再版|修订|新版|出版|编写|编译|增订)说明" +
+            "|凡例|缩略语表?|简称(?:对照)?表" +
+            "|作者简介|译者简介|作者与译者简介|关于作者|献词" +
+            ")$",
+    )
+
+    // 后置变体：致谢/谢辞/跋 与「参考文献/附录/后记」同走 ROLE_BACK
+    private val RE_BACK_TITLE = Regex("^(?:致谢|谢辞|译后记|跋)$")
+
+    /** 前置标题全行判定（切章 role=FRONT 的依据；含固定词前言/序言/引言） */
+    internal fun isFrontMatterTitle(t: String): Boolean =
+        t == "前言" || t == "序言" || t == "引言" || RE_FRONT_TITLE.matches(t)
+
+    /** 后置标题判定（role=BACK；含固定词参考文献/附录/后记） */
+    internal fun isBackMatterTitle(t: String): Boolean =
+        t == "参考文献" || t == "附录" || t == "后记" || RE_BACK_TITLE.matches(t)
+
+    /**
+     * 目录条目的前置判定（P8）：比 [isFrontMatterTitle] 宽——目录条目常带副题/年份
+     * （「写在前面——致读者」「序（2003年）」），整行锚定会漏，前缀放宽 + 长度护栏。
+     * 仅用于把前置条目从 TocChapterCalibrator 的正文章节锚定分母剔除（前置页码相对
+     * 目录前置，锚定窗口永远够不着，徒增分母），不参与切章。
+     */
+    internal fun isFrontMatterEntryTitle(t: String): Boolean {
+        if (t.isEmpty() || t.length > 14) return false
+        if (isFrontMatterTitle(t)) return true
+        return t.startsWith("写在前面") || t.startsWith("写在卷首") || t.startsWith("总序") ||
+            t.startsWith("译序") || t.startsWith("译者序") || t.startsWith("译者的话") ||
+            t.startsWith("自序") || t.startsWith("作者的话") || t.startsWith("序言") ||
+            t.startsWith("初版序") || t.startsWith("再版序") || t.startsWith("再版说明") ||
+            t.startsWith("修订说明") || t.startsWith("增订版") || t.startsWith("凡例") ||
+            t.startsWith("缩略语") || t.startsWith("作者简介") || t.startsWith("译者简介") ||
+            Regex("^第?[0-9一二三四五六七八九十百]{1,3}版").containsMatchIn(t)
+    }
+
     // B 档（节级）
     private val RE_B = Regex("^第[一二三四五六七八九十百千0-9零〇两]+[节讲]")
 
@@ -543,7 +587,7 @@ object BookParser {
             custom != null -> if (custom.containsMatchIn(t)) GRADE_A to "CUSTOM" else null
             RE_A_HAN.containsMatchIn(t) -> GRADE_A to "A_HAN"
             RE_A_LATIN.containsMatchIn(t) -> GRADE_A to "A_LATIN"
-            t in FIXED_WORDS -> GRADE_A to "A_FIXED"
+            t in FIXED_WORDS || isFrontMatterTitle(t) || isBackMatterTitle(t) -> GRADE_A to "A_FIXED"
             RE_B.containsMatchIn(t) -> GRADE_B to "B"
             RE_C_HAN.containsMatchIn(t) -> GRADE_C to "C_HAN"
             RE_C_PAREN.containsMatchIn(t) -> GRADE_C to "C_PAREN"
@@ -583,9 +627,12 @@ object BookParser {
         return head
     }
 
-    private fun roleFor(title: String): String = when (title) {
-        "目录" -> DbValues.ROLE_FRONT
-        "参考文献", "附录", "后记" -> DbValues.ROLE_BACK
+    // P8：前置标题族（前言/序言/写在前面/第X版序/凡例/作者简介…）→ FRONT（阅读页次级
+    // 小字，与「开篇」一致）；后置族（参考文献/附录/后记/致谢/跋）→ BACK；目录章沿用 FRONT
+    private fun roleFor(title: String): String = when {
+        title == "目录" -> DbValues.ROLE_FRONT
+        isBackMatterTitle(title) -> DbValues.ROLE_BACK
+        isFrontMatterTitle(title) -> DbValues.ROLE_FRONT
         else -> DbValues.ROLE_BODY
     }
 

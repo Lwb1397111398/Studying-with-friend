@@ -108,6 +108,8 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 - **Runner/Planner 模式复用**：ChatJsonFn 构造注入 + StudyApp 单例 + StateFlow 五态 + 全局互斥——M4b 批量讲解队列沿用同一互斥纪律（讲解与粗读互斥或排队由 M4b 计划定）
 
 ## 最后更新
+- 2026-10-24 **P8 顺带修复：上/下章按钮跳空节行**——ReadScreen 上/下章按钮取 siblings 用的 `chapterDao().byBook` 不带 level 过滤，目录校准书的表里混有 level=2 节行（段落恒空），「下一章」会跳到空节行（显示「本章还没有内容」）。修法：查询结果 `.filter { it.level == 1 }`（不动 DAO，byBook 其他消费方零影响）。同日 M2 落地 P8 前置分块（封面/作者介绍/初版序/第二版序各自成章、role=FRONT 走本模块 isSecondaryRole 次级小字展示），详见 M2 总览 2026-10-24 条。
+
 - 2026-10-11 **ReadScreen.kt（原 1555 行）拆五文件**：ReadScreen.kt 450 行（主屏+TextSelection/QaTarget/buildQaTarget）、ReadTools.kt 368（工具 chips 行/状态行/字号弹层/划词浮条）、ReadCards.kt 247（段落行/要点卡/讲解卡）、QuickQaSheet.kt 216（流式问答弹层）、FigureGallery.kt 272（插图混排全家）。纯搬运，跨文件符号升 internal、文件内 private 不动；单测依赖面（buildReadRows/calcInSampleSize）不变，ReadScreenRowsTest 绿；模拟器实测阅读页渲染/插图解码/全屏预览正常。教训：import 按简单名裁剪会误删 `by remember` 依赖的 getValue/setValue 操作符导入（正文无字面名），引发 146 个连锁编译错误，已按字母序补回。
 
 - 2026-10-11 **优化批次：随手问流式节流**——QuickQaSheet 流式回答改 StringBuilder+100ms 节流刷新（原逐 delta 全文重拼 O(n²)+整卡重组+逐 delta 强制滚动，长回答越生成越卡）；发问前 KeyStore 解密/提示词加载挪 Dispatchers.IO（原主线程卡 10-100ms 量级）。

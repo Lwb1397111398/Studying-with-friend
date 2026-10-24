@@ -775,4 +775,26 @@ class TocChapterCalibratorTest {
         // 全书无文本层（扫描件）→ 无锚点 → 区段弃用 → 整书 null（零回归）
         assertNull(calibrate(standardEntries(), standardLocals(), emptyMap()))
     }
+
+    // ---- P8 前置条目剔除 ----
+
+    @Test
+    fun p8_frontTocEntries_excluded_noPhantomChaptersInBody() {
+        // 目录含前置条目（写在前面/初版序/第二版序言，小页码）。剔除前实害：前置条目映射到
+        // 目录尾页附近，挤占正文章映射页（同页防重吞掉第一章）或把「初版序@6」式幻影章
+        // 插进正文页区间，段落被重排进幻影章。P8 前置条目一律剔除，正文三章干净校准。
+        val entries = listOf(
+            entry("写在前面", 1),
+            entry("初版序", 2),
+            entry("第二版序言", 3),
+            entry("第一章总则", 1),
+            entry("第二章分则", 10),
+            entry("第三章附则", 20),
+        )
+        val out = calibrate(entries, standardLocals(), standardPages())!!
+        val chapters = out.chapters.filter { it.level == 1 }
+        assertEquals(listOf("第一章 总则", "第二章 分则", "第三章 附则"), chapters.map { it.title })
+        assertEquals(listOf(5, 14, 24), chapters.map { it.startPage })
+        assertTrue("前置条目不得以幻影章混进输出", out.chapters.none { it.title.contains("序") || it.title == "写在前面" })
+    }
 }

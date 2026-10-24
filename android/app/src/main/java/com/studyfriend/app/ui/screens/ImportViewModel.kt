@@ -43,6 +43,10 @@ import com.studyfriend.app.data.importer.pdfpipeline.PageTranscription
 import com.studyfriend.app.data.importer.pdfpipeline.Para
 import com.studyfriend.app.data.importer.pdfpipeline.excludeFigurePages
 import com.studyfriend.app.data.importer.pdfpipeline.CalibrateOutcome
+import com.studyfriend.app.data.importer.pdfpipeline.FrontBlock
+import com.studyfriend.app.data.importer.pdfpipeline.FrontKinds
+import com.studyfriend.app.data.importer.pdfpipeline.FrontMatterBlocks
+import com.studyfriend.app.data.importer.pdfpipeline.FrontPageVerdict
 import com.studyfriend.app.data.importer.pdfpipeline.TocChapterCalibrator
 import com.studyfriend.app.data.importer.pdfpipeline.TocEntry
 import com.studyfriend.app.data.importer.pdfpipeline.TocPageGrouper
@@ -53,6 +57,7 @@ import com.studyfriend.app.data.vision.VisionCache
 import com.studyfriend.app.data.vision.VisionScheduler
 import java.io.File
 import java.util.regex.PatternSyntaxException
+import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -151,7 +156,18 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /** 探针区段（每册 tocLike 页分组，P3b-2 §3.4）：confirmImport 校准时取各区段目录尾页 */
-    private var probeSegments: List<List<Int>>? = null    /**
+    private var probeSegments: List<List<Int>>? = null
+
+    /** P8 前置探针页级判定（同书 reparse 复用不重烧）；换文件/粘贴/失败清空 */
+    private var frontVerdicts: List<FrontPageVerdict>? = null
+
+    /** P8 目录探针注记（确认页 parseNote 可见性：未发现目录页/视觉未配置/识别失败） */
+    private var tocProbeNote: String? = null
+
+    /** P8 tocLike 最小页（前置探针圈页上限）；无 tocLike 时为 null */
+    private var tocFirstPage: Int? = null
+
+    /**
      * 超单次上限的可疑页暂存（OPT-F）：页号 to 清洗后字数。导入不再拒绝，
      * 文字层先行；确认落库后写 vision_queue 交 WorkManager 后台逐页转写。
      */
@@ -211,6 +227,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 clearFigures()
                 tocState = TocProbeState.Idle // 粘贴路径无探针；清掉上一本 PDF 可能残留的目录
                 probeSegments = null
+                clearFrontProbeState()
                 if (bookTitle.isBlank()) bookTitle = "粘贴笔记"
                 parse()
             } catch (e: Exception) {
@@ -246,6 +263,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 // 新文件开始先清上一本的探针态（PDF 路径 runTocProbe 会重跑；TXT 保持 Idle）
                 tocState = TocProbeState.Idle
                 probeSegments = null
+                clearFrontProbeState()
                 // IO：文件名/mime 查询 + 解码/PDF 提取都在 IO 线程，结果回主线程赋值
                 val (name, pdf, text) = withContext(Dispatchers.IO) {
                     val displayName = queryDisplayName(uri) ?: uri.lastPathSegment.orEmpty()
@@ -360,6 +378,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         isPdf = false
         tocState = TocProbeState.Idle
         probeSegments = null
+        clearFrontProbeState()
     }
 
     /**
@@ -580,14 +599,17 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         // 连续导入时先清掉上一本的目录：无 tocLike/视觉未配置/异常三条早退路径都不得残留旧数据
         tocState = TocProbeState.Idle
         probeSegments = null
+        clearFrontProbeState()
         try {
             val tocSegments = TocPageGrouper.group(result.pages.filter { it.tocLike }.map { it.pageNum })
             if (tocSegments.isEmpty()) {
                 Log.i("P3b", "no tocLike pages")
                 tocState = TocProbeState.Failed
+                tocProbeNote = "未发现目录页，章节按标题识别"
                 return
             }
             probeSegments = tocSegments
+            tocFirstPage = tocSegments.minOf { seg -> seg.min() }
             Log.i("P3b", "toc probe segments=$tocSegments")
             tocState = TocProbeState.Running
             PdfPageRenderer(getApplication(), uri).use { renderer ->
@@ -597,12 +619,14 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 if (parser == null) {
                     Log.i("P3b", "vision unavailable, toc probe skipped")
                     tocState = TocProbeState.Failed
+                    tocProbeNote = "视觉模型未配置，目录未识别；配置后重新导入可校准章节"
                     return
                 }
                 val entries = parser.parseSegments(tocSegments, VisionCache.uriHash(uri.toString()))
                 if (entries == null) {
                     Log.i("P3b", "toc probe: no entries (failed, budget exhausted or cached failure)")
                     tocState = TocProbeState.Failed
+                    tocProbeNote = "目录识别失败，章节按标题识别"
                 } else {
                     tocState = TocProbeState.Done(entries)
                 }
@@ -790,6 +814,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         deleted = emptySet()
         tocState = TocProbeState.Idle
         probeSegments = null
+        clearFrontProbeState()
     }
 
     /** 现状路径的一章落库对（校准不可用时与 P3b-2 之前行为逐字段一致） */
@@ -872,27 +897,31 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 chapters = emptyList()
                 return
             }
-            chapters = result
+            // P8 前置分块（仅 PDF 路径）：前置探针页级判定 → 「开篇」按内容拆成带名章
+            // （封面/版权页/作者介绍/初版序/第二版序…）；失败/守卫不过零回归
+            if (isPdf) phase = "识别书的开头结构"
+            val (structured, frontNote) = if (isPdf) applyFrontMatter(result) else result to null
+            chapters = structured
             // 兜底提示与视觉统计可同时成立（无标题盲切 + 部分页排队视觉转写），拼接而非互斥
             val blindNote = when {
                 // 只凭 blindCut 标记判断兜底态，避免自定义规则命中"全文"时误报
-                result.first().blindCut && result.size == 1 ->
+                chapters.first().blindCut && chapters.size == 1 ->
                     "未识别到章节标题，已整本作为一章；可换识别规则重新识别"
-                result.first().blindCut ->
-                    "未识别到章节标题，已按每约 3000 字盲切为 ${result.size} 个部分"
+                chapters.first().blindCut ->
+                    "未识别到章节标题，已按每约 3000 字盲切为 ${chapters.size} 个部分"
                 else -> null
             }
             // P4 双层文案（r8-P2-4）：主文案进 parseNote，技术明细走 figureNoteDetail
             val figureNote = FigureParseNote.main(figureStats, figureBypassed)
-            parseNote = listOfNotNull(blindNote, figureNote, visionStatsNote)
+            parseNote = listOfNotNull(blindNote, figureNote, visionStatsNote, frontNote, tocProbeNote)
                 .joinToString("；")
                 .ifEmpty { null }
             // P6b S4 章节锚点对账（v1.2 P1-3）：行首「第X章」锚数 vs 检出章节数，
             // 锚 ≥3 且检出 <70% 追加提示。点线行（目录条目）不计锚，行首锚定滤段中引用；
             // OCR 拆行致锚少报 → 判据趋保守（少提示），UNMEASURED 待 S7 真书复核。
-            if (ocrImported && anchors >= 3 && result.size < anchors * 0.7) {
+            if (ocrImported && anchors >= 3 && chapters.size < anchors * 0.7) {
                 parseNote = (parseNote?.plus("；") ?: "") +
-                    "书中有 $anchors 处「第X章」字样但只解析出 ${result.size} 章，可到章节列表核对"
+                    "书中有 $anchors 处「第X章」字样但只解析出 ${chapters.size} 章，可到章节列表核对"
             }
         } catch (e: PatternSyntaxException) {
             error = "识别规则正则无效：${e.description ?: e.message ?: "语法错误"}"
@@ -912,5 +941,132 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         return null
+    }
+
+    // ---- P8 前置分块（老板「按内容分块」诉求） ----
+
+    /** 前置探针三态清理（换文件/粘贴/失败/重置）；runTocProbe 入口也调 */
+    private fun clearFrontProbeState() {
+        frontVerdicts = null
+        tocProbeNote = null
+        tocFirstPage = null
+    }
+
+    /**
+     * 前置分块主入口：圈前置页（目录首页/文本侧首个正文章起点之前，≤24 页）→ 视觉
+     * 判定每页属于书的哪部分 → 守卫 → 「开篇」按块拆成带名 FRONT 章。
+     * 探针失败/守卫不过 → 原样返回（零回归）；同书重切复用已缓存判定不重烧。
+     */
+    private suspend fun applyFrontMatter(parsed: List<ParsedChapter>): Pair<List<ParsedChapter>, String?> {
+        val uri = lastUri ?: return parsed to null
+        // 圈页：前置区 = 1..(frontEnd-1)。frontEnd 优先目录首页（最可靠的结构边界）；
+        // 无目录取文本侧首个正文章起点；盲切书（标题全丢）兜底探前 24 页
+        val blind = parsed.firstOrNull()?.blindCut == true
+        val textBodyStart = if (blind) null else parsed
+            .firstOrNull { ch -> ch.paras.any { it.role == DbValues.ROLE_BODY } }
+            ?.paras?.firstNotNullOfOrNull { it.pageNo }
+        val frontEnd = tocFirstPage ?: textBodyStart ?: 25
+        val frontPages = (1 until frontEnd.coerceIn(2, 25)).toList()
+        if (frontPages.size < 2) return parsed to null
+
+        val verdicts = frontVerdicts ?: runFrontProbe(uri, frontPages)?.also { frontVerdicts = it }
+        if (verdicts == null) return parsed to null
+
+        // 守卫：探针判的正文起点 vs 文本侧首个正文章起点差 >2 页 = 选页/误判，整体弃用
+        val probeBodyStart = verdicts.firstOrNull { it.kind == FrontKinds.BODY }?.page
+        if (textBodyStart != null && probeBodyStart != null && abs(probeBodyStart - textBodyStart) > 2) {
+            Log.w("P8", "front probe guard fail: probeBody=$probeBodyStart textBody=$textBodyStart")
+            return parsed to null
+        }
+        // 目录漏判兜底：文本侧没发现目录页但探针看到目录页 → 补跑目录探针（P8）
+        if (tocFirstPage == null && tocState is TocProbeState.Failed) {
+            supplementTocProbe(uri, verdicts)
+        }
+        val boundary = verdicts.firstOrNull { it.kind == FrontKinds.TOC || it.kind == FrontKinds.BODY }?.page
+            ?: frontEnd
+        val blocks = FrontMatterBlocks.build(verdicts.filter { it.page < boundary })
+        if (blocks.isEmpty()) return parsed to null
+        return rebuildWithFrontBlocks(parsed, blocks, boundary) ?: (parsed to null)
+    }
+
+    /** 前置探针网络入口：视觉不可用/任何失败 → null（回退纯文本路线） */
+    private suspend fun runFrontProbe(uri: Uri, pages: List<Int>): List<FrontPageVerdict>? {
+        return try {
+            PdfPageRenderer(getApplication(), uri).use { renderer ->
+                val parser = settings.buildFrontMatterVisionParser(
+                    File(getApplication<Application>().cacheDir, "vision_cache/frontmatter"),
+                ) { pageNo -> renderer.renderPageBase64(pageNo - 1) } ?: return null
+                parser.probe(pages, VisionCache.uriHash(uri.toString()))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("P8", "front probe failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 目录漏判兜底（P8）：前置探针发现目录页而 PdfCleaner 三判据全漏（tocState Failed）
+     * → 用这些页补跑目录探针；成功则升级 tocState=Done（confirmImport 校准消费）。
+     * 探针自带缓存/marker，同书重导不重烧；任何失败保持 Failed（原行为）。
+     */
+    private suspend fun supplementTocProbe(uri: Uri, verdicts: List<FrontPageVerdict>) {
+        val tocPages = verdicts.mapNotNull { v -> v.page.takeIf { v.kind == FrontKinds.TOC } }
+        if (tocPages.isEmpty()) return
+        try {
+            PdfPageRenderer(getApplication(), uri).use { renderer ->
+                val parser = settings.buildTocVisionParser(
+                    File(getApplication<Application>().cacheDir, "vision_cache/toc"),
+                ) { pageNo -> renderer.renderPageBase64(pageNo - 1) } ?: return
+                val entries = parser.parse(tocPages, VisionCache.uriHash(uri.toString())) ?: return
+                tocState = TocProbeState.Done(entries)
+                probeSegments = listOf(tocPages)
+                tocFirstPage = tocPages.min()
+                tocProbeNote = "已识别目录（开头结构探针发现目录页），导入时将校准章节"
+                Log.i("P8", "toc supplement: ${entries.size} entries from pages $tocPages")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("P8", "toc supplement failed: ${e.message}")
+        }
+    }
+
+    /**
+     * 头部章（首段页号 < [boundary] 的章）段落按块页区间重新分箱成带名 FRONT 章；
+     * 块盖不住的段（页码 null/块前杂页）落「开篇」。无可重组内容 → null（零回归）。
+     * 原「开篇」/文本规则切出的序言章被块替代，不产生重复。
+     */
+    private fun rebuildWithFrontBlocks(
+        parsed: List<ParsedChapter>,
+        blocks: List<FrontBlock>,
+        boundary: Int,
+    ): Pair<List<ParsedChapter>, String?>? {
+        val headChapters = mutableListOf<ParsedChapter>()
+        val tailChapters = mutableListOf<ParsedChapter>()
+        var tailStarted = false
+        for (ch in parsed) {
+            val firstPage = ch.paras.firstNotNullOfOrNull { it.pageNo }
+            if (!tailStarted && firstPage != null && firstPage >= boundary) tailStarted = true
+            if (tailStarted) tailChapters += ch else headChapters += ch
+        }
+        val headParas = headChapters.flatMap { it.paras }
+        val blockChapters = blocks.mapNotNull { b ->
+            val paras = headParas
+                .filter { p -> p.pageNo != null && p.pageNo in b.startPage..b.endPage }
+                .map { it.copy(role = DbValues.ROLE_FRONT) }
+            if (paras.isEmpty()) null else ParsedChapter(b.title, paras)
+        }
+        if (blockChapters.isEmpty()) return null
+        val leftover = headParas
+            .filter { p -> p.pageNo == null || blocks.none { b -> p.pageNo in b.startPage..b.endPage } }
+            .map { it.copy(role = DbValues.ROLE_FRONT) }
+        val openChapter = if (leftover.any { it.text.isNotBlank() }) {
+            listOf(ParsedChapter("开篇", leftover))
+        } else emptyList()
+        val out = openChapter + blockChapters + tailChapters
+        val names = (openChapter + blockChapters).joinToString("、") { it.title }
+        return out to "开头部分已按内容分块：${names.take(40)}"
     }
 }

@@ -7,6 +7,7 @@ import com.studyfriend.app.data.ai.SecretStore
 import com.studyfriend.app.data.ai.isStructurallyCorrupt
 import com.studyfriend.app.data.db.SettingEntity
 import com.studyfriend.app.data.db.StudyDatabase
+import com.studyfriend.app.data.importer.pdfpipeline.FrontMatterVisionParser
 import com.studyfriend.app.data.importer.pdfpipeline.TextSourceRow
 import com.studyfriend.app.data.importer.pdfpipeline.TocVisionParser
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
@@ -305,6 +306,21 @@ class SettingsRepository(
         val key = resolveVisionKeyOrNull() ?: return null
         val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
         return TocVisionParser(base, key, snap.visionModel, cacheDir, renderFn = renderFn)
+    }
+
+    /**
+     * 组装前置探针（P8）：与 [buildTocVisionParser] 同源快照与不可用语义（null=静默跳过，
+     * 回退纯文本路线）。
+     */
+    suspend fun buildFrontMatterVisionParser(
+        cacheDir: File,
+        renderFn: (Int) -> String,
+    ): FrontMatterVisionParser? {
+        val snap = load()
+        if (!snap.visionEnabled) return null
+        val key = resolveVisionKeyOrNull() ?: return null
+        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
+        return FrontMatterVisionParser(base, key, snap.visionModel, cacheDir, renderFn = renderFn)
     }
 
     /**

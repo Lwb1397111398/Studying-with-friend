@@ -1064,4 +1064,103 @@ class BookParserTest {
         assertEquals(listOf("第一章 甲"), chapters.map { it.title })
         assertTrue(chapters[0].paras.all { !it.text.contains(BookParser.TOC_BLOCK_MARK) })
     }
+
+    // ---- P8 前置/后置标题变体族（老板「按内容分块」诉求） ----
+
+    @Test
+    fun p8_frontTitleVariants_becomeFrontRoleChapters() {
+        val text = """
+            写在前面
+
+            第一次写书，说点感想。
+
+            初版序
+
+            2003年版的话。
+
+            第二版序言
+
+            2013年修订的话。
+
+            增订版序
+
+            台版书常见的第三篇序。
+
+            总序
+
+            丛书编者的话。
+
+            凡例
+
+            本书缩略语说明。
+
+            作者简介
+
+            张三，法学教授。
+
+            第一章 导论
+
+            正文开始。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(
+            listOf("写在前面", "初版序", "第二版序言", "增订版序", "总序", "凡例", "作者简介", "第一章 导论"),
+            chapters.map { it.title },
+        )
+        // 前置族 role=FRONT（阅读页次级小字）；正文章 BODY 不变
+        assertEquals(DbValues.ROLE_FRONT, chapters[0].paras[0].role)
+        assertEquals(DbValues.ROLE_FRONT, chapters[1].paras[0].role)
+        assertEquals(DbValues.ROLE_FRONT, chapters[6].paras[0].role)
+        assertEquals(DbValues.ROLE_BODY, chapters[7].paras.last().role)
+    }
+
+    @Test
+    fun p8_fixedPrefaceWords_nowFrontRole() {
+        // 既有固定词「前言/序言/引言」此前 role=BODY，P8 起统一 FRONT
+        val text = "前言\n\n旧话。\n\n序言\n\n序言内容。\n\n第一章 甲\n\n正文。"
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("前言", "序言", "第一章 甲"), chapters.map { it.title })
+        assertEquals(DbValues.ROLE_FRONT, chapters[0].paras[0].role)
+        assertEquals(DbValues.ROLE_FRONT, chapters[1].paras[0].role)
+        assertEquals(DbValues.ROLE_BODY, chapters[2].paras.last().role)
+    }
+
+    @Test
+    fun p8_backTitleVariants_becomeBackRoleChapters() {
+        val text = "第一章 甲\n\n正文。\n\n致谢\n\n谢谢大家。\n\n跋\n\n后记式收尾。"
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 甲", "致谢", "跋"), chapters.map { it.title })
+        assertEquals(DbValues.ROLE_BACK, chapters[1].paras[0].role)
+        assertEquals(DbValues.ROLE_BACK, chapters[2].paras[0].role)
+    }
+
+    @Test
+    fun p8_bodySentenceWithFrontWord_notATitle() {
+        // 全行锚定护栏：正文行文含前置词但不是整行，绝不成章
+        val text = """
+            第一章 甲
+
+            写在前面的话已经说过，这里不再重复。
+
+            后续段。
+        """.trimIndent()
+        val chapters = BookParser.parse(text)
+        assertEquals(listOf("第一章 甲"), chapters.map { it.title })
+        assertTrue(chapters[0].paras.any { it.text.startsWith("写在前面") })
+    }
+
+    @Test
+    fun p8_tocEntryFrontJudgment() {
+        // 目录条目前置判定（TocChapterCalibrator 分母剔除用）：带副题/年份的放宽前缀
+        assertTrue(BookParser.isFrontMatterEntryTitle("写在前面——致读者"))
+        assertTrue(BookParser.isFrontMatterEntryTitle("序言（2003年）"))
+        assertTrue(BookParser.isFrontMatterEntryTitle("第二版序言"))
+        assertTrue(BookParser.isFrontMatterEntryTitle("增订版序"))
+        assertTrue(BookParser.isFrontMatterEntryTitle("总序"))
+        assertTrue(BookParser.isFrontMatterEntryTitle("凡例"))
+        // 正文章/长条目/序字开头正文词不误判
+        assertFalse(BookParser.isFrontMatterEntryTitle("第一章 导论"))
+        assertFalse(BookParser.isFrontMatterEntryTitle("第二版序言之后的新增章节与全部修订说明汇总"))
+        assertFalse(BookParser.isFrontMatterEntryTitle("序幕与尾声"))
+    }
 }

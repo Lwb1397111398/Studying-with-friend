@@ -115,9 +115,21 @@ object TocChapterCalibrator {
         bookPageCount: Int,
         tocLastPages: List<Int>,
     ): CalibrateOutcome? {
-        val level1 = entries.filter { it.level == 1 }
-        if (entries.isEmpty() || level1.isEmpty()) {
-            Log.w(TAG, "calibrate skip: entries=${entries.size} level1=${level1.size}")
+        // P8 前置条目剔除：目录里的「写在前面/第X版序/总序/凡例…」条目页码相对目录前置，
+        // 锚定窗口从目录尾页+1 起（anchorOffset 下界）永远够不着——徒增锚定率分母拉爆
+        // 60% 守卫（真书「目录没用上」根因之一）；且前置小页码（序言3→第一章1）会被
+        // splitSegments 误判「下册新册」。前置块由前置探针/文本规则负责，不进正文校准。
+        val frontEntries = entries.filter { it.level == 1 && BookParser.isFrontMatterEntryTitle(it.title) }
+        if (frontEntries.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "calibrate: 前置条目剔除 ${frontEntries.size} 条（${frontEntries.joinToString("、") { it.title }}）",
+            )
+        }
+        val bodyEntries = entries.filter { it !in frontEntries }
+        val level1 = bodyEntries.filter { it.level == 1 }
+        if (bodyEntries.isEmpty() || level1.isEmpty()) {
+            Log.w(TAG, "calibrate skip: entries=${bodyEntries.size} level1=${level1.size}")
             return null
         }
         val allParas = localChapters.flatMap { it.paras }
@@ -136,8 +148,8 @@ object TocChapterCalibrator {
             return null
         }
 
-        // ② 区段划分与目录尾页配对
-        val segments = splitSegments(entries)
+        // ② 区段划分与目录尾页配对（P8：用剔除前置条目后的 bodyEntries）
+        val segments = splitSegments(bodyEntries)
         val segTocLast = assignTocLastPages(segments.size, tocLastPages) ?: return null
 
         // ②.5 章行无页码继承（v1.2）：目录排版常态——章行不带页码、名下首条（节/副标题

@@ -124,8 +124,14 @@ fun ReadScreen(
             // lint 误报：lambda 内有显式 value 赋值，但规则对带 keys 重载的顶层赋值不识别（嵌套 collect 形态才识别）
             @Suppress("ProduceStateDoesNotAssignValue")
             val siblings by produceState<List<ChapterEntity>>(emptyList(), bookId) {
+                // P8 修复：过滤 level=2 节行——校准书的表里混有节行（段落恒空），不过滤时
+                // 「下一章」会跳到空节行（显示「本章还没有内容」）
                 val list: List<ChapterEntity> =
-                    if (bookId == null) emptyList() else app.database.chapterDao().byBook(bookId)
+                    if (bookId == null) {
+                        emptyList()
+                    } else {
+                        app.database.chapterDao().byBook(bookId).filter { it.level == 1 }
+                    }
                 value = list
             }
             val prevChapter = siblings.lastOrNull { it.idx < (chapter?.idx ?: 0) }
