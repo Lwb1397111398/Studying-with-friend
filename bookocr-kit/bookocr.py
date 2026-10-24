@@ -1449,11 +1449,16 @@ def cmd_pack(a: argparse.Namespace) -> None:
         figs_by_page[page] = figs_here
         fi, rewritten = 0, []
         for p in book[page]:
-            if FIG_MARK.match(p) and fi < len(figs_here):
-                f = figs_here[fi]
-                fi += 1
-                if PULL_FIG_MARK.match(p):
-                    p = f"〔图：{f['title'] or f['kind']}〕{f['desc'] or ''}".strip()
+            mm = FIG_MARK.match(p)
+            if mm:
+                # 归一化冒号/边缘空白笔误为规范形态〔图：题〕desc——kit 质检 FIG_MARK
+                # 容 [:：]，App 端按前缀识别图段，这里统一写全角
+                p = f"〔图：{mm.group(1).strip()}〕{mm.group(2).strip()}".strip()
+                if fi < len(figs_here):
+                    f = figs_here[fi]
+                    fi += 1
+                    if PULL_FIG_MARK.match(p):
+                        p = f"〔图：{f['title'] or f['kind']}〕{f['desc'] or ''}".strip()
             rewritten.append(p)
         for f in figs_here[fi:]:
             line = f"〔图：{f['title'] or f['kind']}〕{f['desc'] or ''}".strip()
@@ -1465,7 +1470,10 @@ def cmd_pack(a: argparse.Namespace) -> None:
     # 头部带 KIT 章界元数据块：App 端识别到即走「成品直入」通道（按章表切章，跳过通用正则猜测）
     txt_parts: list[str] = []
     if m.get("chapters") and not a.no_chapters:
-        meta = {"kit": 1, "v": "bookocr-kit 1.1", "title": m["name"], "pages": m["npages"],
+        # kit=1 是协议版本位：App 端 KitBookParser.parseMeta 只认 kit==1，扩展只能加可选
+        # 字段（optString/optInt 天然宽容），绝不能 bump 这个数字——旧 App 收到 kit:2 的
+        # zip 会整包报「不是有效的 KIT 图包」。v 仅展示用，txt/zip 保持同一版本串。
+        meta = {"kit": 1, "v": "bookocr-kit 1.2", "title": m["name"], "pages": m["npages"],
                 "chapters": [{"t": c["t"], "p": c["p"], "lv": c["lv"], "r": c["r"], "a": c["a"]}
                              for c in m["chapters"]]}
         txt_parts += ["〔KIT-书 开始〕", json.dumps(meta, ensure_ascii=False), "〔KIT-书 结束〕"]
@@ -1482,8 +1490,14 @@ def cmd_pack(a: argparse.Namespace) -> None:
             txt_parts.append(para)
         txt_parts.append("")
     if notes:
-        txt_parts += ["注释", ""]
-        txt_parts += [f"{i}. {n}" if not re.match(r"^[①-⑳0-9]+", n) else n for i, n in enumerate(notes, 1)]
+        # 注释区协议：每条脚注独立成段（空行分隔）+ 〔脚注〕前缀——App 端
+        # （KitBookParser/BookParser 同口径）剥前缀标 FOOTNOTE（次级小字 + 粗读/总结
+        # AI 全跳过）。连续无空行会被 App 端 softMerge 粘成一个 BODY 大段、混进 AI 输入。
+        # 插图版 PDF 的注释区走独立 notes 参数渲染，不经此处。
+        txt_parts.append("注释")
+        for i, n in enumerate(notes, 1):
+            line = n if re.match(r"^[①-⑳0-9]+", n) else f"{i}. {n}"
+            txt_parts += ["", f"〔脚注〕{line}"]
     out_txt = job / "output" / f"{m['name']}.txt"
     out_txt.write_text("\n".join(txt_parts).rstrip() + "\n", encoding="utf-8-sig")
 
@@ -1684,6 +1698,7 @@ def pack_zip(job: Path, m: dict, txt_file: Path, figs_by_page: dict[int, list[di
     doc.close()
     save_manifest(job, m)  # 宽高回写台账
 
+    # kit=1 协议版本位勿动（见 cmd_pack txt 段注释）；扩展只加可选字段
     meta = {"kit": 1, "v": "bookocr-kit 1.2", "title": m["name"], "pages": m["npages"],
             "chapters": [{"t": c["t"], "p": c["p"], "lv": c["lv"], "r": c["r"], "a": c["a"]}
                          for c in (m.get("chapters") or [])],

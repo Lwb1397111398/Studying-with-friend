@@ -205,4 +205,35 @@ class KitBookParserTest {
         val ch2 = chapters.first { it.title == "第二章 分则" }
         assertEquals(6, ch2.paras.single { it.text == "页6 后续无标记块正文。" }.pageNo)
     }
+
+    @Test
+    fun parse_halfWidthColonFigureMark() {
+        // 半角冒号〔图:…〕是子代理偶发笔误（kit 质检放行、pack 原样保留），App 侧一并
+        // 认领成 FIGURE 段，防图题行混进正文
+        val meta = KitBookParser.extract(sampleTxt())!!
+        val text = KitBookParser.stripMeta(sampleTxt()) +
+            "\n\n〔页7〕\n正文前一行。\n〔图:表3-1 对比表格〕\n"
+        val chapters = KitBookParser.parse(text, meta)
+        val ch2 = chapters.first { it.title == "第二章 分则" }
+        val figure = ch2.paras.single { it.role == DbValues.ROLE_FIGURE }
+        assertEquals("〔图:表3-1 对比表格〕", figure.text)
+        assertEquals(7, figure.pageNo)
+    }
+
+    // ---- preferredTitle：书名预填（zip 图包文件名带「_Kit图包」尾巴，kit 元数据优先） ----
+
+    @Test
+    fun preferredTitle_prefersKitMeta() {
+        assertEquals("民法物权", KitBookParser.preferredTitle("民法物权", "民法物权_Kit图包.zip"))
+        // 尾巴不再混进书名
+        assertTrue(!KitBookParser.preferredTitle("民法物权", "民法物权_Kit图包.zip").endsWith("图包"))
+    }
+
+    @Test
+    fun preferredTitle_fallsBackToFileName() {
+        // kit 书名为空/无 KIT 块 → 文件名去扩展名；空文件名 → 未命名
+        assertEquals("民法物权", KitBookParser.preferredTitle(null, "民法物权.txt"))
+        assertEquals("民法物权", KitBookParser.preferredTitle("  ", "民法物权_Kit图包.zip"))
+        assertEquals("未命名", KitBookParser.preferredTitle(null, ""))
+    }
 }

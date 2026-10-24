@@ -30,8 +30,10 @@ object KitBookParser {
     const val META_BEGIN = "〔KIT-书 开始〕"
     const val META_END = "〔KIT-书 结束〕"
 
-    /** 图描述行前缀（kit aivision 模板协议）：整行单独成段标 ROLE_FIGURE */
-    private const val FIGURE_PREFIX = "〔图："
+    /** 图描述行前缀（kit 协议）：整行单独成段标 ROLE_FIGURE。全角为规范形态；半角冒号
+     *  是子代理偶发笔误（kit 质检 FIG_MARK 容 [:：] 放行、pack 对子代理行原样保留），
+     *  App 侧一并认领，防图题行混进正文段。 */
+    private val FIGURE_PREFIXES = listOf("〔图：", "〔图:")
 
     /** 从成品 txt 提取 KIT 元数据；无块/JSON 损坏/kit 版本不认/章表为空 → null */
     fun extract(raw: String): KitMeta? {
@@ -89,7 +91,15 @@ object KitBookParser {
     }
 
     /**
-     * 按章表切章。[body] 须已剥元数据块。锚定规则：anchor（标题行前 8 字）为主判据、
+     * 书名预填：KIT 元数据 title（电脑侧 init 的工程名=真书名）优先；zip 图包文件名固定
+     * 带「_Kit图包」尾巴，直接用文件名会把尾巴带进书名——kitTitle 空白走文件名兜底时
+     * 也把已知尾巴剥掉。纯 JVM 供单测。
+     */
+    fun preferredTitle(kitTitle: String?, fileName: String): String =
+        kitTitle?.takeIf { it.isNotBlank() }
+            ?: fileName.substringBeforeLast('.').removeSuffix("_Kit图包").ifBlank { "未命名" }
+
+    /** 按章表切章。[body] 须已剥元数据块。锚定规则：anchor（标题行前 8 字）为主判据、
      * 起始页号过闸（blockPage >= p，同源页号恰相等，闸的作用是拦住目录页同文条目误锚），
      * 块指针随章表顺序单调推进。首章锚未命中兜底从头收（封面/版权不丢）；其余章锚未
      * 命中跳过该章——段落归前章，不按页号猜切。锚行本身从起点块剔除（标题不进正文）。
@@ -180,7 +190,7 @@ object KitBookParser {
         val plain = mutableListOf<String>()
         for (line in lines) {
             val t = line.trim()
-            if (t.startsWith(FIGURE_PREFIX)) {
+            if (FIGURE_PREFIXES.any { t.startsWith(it) }) {
                 paras.add(ParsedPara(t, DbValues.ROLE_FIGURE, pageNo))
             } else {
                 plain.add(line)

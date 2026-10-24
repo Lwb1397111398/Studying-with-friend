@@ -78,7 +78,10 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
                     style = MaterialTheme.typography.headlineSmall,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { showRules = true }) { Text("识别规则") }
+                // KIT 成品书章界权威在电脑侧章表，reparse 的 regex 不参与——隐藏入口防误导
+                if (!vm.isKitBook) {
+                    TextButton(onClick = { showRules = true }) { Text("识别规则") }
+                }
             }
 
             Text(

@@ -66,7 +66,8 @@ def write_batch(bid: str, pages: list[int], *, marks: list[int] | None = None,
 
     def page_body(p: int) -> str:
         if p == 3 and not low:
-            return "〔图：表3-1 测试表格〕\n这是图的说明文字。"
+            # 半角冒号是子代理偶发笔误（质检放行）：pack 应归一化为全角规范形态
+            return "〔图:表3-1 测试表格〕\n这是图的说明文字。"
         pre = ""
         if heads and p in heads:
             pre = heads[p] + "\n\n"
@@ -271,6 +272,9 @@ def main() -> None:
     body = txt.read_text(encoding="utf-8-sig")
     check(re.search(r"〔页\d+〕", body) is not None, "txt 保留〔页N〕页标记行（App 端剥标记记页码）")
     check("王泽鉴" in body and "注释" in body, "脚注归入书末注释区")
+    check("〔脚注〕① 王泽鉴" in body and "\n\n〔脚注〕②" in body,
+          "注释区每条脚注独立成段带〔脚注〕前缀（App 端剥标落 FOOTNOTE，AI 全跳过）")
+    check("〔图：表3-1 测试表格〕" in body, "半角冒号图占位行经 pack 归一化为全角规范形态")
     check("表3-1" in body, "图描述保留在 txt 正文")
     mm = re.search(r"〔KIT-书 开始〕\r?\n(.*?)\r?\n〔KIT-书 结束〕", body, re.S)
     check(mm is not None, "txt 头部有 KIT 元数据块")
@@ -293,6 +297,7 @@ def main() -> None:
           "book.txt 与产出 txt 内容一致（忽略换行符差异）")
     meta = json.loads(mm.group(1)) if mm else {}
     check(meta.get("kit") == 1 and meta.get("title") == "_selftest", "元数据 JSON 可解析、书名正确")
+    check(meta.get("v") == "bookocr-kit 1.2", "txt 元数据 v 与 zip kit.json 同版本串")
     check(len(meta.get("chapters") or []) == 6 and meta["chapters"][0]["r"] == "FRONT",
           "元数据含 6 章章表（首章为前置）")
     mpk = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))

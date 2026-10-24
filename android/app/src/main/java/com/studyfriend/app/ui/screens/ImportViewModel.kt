@@ -149,8 +149,13 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     private var sourceText: String? = null
 
     /** KIT 成品书元数据（bookocr-kit pack 的 txt 头部协议块命中时非空）：
-     *  parse() 据此分流 KitBookParser（电脑侧章界直入）；换文件/粘贴/失败时清空 */
-    private var kitMeta: KitMeta? = null
+     *  parse() 据此分流 KitBookParser（电脑侧章界直入）；换文件/粘贴/失败时清空。
+     *  mutableStateOf：isKitBook 供确认页观察（KIT 书隐藏「识别规则」入口） */
+    private var kitMeta: KitMeta? by mutableStateOf<KitMeta?>(null)
+
+    /** 当前文件是 bookocr-kit 成品书（KIT 直入通道）；确认页据此隐藏「识别规则」——
+     *  KIT 书章界权威在电脑侧章表，reparse 的 regex 不参与，展示入口只会误导 */
+    val isKitBook: Boolean get() = kitMeta != null
 
     /** KIT 图包（书名_Kit图包.zip）的图清单（KitZipReader 解出）；非 zip 导入恒空。
      *  parse() 后与 FIGURE 段配对成 pendingFigures（真图文混排），换文件/粘贴清空 */
@@ -369,7 +374,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 deleted = emptySet()
                 drainImportDone()
                 if (bookTitle.isBlank()) {
-                    bookTitle = name.substringBeforeLast('.').ifBlank { "未命名" }
+                    // KIT 书优先用电脑侧元数据书名（zip 图包文件名固定带「_Kit图包」尾巴，
+                    // 直接取文件名会把尾巴带进书名）
+                    bookTitle = KitBookParser.preferredTitle(kitMeta?.title, name)
                 }
                 parse()
             } catch (e: DecodeException) {
