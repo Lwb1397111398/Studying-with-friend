@@ -1233,6 +1233,9 @@ def cmd_pack(a: argparse.Namespace) -> None:
             line = f"〔图：{f['title'] or f['kind']}〕{f['desc']}".strip()
             if line:
                 paras.append(line)
+        # 保留〔页N〕页标记行：App 端（BookParser/KitBookParser）剥标记页码落库（阅读页
+        # 显示页码、图归属按页），人读时可当页分隔符
+        txt_parts.append(f"〔页{page}〕")
         txt_parts.extend(paras + [""])
     if notes:
         txt_parts += ["注释", ""]

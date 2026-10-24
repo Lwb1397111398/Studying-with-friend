@@ -242,7 +242,7 @@ def main() -> None:
     check(txt.exists() and "txt →" in o, "txt 产出")
     check(pdf.exists() and "插图版 PDF →" in o, "插图版 PDF 产出")
     body = txt.read_text(encoding="utf-8-sig")
-    check("〔页" not in body, "txt 里无页标记残留")
+    check(re.search(r"〔页\d+〕", body) is not None, "txt 保留〔页N〕页标记行（App 端剥标记记页码）")
     check("王泽鉴" in body and "注释" in body, "脚注归入书末注释区")
     check("表3-1" in body, "图描述保留在 txt 正文")
     mm = re.search(r"〔KIT-书 开始〕\r?\n(.*?)\r?\n〔KIT-书 结束〕", body, re.S)
