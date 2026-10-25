@@ -75,7 +75,8 @@ def load_config() -> dict:
 
 # 子代理产出协议：〔页N〕整行 = 一页开始；〔图：标题〕行 = 真图占位（〕后可跟 desc 尾巴，
 # App 端按前缀识别；旧版严格整行正则与 pack 写出的「〔图：题〕desc」不一致，已放宽）
-PAGE_MARK = re.compile(r"^\s*〔页\s*(\d+)\s*〕\s*$")
+# 批C修复：加 re.M——无 flag 时 ^ 只锚串首，多行文本一个页标记都剥不掉，check 字数每页虚高约 6 字
+PAGE_MARK = re.compile(r"^\s*〔页\s*(\d+)\s*〕\s*$", re.M)
 FIG_MARK = re.compile(r"^\s*〔图[:：]\s*(.+?)\s*〕(.*)$")
 # pull 自动登记的占位图行（figure-desc 补描述前 / pack 重写前的过渡格式，pack 按
 # 页内出现序用台账图重写为真实 title/desc）
@@ -944,7 +945,29 @@ def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
     # 3) 字数与中文占比（--force 豁免；图表页/空白页字数天然少，重转无效时用 --force 放行）
     body_only = PAGE_MARK.sub("", text)
     chars = len(re.sub(r"\s", "", body_only))
-    per_page = chars / len(want)
+    # 批C：图版页自动豁免——该批 figures.json 里归一化 rect 面积 >0.3 的页（大图占页），
+    # 字数天然不足，不再要求人工判断后 --force（pull 已算出 fig_area，check 复用台账复算）
+    fig_heavy_pages: set[int] = set()
+    fp_early = job / b["figures"]
+    if fp_early.exists() and fp_early.read_text(encoding="utf-8-sig").strip():
+        try:
+            for f in json.loads(fp_early.read_text(encoding="utf-8-sig")):
+                r = f.get("rect")
+                if (isinstance(r, list) and len(r) == 4 and f.get("page") in want
+                        and (r[2] - r[0]) * (r[3] - r[1]) > 0.3):
+                    fig_heavy_pages.add(int(f["page"]))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            fig_heavy_pages = set()
+    eff_want = [p for p in want if p not in fig_heavy_pages]
+    if eff_want and len(eff_want) < len(want):
+        # 剔除图版页后重算页均字数（按页标记切分；此路仅在真有大图页时走）
+        parts = re.split(r"^\s*〔页\s*(\d+)\s*〕\s*$", text, flags=re.M)
+        page_chars = {int(parts[i]): len(re.sub(r"\s", "", parts[i + 1])) for i in range(0, len(parts) - 1, 2)}
+        chars_eff = sum(page_chars.get(p, 0) for p in eff_want)
+        per_page = chars_eff / len(eff_want)
+        out(f"[i] 图版页自动豁免 {len(want) - len(eff_want)} 页（{sorted(fig_heavy_pages)[:8]}），按剩余 {len(eff_want)} 页计页均")
+    else:
+        per_page = chars / len(want)
     zh = len(re.findall(r"[\u4e00-\u9fff]", body_only))
     ratio = zh / max(1, len(re.sub(r"\s", "", body_only)))
     if not a.force and per_page < a.min:
@@ -1422,6 +1445,13 @@ def cmd_pack(a: argparse.Namespace) -> None:
         pages = sorted(p for v in thin_pending.values() for p in v)
         die(f"有 {len(pages)} 页图版页没补描述（{pages[:8]}{'…' if len(pages) > 8 else ''}）："
             f"先跑 patch {a.job} 派视觉补图版描述，再 pack；确要带「〔图版页〕」占位打包加 --force")
+    # 批C：pull 占位图拦截——README 写「有图的书必跑 figure-desc」却靠人记得，漏跑即
+    # 静默降级（App 里全是「第N页插图」占位文案）。台账里 desc 仍是占位的图非空即拦
+    placeholder_figs = [f for f in m.get("figures") or [] if f.get("desc") == PULL_FIG_DESC]
+    if placeholder_figs and not a.force:
+        pages = sorted({f["page"] for f in placeholder_figs})
+        die(f"有 {len(placeholder_figs)} 张图还没补语义（第 {pages[:8]}{'…' if len(pages) > 8 else ''} 页）："
+            f"先跑 figure-desc {a.job}，再 pack；确要带「第N页插图」占位打包加 --force")
 
     if not m.get("chapters") and not a.no_chapters:
         if a.auto_chapters:
@@ -1515,10 +1545,98 @@ def cmd_pack(a: argparse.Namespace) -> None:
             out(f"[ok] 插图版 PDF → {pdf_path}")
 
     # ---- KIT 图包（zip）：kit.json 章表+图清单 + book.txt + figures 裁真图，App 端一个文件直入 ----
+    deliverable: Path | None = None
     if "zip" in (m.get("config") or {}).get("output", DEFAULT_CONFIG["output"]):
         zip_path = pack_zip(job, m, out_txt, figs_by_page)
         if zip_path:
             out(f"[ok] KIT 图包 → {zip_path}")
+            deliverable = zip_path
+    if deliverable is None:
+        deliverable = out_txt
+
+    # ---- 批C：抽检报告（固定种子随机 5 页图文对照）+ adb 直传手机 ----
+    spotcheck_report(job, m, book)
+    adb_push_to_phone(deliverable)
+
+
+def spotcheck_report(job: Path, m: dict, book: dict[int, list[str]]) -> None:
+    """批C：纯扫描书零参照系（simcheck 只对自带文字层的书可用），错字此前只能靠
+    阅读发现。pack 末尾自动产「随机 5 页 图 vs 文」对照报告供 30 秒目检；
+    种子=书名——重复 pack 抽到同一组页，前后两轮报告可直接对比。"""
+    try:
+        import random
+        fitz = load_fit()
+    except Exception as e:  # fitz 缺失等：抽检是增值产出，不拦打包
+        out(f"[警告] 抽检报告跳过：{e}")
+        return
+    pages = sorted(book)
+    if not pages:
+        return
+    rng = random.Random(m["name"])
+    sample = rng.sample(pages, min(5, len(pages)))
+    rep_dir = job / "report"
+    rep_dir.mkdir(exist_ok=True)
+    lines = [
+        f"# 抽检报告：{m['name']}",
+        "",
+        f"固定种子抽样 {len(sample)} 页（重复 pack 抽到同一组页）。对照每页截图与识别文本，",
+        "重点目检：① 形近字错字（损害陪/赔偿）② 漏段/串段 ③ 页码缺失。发现批量问题回到对应批重转。",
+        "",
+    ]
+    try:
+        doc = fitz.open(m["src_pdf"])
+    except Exception as e:
+        out(f"[警告] 抽检报告跳过（原 PDF 打不开）：{e}")
+        return
+    try:
+        for n in sample:
+            page = doc[n - 1]
+            pix = page.get_pixmap(dpi=110)
+            img_name = f"spotcheck_p{n:04d}.png"
+            pix.save(str(rep_dir / img_name))
+            lines += [
+                f"## 第 {n} 页",
+                "",
+                f"![p{n}]({img_name})",
+                "",
+                "识别文本：",
+                "```",
+                *(book.get(n) or []),
+                "```",
+                "",
+            ]
+    finally:
+        doc.close()
+    rp = rep_dir / "spotcheck.md"
+    rp.write_text("\n".join(lines), encoding="utf-8")
+    out(f"[ok] 抽检报告 → {rp}（编辑器打开对照 5 页，30 秒目检）")
+
+
+def adb_push_to_phone(deliverable: Path) -> None:
+    """批C：pack 产物直推已连接的安卓手机 Download 目录——全链路唯一纯手工步骤
+    （微信传文件）并入打包。无 adb/无设备/推失败都不拦流程，只提示手动路径。"""
+    import shutil
+    import subprocess
+    adb = shutil.which("adb")
+    if not adb:
+        out("[i] 本机无 adb，传输走老办法：微信/网盘发送 → 手机文件管理器选它导入")
+        return
+    try:
+        r = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=10)
+        devs = [ln.split("\t")[0] for ln in r.stdout.splitlines() if ln.endswith("\tdevice")]
+        if not devs:
+            out(f"[i] 未检测到手机（adb devices 空）；产物在电脑：{deliverable}")
+            return
+        # Git Bash 会把 /sdcard 改写成 C:/Program Files/Git/sdcard——双斜杠 //sdcard 规避
+        target = "//sdcard/Download/" + deliverable.name
+        p = subprocess.run([adb, "-s", devs[0], "push", str(deliverable), target],
+                           capture_output=True, text=True, timeout=600)
+        if p.returncode == 0:
+            out(f"[ok] 已推送到手机 Download/{deliverable.name}（手机上「导入书籍」选它）")
+        else:
+            out(f"[警告] adb push 失败：{(p.stderr or p.stdout).strip()[:200]}；手动传：{deliverable}")
+    except Exception as e:
+        out(f"[警告] adb 直传跳过：{e}；手动传：{deliverable}")
 
 
 def pack_pdf(job: Path, m: dict, book: dict[int, list[str]], notes: list[str],
