@@ -98,11 +98,11 @@ object UpdateChecker {
     /**
      * 下载 APK 到 [dest]，onProgress 回调整数百分比（IO 线程回调）。
      * 同版本号的完整文件已存在（长度与远端一致）时直接复用，不重复下载。
-     * 先写 .part 临时文件、校验长度后再改名，中断不会留下半截冒充完整包。
-     *
-     * 多源兜底：直连优先（未被墙的网络最快），失败后依次改走镜像（原地址拼镜像前缀），
-     * 全部失败才抛人话汇总错误。仅 github.com 的地址拼镜像（E2E/单测的本地假服务器
-     * 地址不拼）；测试用 [mirrors] 参数注入本地假镜像。
+     * 先写 `.part` 临时文件、校验长度后再改名——`.part` 半截包**保留作断点**：
+     * 下次请求带 Range 从断点续拉（镜像/重试都续），字节齐了才改名，
+     * 永远不会留下半截冒充完整包（2026-10-25 实测：83MB 包经镜像单发必被掐断，
+     * 续传才能下完）。仅 github.com 的地址拼镜像（E2E/单测的本地假服务器地址不拼）；
+     * 测试用 [mirrors] 参数注入本地假镜像。
      */
     fun downloadApk(
         url: String,
@@ -118,6 +118,11 @@ object UpdateChecker {
             return
         }
         val tmp = File(dest.parentFile, dest.name + ".part")
+        // 上次下载字节已齐但没来得及改名（中断在最后一步）：直接收尾，不发请求
+        if (expectedSize > 0 && tmp.exists() && tmp.length() == expectedSize) {
+            finalizeDownload(tmp, onProgress)
+            return
+        }
         var lastError: Exception? = null
         for (source in listOf(url) + mirrors.map { it + url }) {
             try {
@@ -130,36 +135,48 @@ object UpdateChecker {
             }
         }
         throw UpdateException(
-            "下载失败：GitHub 直连和 ${mirrors.size} 个镜像源都没连上" +
-                "（${lastError?.message ?: "未知错误"}）。请稍后或换网络重试",
+            "下载失败：直连和 ${mirrors.size} 个镜像源都没能完成" +
+                "（${lastError?.message ?: "未知错误"}）。再点一次「立即更新」会从上次断点继续，多试几次可下完",
             lastError,
         )
     }
 
-    /** 单源下载到 [tmp]：成功即校验长度并改名；失败抛出由 [downloadApk] 决定是否换源重下 */
+    /** 单源下载到 [tmp]：已有字节带 Range 续拉，服务器不支持 Range 回 200 则从头重下；成功校验长度后改名 */
     private fun downloadFrom(url: String, token: String?, tmp: File, onProgress: (Int) -> Unit) {
         val conn = open(url, token)
         try {
             conn.connectTimeout = 15000
             // 30 秒读不出数据才判死：正常链路单个 64KB 块远快于此；被墙直连假死别拖满 2 分钟才换源
             conn.readTimeout = 30000
+            val resumeFrom = if (tmp.exists()) tmp.length() else 0L
+            if (resumeFrom > 0) {
+                conn.setRequestProperty("Range", "bytes=$resumeFrom-")
+            }
             val code = conn.responseCode
             if (code !in 200..299) {
                 throw UpdateException("下载失败（HTTP $code）：请稍后再试")
             }
-            val total = conn.contentLengthLong
+            val base: Long
+            val fullLength: Long
+            if (code == 206 && resumeFrom > 0) {
+                base = resumeFrom
+                fullLength = base + conn.contentLengthLong // 206 的 Content-Length 是剩余字节数
+            } else {
+                base = 0L // 无 .part，或服务器不支持 Range 回了 200：从头下（覆盖旧半截）
+                fullLength = conn.contentLengthLong
+            }
             conn.inputStream.use { input ->
-                tmp.outputStream().use { out ->
+                java.io.FileOutputStream(tmp, base > 0).use { out ->
                     val buf = ByteArray(64 * 1024)
-                    var done = 0L
+                    var done = base
                     var lastPct = -1
                     while (true) {
                         val n = input.read(buf)
                         if (n < 0) break
                         out.write(buf, 0, n)
                         done += n
-                        if (total > 0) {
-                            val pct = (done * 100 / total).toInt().coerceIn(0, 100)
+                        if (fullLength > 0) {
+                            val pct = (done * 100 / fullLength).toInt().coerceIn(0, 100)
                             if (pct != lastPct) {
                                 onProgress(pct)
                                 lastPct = pct
@@ -168,19 +185,28 @@ object UpdateChecker {
                     }
                 }
             }
-            if (total > 0 && tmp.length() != total) {
-                tmp.delete()
-                throw UpdateException("下载不完整（收到 ${tmp.length()} / $total 字节），请重试")
+            if (fullLength > 0 && tmp.length() != fullLength) {
+                // .part 保留作断点，下次接着拉；若服务器与 Range 撒谎导致长度越攒越歪，
+                // 下次 Range 会落到 416/长度反复不符，用户重试几次内靠换源从头下自愈
+                throw UpdateException("下载不完整（已收 ${tmp.length()} / $fullLength 字节），重试将从断点续传")
             }
-            val dest = File(tmp.parentFile, tmp.name.removeSuffix(".part"))
-            dest.delete()
-            if (!tmp.renameTo(dest)) {
-                throw UpdateException("保存安装包失败（文件被占用？）")
+            if (fullLength <= 0 && tmp.length() <= 0L) {
+                throw UpdateException("下载不完整（未收到数据），请重试")
             }
-            onProgress(100)
+            finalizeDownload(tmp, onProgress)
         } finally {
             conn.disconnect()
         }
+    }
+
+    /** 校验过的完整 `.part` 改名为正式包 */
+    private fun finalizeDownload(tmp: File, onProgress: (Int) -> Unit) {
+        val dest = File(tmp.parentFile, tmp.name.removeSuffix(".part"))
+        dest.delete()
+        if (!tmp.renameTo(dest)) {
+            throw UpdateException("保存安装包失败（文件被占用？）")
+        }
+        onProgress(100)
     }
 
     // ---- 以下为纯解析函数，供单元测试直测 ----

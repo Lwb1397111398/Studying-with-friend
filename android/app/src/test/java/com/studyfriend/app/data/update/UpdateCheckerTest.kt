@@ -249,6 +249,53 @@ class UpdateCheckerTest {
         }
         assertEquals(1, fake.downloadRequests.get())
     }
+
+    @Test
+    fun `downloadApk 半截包带 Range 续传只补剩余字节`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        val part = File(tmp.root, "updates/update-20.apk.part")
+        val half = 100_000
+        // .part 前半段字节与假服务器载荷同构，模拟上次下载中断
+        part.writeBytes(ByteArray(half) { (it % 251).toByte() })
+        val progress = mutableListOf<Int>()
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+        ) { progress.add(it) }
+        assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
+        assertEquals(
+            ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }.toList(),
+            dest.readBytes().toList(),
+        )
+        assertNull(part.takeIf { it.exists() })
+        assertEquals(1, fake.downloadRequests.get())
+        // 续传起点约 50%，首个进度回调不应从 0 开始
+        assertTrue(progress.first() >= 50)
+        assertEquals(100, progress.last())
+    }
+
+    @Test
+    fun `downloadApk 服务器不支持 Range 时丢弃半截从头重下`() {
+        tmp.newFolder("updates")
+        fake.ignoreRange = true
+        val dest = File(tmp.root, "updates/update-20.apk")
+        val part = File(tmp.root, "updates/update-20.apk.part")
+        part.writeBytes(ByteArray(100_000)) // 内容错误的半截包
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+        ) { }
+        assertEquals(
+            ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }.toList(),
+            dest.readBytes().toList(),
+        )
+        assertNull(part.takeIf { it.exists() })
+    }
 }
 
 /** 单线程极简 HTTP 服务器：只回 /releases/latest（可配状态码）与 /download/app.apk 两个路径 */
@@ -266,6 +313,9 @@ private class FakeGitHub {
     @Volatile var latestStatus: Int = 200
     @Volatile var latestBody: String = ""
     @Volatile var downloadStatus: Int = 200
+
+    /** 置 true 时无视 Range 头恒回 200 全量（模拟不支持断点续传的服务器） */
+    @Volatile var ignoreRange: Boolean = false
 
     fun start() {
         val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
@@ -315,11 +365,25 @@ private class FakeGitHub {
                 downloadRequests.incrementAndGet()
                 if (downloadStatus == 200) {
                     val bytes = ByteArray(DOWNLOAD_BYTES) { (it % 251).toByte() }
-                    out.write(
-                        ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
-                            "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray(),
-                    )
-                    out.write(bytes)
+                    val from = if (ignoreRange) 0L else
+                        headers["range"]?.let { Regex("bytes=(\\d+)-").find(it)?.groupValues?.get(1)?.toLongOrNull() } ?: 0L
+                    if (from in 1 until bytes.size.toLong()) {
+                        // 带 Range 的合法续传请求 → 206 只回剩余字节
+                        val remain = bytes.copyOfRange(from.toInt(), bytes.size)
+                        out.write(
+                            ("HTTP/1.1 206 Partial\r\nContent-Type: application/octet-stream\r\n" +
+                                "Content-Length: ${remain.size}\r\n" +
+                                "Content-Range: bytes $from-${bytes.size - 1}/${bytes.size}\r\n" +
+                                "Connection: close\r\n\r\n").toByteArray(),
+                        )
+                        out.write(remain)
+                    } else {
+                        out.write(
+                            ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
+                                "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray(),
+                        )
+                        out.write(bytes)
+                    }
                 } else {
                     out.write(
                         ("HTTP/1.1 $downloadStatus St\r\nContent-Type: application/json\r\n" +
