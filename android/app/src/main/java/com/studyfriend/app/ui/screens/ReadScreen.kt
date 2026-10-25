@@ -152,6 +152,15 @@ fun ReadScreen(
         val bid = bookIdForMark ?: return@produceState
         app.database.bookmarkDao().byBookWithChapterFlow(bid).collect { value = it }
     }
+    // 学习闭环轮：本章批注（段落标记）与全书批注（抽屉列表）
+    val memos by app.database.paraMemoDao().byChapterFlow(chapterId)
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val memosByParaId = remember(memos) { memos.groupBy { it.paraId } }
+    @Suppress("ProduceStateDoesNotAssignValue")
+    val bookMemos by produceState<List<com.studyfriend.app.data.db.ParaMemoWithChapter>>(emptyList(), bookIdForMark) {
+        val bid = bookIdForMark ?: return@produceState
+        app.database.paraMemoDao().byBookWithChapterFlow(bid).collect { value = it }
+    }
 
     // v7 沉浸模式：单击正文切换顶栏/工具行显隐；返回键先退出沉浸
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
@@ -192,6 +201,11 @@ fun ReadScreen(
     var selection by remember { mutableStateOf<TextSelection?>(null) }
     var selectionDragging by remember { mutableStateOf(false) }
     var qaTarget by remember { mutableStateOf<QaTarget?>(null) }
+    // 学习闭环轮：记一笔草稿（划词选中态快照，弹 Dialog 时浮条已关）与批注详情目标段
+    var memoDraft by remember { mutableStateOf<TextSelection?>(null) }
+    var memoDetailParaId by remember { mutableStateOf<Long?>(null) }
+    // 学习闭环轮：换个讲法目标（讲解卡 + 单元成员原文）
+    var reNoteTarget by remember { mutableStateOf<Pair<com.studyfriend.app.data.db.ParaNoteEntity, String>?>(null) }
     // P7 要点卡折叠（默认收起，「要点」chip 开关）
     var gistExpanded by remember { mutableStateOf(false) }
 
@@ -513,6 +527,20 @@ fun ReadScreen(
                     }
                 }
             }
+            // 学习闭环轮：批注跳段——批注直接存了 paraId，无需像书签那样按 idx 反查；
+            // scrollToItem 是挂起函数，与 openBookmark 同款包 scope.launch
+            fun openMemo(m: com.studyfriend.app.data.db.ParaMemoWithChapter) {
+                showTocSheet = false
+                scope.launch {
+                    if (m.memo.chapterId == chapterId) {
+                        rows.indexOfFirst { it is ReadRow.Para && it.p.id == m.memo.paraId }
+                            .takeIf { it >= 0 }
+                            ?.let { listState.scrollToItem(it) }
+                    } else {
+                        onOpenChapter(m.memo.chapterId, m.memo.paraId)
+                    }
+                }
+            }
 
             // v7 目录+书签抽屉（ModalBottomSheet 是 window 级弹层，挂载位置不影响渲染，
             // 放这里为了让书签操作函数落在同一作用域）
@@ -521,6 +549,7 @@ fun ReadScreen(
                     chapters = tocChapters,
                     currentChapterId = chapterId,
                     bookmarks = bookmarks,
+                    memos = bookMemos,
                     onOpenChapter = { target ->
                         showTocSheet = false
                         onOpenChapter(target, -1L)
@@ -529,6 +558,10 @@ fun ReadScreen(
                     onOpenBookmark = { openBookmark(it) },
                     onDeleteBookmark = { bm ->
                         app.appScope.launch { app.database.bookmarkDao().delete(bm.bookmark.id) }
+                    },
+                    onOpenMemo = { openMemo(it) },
+                    onDeleteMemo = { m ->
+                        app.appScope.launch { app.database.paraMemoDao().delete(m.memo.id) }
                     },
                     onDismiss = { showTocSheet = false },
                 )
@@ -564,6 +597,8 @@ fun ReadScreen(
                                 lineHeightMult = readLineHeight,
                                 selectedRange = selection?.takeIf { it.paraId == row.p.id }?.range,
                                 ttsActive = ttsParaId == row.p.id,
+                                hasMemo = memosByParaId.containsKey(row.p.id),
+                                onOpenMemo = { memoDetailParaId = row.p.id },
                                 onLongPress = { range, anchor ->
                                     selection = TextSelection(row.p.id, range, anchor)
                                 },
@@ -582,7 +617,14 @@ fun ReadScreen(
                             if (unit != null) {
                                 val note = notesByParaIds[ParaIdsCodec.encode(unit.members.map { it.id })]
                                     ?.takeIf { it.promptVersion == NotePlanner.NOTE_VERSION && it.friendly.isNotBlank() }
-                                NoteCard(note = note, generating = note == null && noteRunningThis)
+                                NoteCard(
+                                    note = note,
+                                    generating = note == null && noteRunningThis,
+                                    // 换个讲法：带上单元全部成员原文（临时重讲不落库）
+                                    onReNote = { n ->
+                                        reNoteTarget = n to unit.members.joinToString("\n") { it.text }
+                                    },
+                                )
                             }
                             // P7：段落分隔线删除，靠段间距留白分段
                         }
@@ -626,6 +668,11 @@ fun ReadScreen(
                     onExpandPara = {
                         selection = sel.copy(range = 0 until selPara.text.length)
                     },
+                    onMemo = {
+                        // 记一笔：选中态快照进草稿（Dialog 里取原文），浮条先关
+                        memoDraft = sel
+                        selection = null
+                    },
                     onCopy = {
                         clipboard.setText(AnnotatedString(selPara.text.substring(sel.range.first, sel.range.last + 1)))
                         selection = null
@@ -663,6 +710,65 @@ fun ReadScreen(
 
     previewFigure?.let { f ->
         FigurePreviewDialog(f = f, filesRoot = filesRoot, onDismiss = { previewFigure = null })
+    }
+
+    // 学习闭环轮：记一笔草稿弹窗（选中段还在才有效；段落 Flow 刷新后选区失效自动关）
+    memoDraft?.let { draft ->
+        val draftPara = paragraphs.firstOrNull { it.id == draft.paraId }
+        if (draftPara == null || draft.range.last >= draftPara.text.length) {
+            memoDraft = null
+        } else {
+            val quote = draftPara.text.substring(draft.range.first, draft.range.last + 1)
+            MemoDraftDialog(
+                quote = quote,
+                onSave = { text ->
+                    val bid = bookIdForMark
+                    if (bid != null && text.isNotBlank()) {
+                        app.appScope.launch {
+                            app.database.paraMemoDao().insert(
+                                com.studyfriend.app.data.db.ParaMemoEntity(
+                                    bookId = bid,
+                                    chapterId = chapterId,
+                                    paraId = draft.paraId,
+                                    paraIdx = draftPara.idx,
+                                    quote = quote.take(100),
+                                    text = text,
+                                    createdAt = System.currentTimeMillis(),
+                                ),
+                            )
+                        }
+                    }
+                    memoDraft = null
+                },
+                onDismiss = { memoDraft = null },
+            )
+        }
+    }
+
+    // 段内批注列表（点段落铅笔标记呼出；列表空了自动关）
+    memoDetailParaId?.let { pid ->
+        val list = memosByParaId[pid].orEmpty()
+        if (list.isEmpty()) {
+            memoDetailParaId = null
+        } else {
+            ParaMemosDialog(
+                memos = list,
+                onDelete = { id ->
+                    app.appScope.launch { app.database.paraMemoDao().delete(id) }
+                },
+                onDismiss = { memoDetailParaId = null },
+            )
+        }
+    }
+
+    // 学习闭环轮：换个讲法弹层（流式重讲，临时展示不落库）
+    reNoteTarget?.let { (n, text) ->
+        ReNoteSheet(
+            note = n,
+            paragraphText = text,
+            onDismiss = { reNoteTarget = null },
+            onOpenSettings = onOpenSettings,
+        )
     }
 }
 

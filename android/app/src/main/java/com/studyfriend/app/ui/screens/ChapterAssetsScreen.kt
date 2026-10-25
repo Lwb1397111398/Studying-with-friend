@@ -56,7 +56,10 @@ import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.db.ChapterAssetEntity
 import com.studyfriend.app.data.db.QuizAttemptEntity
 import com.studyfriend.app.data.study.CheckQuestion
+import com.studyfriend.app.data.study.MissingKeyException
 import com.studyfriend.app.data.study.QuizCodec
+import com.studyfriend.app.data.study.QuizJudgeResult
+import com.studyfriend.app.data.study.QuizJudge
 import com.studyfriend.app.data.study.QuizQuestion
 import com.studyfriend.app.data.study.SummaryRunState
 import com.studyfriend.app.data.study.buildExportMd
@@ -71,6 +74,7 @@ import com.studyfriend.app.mindmap.TreeText
 import com.studyfriend.app.ui.components.MapController
 import com.studyfriend.app.ui.components.MdText
 import com.studyfriend.app.ui.components.MindMapPanel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -179,6 +183,7 @@ fun ChapterAssetsScreen(chapterId: Long, onBack: () -> Unit, onOpenSettings: () 
                     chapterTitle = chapter?.title ?: "",
                     tab = tab,
                     onTab = { tab = it },
+                    onOpenSettings = onOpenSettings,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -268,6 +273,7 @@ private fun AssetTabs(
     chapterTitle: String,
     tab: Int,
     onTab: (Int) -> Unit,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val titles = listOf("总结", "导图", "记忆", "自测")
@@ -288,13 +294,13 @@ private fun AssetTabs(
             2 -> MemoryPane(asset)
 
             // 资产版本换代后题卡状态（展开/输入框）必须重建：rememberSaveable 键不含版本，用 key 隔离
-            3 -> key(asset.createdAt) { QuizPane(asset, chapterId) }        }
+            3 -> key(asset.createdAt) { QuizPane(asset, chapterId, onOpenSettings) }        }
     }
 }
 
-/** 自测 Tab（计划 M5 §3.5）：逐题作答自评落库（同版资产内追加历史）+ 底部讲解自问（只翻面不落库） */
+/** 自测 Tab（计划 M5 §3.5 + 学习闭环轮 AI 判卷）：逐题作答自评落库（同版资产内追加历史）+ 底部讲解自问（只翻面不落库） */
 @Composable
-private fun QuizPane(asset: ChapterAssetEntity, chapterId: Long, modifier: Modifier = Modifier) {
+private fun QuizPane(asset: ChapterAssetEntity, chapterId: Long, onOpenSettings: () -> Unit, modifier: Modifier = Modifier) {
     val app = LocalContext.current.applicationContext as StudyApp
     val db = app.database
     val scope = rememberCoroutineScope()
@@ -334,6 +340,7 @@ private fun QuizPane(asset: ChapterAssetEntity, chapterId: Long, modifier: Modif
                         )
                     }
                 },
+                onOpenSettings = onOpenSettings,
             )
         }
         if (selfQuestions.isNotEmpty()) {
@@ -361,10 +368,41 @@ private fun QuizCard(
     question: QuizQuestion,
     latestVerdict: String?,
     onAnswer: (answer: String, verdict: String) -> Unit,
+    onOpenSettings: () -> Unit = {},
 ) {
     var expanded by rememberSaveable("quiz", qIndex.toString()) { mutableStateOf(false) }
     var revealed by rememberSaveable("quiz", qIndex.toString(), "revealed") { mutableStateOf(false) }
     var answerText by rememberSaveable("quiz", qIndex.toString(), "answer") { mutableStateOf("") }
+
+    // 学习闭环轮 AI 判卷（手动触发，单次调用走讲解模型，不落库）
+    val app = LocalContext.current.applicationContext as StudyApp
+    val scope = rememberCoroutineScope()
+    var judging by remember { mutableStateOf(false) }
+    var judgeResult by remember { mutableStateOf<QuizJudgeResult?>(null) }
+    var judgeError by remember { mutableStateOf<String?>(null) }
+    var judgeKeyIssue by remember { mutableStateOf(false) }
+
+    fun runJudge() {
+        judging = true
+        judgeError = null
+        judgeKeyIssue = false
+        scope.launch {
+            try {
+                judgeResult = QuizJudge.judge(
+                    app.settingsRepo, app, question.q, answerText, question.a, question.explain,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: MissingKeyException) {
+                judgeKeyIssue = true
+                judgeError = e.message
+            } catch (e: Exception) {
+                judgeError = e.message ?: "判卷失败，请重试"
+            } finally {
+                judging = false
+            }
+        }
+    }
 
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -402,6 +440,47 @@ private fun QuizCard(
                         Button(onClick = { onAnswer(answerText, "CORRECT") }) { Text("答对") }
                         OutlinedButton(onClick = { onAnswer(answerText, "PARTIAL") }) { Text("模糊") }
                         OutlinedButton(onClick = { onAnswer(answerText, "WRONG") }) { Text("答错") }
+                    }
+                    // 学习闭环轮：让搭子判卷（有作答才可判；结果就地展示）
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { runJudge() }, enabled = !judging && answerText.isNotBlank()) {
+                            Text(if (judging) "搭子正在判卷…" else "让搭子判卷")
+                        }
+                    }
+                    if (judgeResult != null) {
+                        val jr = judgeResult!!
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (jr.covered.isNotEmpty()) {
+                                    Text("答到的要点：", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                    jr.covered.forEach { Text("✓ $it", style = MaterialTheme.typography.bodySmall) }
+                                }
+                                if (jr.missing.isNotEmpty()) {
+                                    Text("漏掉的要点：", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                                    jr.missing.forEach { Text("✗ $it", style = MaterialTheme.typography.bodySmall) }
+                                }
+                                if (jr.advice.isNotBlank()) {
+                                    Text("建议：${jr.advice}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                    if (judgeError != null) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                judgeError ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (judgeKeyIssue) {
+                                TextButton(onClick = onOpenSettings) { Text("去设置") }
+                            }
+                        }
                     }
                 }
             }

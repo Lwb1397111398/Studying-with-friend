@@ -18,6 +18,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -39,20 +40,24 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.BookRepository
 import com.studyfriend.app.data.db.DueItem
+import com.studyfriend.app.data.db.QuizAttemptEntity
 import com.studyfriend.app.data.study.DAY_MS
 import com.studyfriend.app.data.study.QuizCodec
 import com.studyfriend.app.data.study.QuizQuestion
 import com.studyfriend.app.data.study.ReviewAdvance
 import com.studyfriend.app.data.study.ReviewVerdict
+import com.studyfriend.app.data.study.TermBookGroup
 import com.studyfriend.app.data.study.advanceReview
 import com.studyfriend.app.data.study.aggregateVerdict
+import com.studyfriend.app.data.study.buildTermGroups
 import com.studyfriend.app.data.study.latestWrongAttempts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 复习中心（M6 计划 §3.1）：Tab0 今日复习（到期列表 → 章内评估流）+ Tab1 错题本（去重按书分组）。
+ * 复习中心（M6 计划 §3.1 + 学习闭环轮）：Tab0 今日复习（到期列表 → 章内评估流）
+ * + Tab1 错题本（去重按书分组，可整书重测）+ Tab2 术语卡盒（全书 keyTerms 按书翻看）。
  * 保持无参签名：底栏 Tab 页，自行取 StudyApp 依赖。
  */
 @Composable
@@ -64,6 +69,8 @@ fun ReviewScreen() {
     // 评估会话快照（计划 §2.2）：进入时读一次资产；复习中资产被重生成/清空不中途换题。
     // 会话不跨旋转恢复（统一 remember，与 M5 ChapterAssetsScreen 同口径）
     var session by remember { mutableStateOf<ReviewSession?>(null) }
+    // 学习闭环轮：错题重测会话（null = 不在重测中）
+    var wrongSession by remember { mutableStateOf<WrongSession?>(null) }
 
     if (session != null) {
         val s = session!!
@@ -80,10 +87,30 @@ fun ReviewScreen() {
         )
         return
     }
+    if (wrongSession != null) {
+        val s = wrongSession!!
+        WrongSessionPane(
+            session = s,
+            onAnswer = { row, answer, verdict ->
+                // 逐题落 quiz_attempts：重测的 CORRECT 最新行使题目自动出列（wrongLatest 去重语义）
+                app.appScope.launch {
+                    repo.addAttempt(
+                        QuizAttemptEntity(
+                            chapterId = row.chapterId, qIndex = row.qIndex, answer = answer,
+                            verdict = verdict, feedback = row.explain.takeIf { it.isNotBlank() },
+                            createdAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+            },
+            onDone = { wrongSession = null },
+        )
+        return
+    }
 
     Column(Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = tab) {
-            listOf("今日复习", "错题本").forEachIndexed { i, t ->
+            listOf("今日复习", "错题本", "术语").forEachIndexed { i, t ->
                 Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
             }
         }
@@ -95,7 +122,10 @@ fun ReviewScreen() {
                     withContext(Dispatchers.Main) { session = s }
                 }
             })
-            else -> WrongBookPane(repo = repo)
+            1 -> WrongBookPane(repo = repo, onRetest = { rows ->
+                wrongSession = WrongSession(rows.first().bookTitle, rows)
+            })
+            else -> TermsPane(repo = repo)
         }
     }
 }
@@ -218,7 +248,7 @@ private fun VerdictButtons(onVerdict: (ReviewVerdict) -> Unit) {
     }
 }
 
-// ---------- Tab 1：错题本（M5 契约 #1：wrongLatest SQL 取每题最新 → latestWrongAttempts 滤 WRONG → 按书分组） ----------
+// ---------- Tab 1：错题本（M5 契约 #1 + 学习闭环轮重测） ----------
 
 /** 错题行展示数据：题干从该章资产 quizJson 按 qIndex 回查；资产缺失 missing=true（计划 §2.3 文案） */
 private data class WrongRow(
@@ -233,6 +263,9 @@ private data class WrongRow(
     val feedback: String?,
     val missing: Boolean,
 )
+
+/** 错题重测会话（学习闭环轮）：整书的可重测错题（missing 行剔除） */
+private data class WrongSession(val bookTitle: String, val rows: List<WrongRow>)
 
 private suspend fun loadWrongRows(repo: BookRepository): List<WrongRow> {
     val wrong = latestWrongAttempts(repo.wrongLatest())
@@ -259,7 +292,7 @@ private suspend fun loadWrongRows(repo: BookRepository): List<WrongRow> {
 }
 
 @Composable
-private fun WrongBookPane(repo: BookRepository) {
+private fun WrongBookPane(repo: BookRepository, onRetest: (List<WrongRow>) -> Unit) {
     // 一次性加载（null = 加载中）：错题本无实时性要求，进页快照即可
     val rows by produceState<List<WrongRow>?>(initialValue = null) {
         value = loadWrongRows(repo)
@@ -272,12 +305,26 @@ private fun WrongBookPane(repo: BookRepository) {
             LazyColumn(Modifier.fillMaxSize()) {
                 rows!!.groupBy { it.bookTitle }.forEach { (book, rs) ->
                     item(key = "header_$book") {
-                        Text(
-                            book,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 4.dp),
-                        )
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 20.dp, top = 14.dp, bottom = 4.dp, end = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                book,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            // 学习闭环轮：整书错题重测（总结包已更新的 missing 行不可测）
+                            val retestable = rs.filter { !it.missing }
+                            if (retestable.isNotEmpty()) {
+                                TextButton(onClick = { onRetest(retestable) }) {
+                                    Text("重测本书错题（${retestable.size}）")
+                                }
+                            }
+                        }
                     }
                     items(rs, key = { "${it.chapterId}_${it.qIndex}" }) { r ->
                         val rowKey = "${r.chapterId}_${r.qIndex}"
@@ -309,6 +356,162 @@ private fun WrongBookPane(repo: BookRepository) {
                             }
                         }
                         HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 错题重测流（学习闭环轮）：逐题 输入作答 → 对答案 → 三按钮自评落库；答对自动出列 */
+@Composable
+private fun WrongSessionPane(
+    session: WrongSession,
+    onAnswer: (row: WrongRow, answer: String, verdict: String) -> Unit,
+    onDone: () -> Unit,
+) {
+    var idx by remember { mutableIntStateOf(0) }
+    var revealed by remember { mutableStateOf(false) }
+    var answerText by remember { mutableStateOf("") }
+    val rows = session.rows
+    val finished = idx >= rows.size
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            TextButton(onClick = onDone) { Text("退出重测") }
+            if (!finished) {
+                Text(
+                    "第 ${idx + 1}/${rows.size} 题",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Text(session.bookTitle, style = MaterialTheme.typography.titleMedium)
+
+        if (finished) {
+            Text("重测完成！", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
+            Text(
+                "答对的题已自动移出错题本，还在错的题留着下次再练。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("返回错题本") }
+        } else {
+            val r = rows[idx]
+            Text(r.question, style = MaterialTheme.typography.titleLarge)
+            Text(
+                r.chapterTitle,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            if (!revealed) {
+                OutlinedTextField(
+                    value = answerText,
+                    onValueChange = { answerText = it },
+                    placeholder = { Text("先自己作答，再看答案") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(onClick = { revealed = true }, modifier = Modifier.fillMaxWidth()) { Text("对答案") }
+            } else {
+                Text("参考答案：${r.correctAnswer}", style = MaterialTheme.typography.bodyLarge)
+                if (r.explain.isNotBlank()) {
+                    Text(r.explain, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("对照解析，给自己一个评价：", style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        onAnswer(r, answerText, "CORRECT")
+                        answerText = ""; revealed = false; idx += 1
+                    }) { Text("答对") }
+                    OutlinedButton(onClick = {
+                        onAnswer(r, answerText, "PARTIAL")
+                        answerText = ""; revealed = false; idx += 1
+                    }) { Text("模糊") }
+                    OutlinedButton(onClick = {
+                        onAnswer(r, answerText, "WRONG")
+                        answerText = ""; revealed = false; idx += 1
+                    }) { Text("答错") }
+                }
+            }
+        }
+    }
+}
+
+// ---------- Tab 2：术语卡盒（学习闭环轮） ----------
+
+@Composable
+private fun TermsPane(repo: BookRepository) {
+    // 一次性加载：术语无实时性要求，进页快照
+    val groups by produceState<List<TermBookGroup>?>(initialValue = null) {
+        value = buildTermGroups(repo.chaptersWithTerms())
+    }
+    when {
+        groups == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        groups!!.isEmpty() -> EmptyState(
+            title = "还没有术语卡",
+            subtitle = "读完章节、完成粗读后，每章的关键术语和大白话解释会汇集到这里",
+        )
+        else -> {
+            // 手风琴：一次展开一章，翻看不迷路
+            var expandedChapter by rememberSaveable { mutableStateOf<String?>(null) }
+            LazyColumn(Modifier.fillMaxSize()) {
+                groups!!.forEach { g ->
+                    item(key = "book_${g.bookTitle}") {
+                        Text(
+                            g.bookTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 4.dp),
+                        )
+                    }
+                    g.chapters.forEach { ch ->
+                        // 章唯一键：书名+章名（章节 id 不在分组结构里，重名章用文本区分已够用）
+                        val chKey = "${g.bookTitle}_${ch.chapterTitle}"
+                        item(key = "ch_$chKey") {
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { expandedChapter = if (expandedChapter == chKey) null else chKey }
+                                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                            ) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(ch.chapterTitle, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        "${ch.terms.size} 词",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (expandedChapter == chKey) {
+                                    Column(Modifier.padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        ch.terms.forEach { t ->
+                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Text(
+                                                    t.term,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                )
+                                                Text(
+                                                    t.plain,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.weight(1f),
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            HorizontalDivider()
+                        }
                     }
                 }
             }

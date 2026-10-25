@@ -410,8 +410,8 @@ internal fun FontSizeSheet(
 }
 
 /**
- * 划词浮条（P7 + 划词扩选轮）：定位在选中文字上方，问含义问的就是当前高亮的整块；
- * 「扩句/扩段」一键改选区（拖拽把手之外的快捷路径），复制取当前高亮。
+ * 划词浮条（P7 + 划词扩选轮 + 学习闭环轮）：定位在选中文字上方，问含义问的就是当前高亮的整块；
+ * 「扩句/扩段」一键改选区（拖拽把手之外的快捷路径），「记一笔」把选中原文带进批注草稿，复制取当前高亮。
  */
 @Composable
 internal fun SelectionFloatBar(
@@ -420,12 +420,13 @@ internal fun SelectionFloatBar(
     onMeaning: () -> Unit,
     onExpandSentence: () -> Unit,
     onExpandPara: () -> Unit,
+    onMemo: () -> Unit,
     onCopy: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val density = LocalDensity.current
     val screenWpx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }.toInt()
-    val barWpx = with(density) { 292.dp.toPx() }.toInt()
+    val barWpx = with(density) { 356.dp.toPx() }.toInt()
     val barHpx = with(density) { 52.dp.toPx() }.toInt()
     val gap = with(density) { 8.dp.toPx() }.toInt()
     val x = (anchor.x - boxOrigin.x - barWpx / 2).coerceIn(0, (screenWpx - barWpx).coerceAtLeast(0))
@@ -464,6 +465,12 @@ internal fun SelectionFloatBar(
                     contentPadding = PaddingValues(horizontal = 8.dp),
                 ) {
                     Text("扩段", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                }
+                TextButton(
+                    onClick = onMemo,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("记一笔", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
                 TextButton(
                     onClick = onCopy,

@@ -171,7 +171,27 @@ interface ChapterDao {
 
     @Query("DELETE FROM chapters WHERE bookId = :bookId")
     suspend fun deleteByBook(bookId: Long)
+
+    /** 术语卡盒（学习闭环轮）：全书有 keyTerms 的章（复习中心「术语」Tab 数据源，一次性快照） */
+    @Query(
+        """SELECT c.id AS chapterId, c.idx AS chapterIdx, c.title AS chapterTitle,
+               c.keyTermsJson AS keyTermsJson, b.id AS bookId, b.title AS bookTitle
+        FROM chapters c JOIN books b ON c.bookId = b.id
+        WHERE c.keyTermsJson IS NOT NULL AND c.keyTermsJson != ''
+        ORDER BY b.id, c.idx""",
+    )
+    suspend fun chaptersWithTerms(): List<ChapterTermsRow>
 }
+
+/** 术语卡盒行投影（学习闭环轮）：章 + 术语 JSON + 书名 */
+data class ChapterTermsRow(
+    val bookId: Long,
+    val bookTitle: String,
+    val chapterId: Long,
+    val chapterIdx: Int,
+    val chapterTitle: String,
+    val keyTermsJson: String,
+)
 
 @Dao
 interface ParagraphDao {
@@ -484,4 +504,34 @@ interface QaHistoryDao {
         )""",
     )
     suspend fun trim(bookId: Long, keep: Int)
+}
+
+// ============ 段落批注（学习闭环轮） ============
+
+/** 批注行投影：批注 + 章名/章序（目录抽屉批注列表展示用，同 BookmarkWithChapter 模式） */
+data class ParaMemoWithChapter(
+    @Embedded val memo: ParaMemoEntity,
+    val chapterTitle: String,
+    val chapterIdx: Int,
+)
+
+@Dao
+interface ParaMemoDao {
+    @Insert
+    suspend fun insert(memo: ParaMemoEntity): Long
+
+    @Query("DELETE FROM para_memos WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    /** 阅读页段落标记源：按段序排，UI 按 paraId 匹配段落行显示标记 */
+    @Query("SELECT * FROM para_memos WHERE chapterId = :chapterId ORDER BY paraIdx, id")
+    fun byChapterFlow(chapterId: Long): Flow<List<ParaMemoEntity>>
+
+    /** 抽屉批注列表：全书批注带章名（最新在前，跳转走 paraId 段锚） */
+    @Query(
+        """SELECT m.*, c.title AS chapterTitle, c.idx AS chapterIdx FROM para_memos m
+        JOIN chapters c ON c.id = m.chapterId
+        WHERE m.bookId = :bookId ORDER BY m.createdAt DESC, m.id DESC""",
+    )
+    fun byBookWithChapterFlow(bookId: Long): Flow<List<ParaMemoWithChapter>>
 }

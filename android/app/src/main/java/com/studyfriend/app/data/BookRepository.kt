@@ -288,4 +288,7 @@ class BookRepository(
     suspend fun markReviewResult(id: Long, intervalIdx: Int, dueAt: Long, done: Boolean) =
         db.reviewItemDao().markResult(id, intervalIdx, dueAt, done)
     suspend fun pendingReviews(bookId: Long) = db.reviewItemDao().pendingByBook(bookId)
+
+    /** 术语卡盒（学习闭环轮）：全书有 keyTerms 的章（复习中心「术语」Tab） */
+    suspend fun chaptersWithTerms() = db.chapterDao().chaptersWithTerms()
 }

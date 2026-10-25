@@ -20,9 +20,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberUpdatedState
@@ -30,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
@@ -74,6 +80,8 @@ internal fun ParaRow(
     lineHeightMult: Float,
     selectedRange: IntRange?,
     ttsActive: Boolean = false,
+    hasMemo: Boolean = false,
+    onOpenMemo: (() -> Unit)? = null,
     onLongPress: (IntRange, IntOffset) -> Unit,
     onSelectionChange: ((IntRange) -> Unit)? = null,
     onAnchorChange: ((IntOffset) -> Unit)? = null,
@@ -100,17 +108,19 @@ internal fun ParaRow(
         )
         return
     }
-    // EXPLAIN 段左侧主题色竖条（M4a §3.4）：IntrinsicSize 让竖条随内容高度
+    // EXPLAIN 段左侧主题色竖条（M4a §3.4）：IntrinsicSize 让竖条随内容高度；
+    // 学习闭环轮：有批注的段右上角小铅笔标记，点开看/删自己的笔记
     val explained = p.aiAction == DbValues.ACT_EXPLAIN
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            // v7 正文听书：当前朗读段淡染底色（跟随高亮）
-            .background(
-                if (ttsActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent,
-            ),
-    ) {
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                // v7 正文听书：当前朗读段淡染底色（跟随高亮）
+                .background(
+                    if (ttsActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent,
+                ),
+        ) {
         if (explained) {
             Box(
                 Modifier
@@ -173,6 +183,23 @@ internal fun ParaRow(
                     onAnchorChange = onAnchorChange,
                     onDragStateChange = onDragStateChange,
                     onTap = onTap,
+                )
+            }
+        }
+        }
+        if (hasMemo) {
+            IconButton(
+                onClick = { onOpenMemo?.invoke() },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 6.dp, end = 4.dp)
+                    .size(32.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = "查看批注",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp),
                 )
             }
         }
@@ -410,9 +437,10 @@ internal fun GistCard(gist: String, keyTermsJson: String?) {
     }
 }
 
-/** 讲解卡（计划 M4b §3.2）：标题+大白话+类比+要点+记忆钩子；生成中显示占位 */
+/** 讲解卡（计划 M4b §3.2 + 学习闭环轮）：标题+大白话+类比+要点+记忆钩子；生成中显示占位；
+ *  底部「换个讲法」由调用方接弹层（临时重讲不落库，见 ReNoteSheet） */
 @Composable
-internal fun NoteCard(note: ParaNoteEntity?, generating: Boolean) {
+internal fun NoteCard(note: ParaNoteEntity?, generating: Boolean, onReNote: ((ParaNoteEntity) -> Unit)? = null) {
     when {
         note != null -> Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
@@ -447,6 +475,11 @@ internal fun NoteCard(note: ParaNoteEntity?, generating: Boolean) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
+                }
+                if (onReNote != null) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { onReNote(note) }) { Text("没看懂？换个讲法") }
+                    }
                 }
             }
         }

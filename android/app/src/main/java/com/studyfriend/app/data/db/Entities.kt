@@ -337,3 +337,38 @@ data class QaHistoryEntity(
     val answer: String,
     val createdAt: Long,
 )
+
+/**
+ * 段落批注（学习闭环轮）：用户自己的读书笔记，锚到一个自然段。
+ * paraId 故意不建 FK——段落可能因章重建而漂移 id（与 qa_history 的 chapterId 同款取舍），
+ * quote 冗余存划词选中的原文片段（≤100 字），段漂移后批注仍可读；
+ * 阅读页标记按 paraId 匹配段落行，匹配不到不显示标记、抽屉列表里仍可见。
+ */
+@Entity(
+    tableName = "para_memos",
+    foreignKeys = [
+        ForeignKey(
+            entity = BookEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["bookId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = ChapterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["chapterId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("bookId"), Index("chapterId")],
+)
+data class ParaMemoEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val chapterId: Long,
+    val paraId: Long,
+    val paraIdx: Int,
+    val quote: String,
+    val text: String,
+    val createdAt: Long,
+)

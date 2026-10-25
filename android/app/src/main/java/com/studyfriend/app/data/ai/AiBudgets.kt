@@ -24,6 +24,9 @@ object AiBudgets {
     const val OUTPUT_TOKENS_VISION_PAGE = 8_000
     const val OUTPUT_TOKENS_VISION_JUDGE = 2_000
 
+    /** AI 判卷（学习闭环轮）：得分点清单+一句建议，短输出钉死格式 */
+    const val OUTPUT_TOKENS_JUDGE = 2_000
+
     // ---- 超时 ----
 
     const val CONNECT_TIMEOUT_MS = 15_000

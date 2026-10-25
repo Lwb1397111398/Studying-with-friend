@@ -151,6 +151,24 @@ val MIGRATION_6_7 = object : Migration(6, 7) {
     }
 }
 
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // 学习闭环轮：段落批注新表（用户读书笔记，锚段存 quote 冗余原文片段）。
+        // createSql 逐字段抄自 Entity 定义，漏抄会被迁移校验报红
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `para_memos` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                "`bookId` INTEGER NOT NULL, `chapterId` INTEGER NOT NULL, `paraId` INTEGER NOT NULL, " +
+                "`paraIdx` INTEGER NOT NULL, `quote` TEXT NOT NULL, `text` TEXT NOT NULL, " +
+                "`createdAt` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , " +
+                "FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_para_memos_bookId` ON `para_memos` (`bookId`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_para_memos_chapterId` ON `para_memos` (`chapterId`)")
+    }
+}
+
 val MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+    MIGRATION_7_8,
 )

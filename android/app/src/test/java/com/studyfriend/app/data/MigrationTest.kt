@@ -251,4 +251,42 @@ fun migrate6To7_positionColumnsAndNewTables() {
         }
     }
 }
+
+@Test
+fun migrate7To8_paraMemosTableUsable() {
+    val dbName = "migration-test-78.db"
+    helper.createDatabase(dbName, 7).use { v7 ->
+        v7.execSQL(
+            "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                "overviewJson, createdAt, updatedAt) VALUES ('旧书', '', 'TXT', '', 'READY', 1, NULL, 1, 1)",
+        )
+        v7.execSQL(
+            "INSERT INTO chapters (bookId, idx, title, readState, gist, keyTermsJson, level, parentOrder, calibrated) " +
+                "VALUES (1, 0, '第一章', 'NOT_READ', NULL, NULL, 1, NULL, 0)",
+        )
+        v7.execSQL(
+            "INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (1, 0, '代理权授与他人', 'BODY', 'NONE')",
+        )
+    }
+    // 跑 1→8 全链迁移 + schema 校验（para_memos 建表与 Entity 对齐，失败即抛）
+    helper.runMigrationsAndValidate(dbName, 8, true, *MIGRATIONS).use { v8 ->
+        // 双 FK 表写读回验（book/chapter 目标行存在；paraId 无 FK 不校验）
+        v8.execSQL(
+            "INSERT INTO para_memos (bookId, chapterId, paraId, paraIdx, quote, text, createdAt) " +
+                "VALUES (1, 1, 1, 0, '代理权授与他人', '这里和委托合同的区别要记牢', 99)",
+        )
+        v8.query("SELECT quote, text FROM para_memos").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals("代理权授与他人", cur.getString(0))
+            assertEquals("这里和委托合同的区别要记牢", cur.getString(1))
+        }
+        // 索引存在（index_para_memos_bookId / index_para_memos_chapterId）
+        v8.query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'index_para_memos_%'",
+        ).use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals(2, cur.getInt(0))
+        }
+    }
+}
 }
