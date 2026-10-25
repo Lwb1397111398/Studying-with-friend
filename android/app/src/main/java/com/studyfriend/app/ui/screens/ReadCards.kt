@@ -64,6 +64,7 @@ internal fun ParaRow(
     selectedRange: IntRange?,
     ttsActive: Boolean = false,
     onLongPress: (IntRange, IntOffset) -> Unit,
+    onTap: (() -> Unit)? = null,
 ) {
     // OPT-C C4：目录条目特殊展示——小字次级色，无重点竖条/无 AI 徽标（TOC 段也不参与 AI 标注）
     // OPT-E：脚注段同款次级展示；P5-F：FRONT/BACK（前/后置版权页）纳入次级展示，
@@ -75,6 +76,7 @@ internal fun ParaRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             highlightRange = selectedRange,
             onLongPress = onLongPress,
+            onTap = onTap,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -121,6 +123,7 @@ internal fun ParaRow(
                         style = bodyTextStyle(fontSize, lineHeightMult),
                         highlightRange = selectedRange,
                         onLongPress = onLongPress,
+                        onTap = onTap,
                     )
                 }
                 DbValues.ACT_SKIP -> {
@@ -134,6 +137,7 @@ internal fun ParaRow(
                         style = bodyTextStyle(fontSize, lineHeightMult),
                         highlightRange = selectedRange,
                         onLongPress = onLongPress,
+                        onTap = onTap,
                         modifier = Modifier.alpha(0.55f),
                     )
                 }
@@ -142,6 +146,7 @@ internal fun ParaRow(
                     style = bodyTextStyle(fontSize, lineHeightMult),
                     highlightRange = selectedRange,
                     onLongPress = onLongPress,
+                    onTap = onTap,
                 )
             }
         }
@@ -150,7 +155,9 @@ internal fun ParaRow(
 
 /**
  * 可长按的正文 Text（P7）：长按取词（SelectionBounds.wordAt）回报词区间 + 光标矩形
- * 的 window 坐标；被选中段渲染底色高亮（primaryContainer）。普通 tap 不消费，滚动不受影响。
+ * 的 window 坐标；被选中段渲染底色高亮（primaryContainer）。
+ * detectTapGestures 挂上即消费 tap，单击切换沉浸栏必须经 onTap 参数从这里透传（v7），
+ * 外层再挂 detectTapGestures 收不到事件。
  */
 @Composable
 private fun SelectableText(
@@ -160,6 +167,7 @@ private fun SelectableText(
     color: Color = Color.Unspecified,
     highlightRange: IntRange?,
     onLongPress: (IntRange, IntOffset) -> Unit,
+    onTap: (() -> Unit)? = null,
 ) {
     val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
     val windowBounds = remember { mutableStateOf<Rect?>(null) }
@@ -186,14 +194,17 @@ private fun SelectableText(
         modifier = modifier
             .onGloballyPositioned { windowBounds.value = it.boundsInWindow() }
             .pointerInput(text) {
-                detectTapGestures(onLongPress = { pos ->
-                    val l = layout.value ?: return@detectTapGestures
-                    val word = SelectionBounds.wordAt(text, l.getOffsetForPosition(pos))
-                    if (word.isEmpty()) return@detectTapGestures
-                    val cursor = l.getCursorRect(word.first)
-                    val global = windowBounds.value?.let { it.topLeft + cursor.centerLeft } ?: Offset.Zero
-                    onLongPress(word, IntOffset(global.x.roundToInt(), global.y.roundToInt()))
-                })
+                detectTapGestures(
+                    onTap = { onTap?.invoke() },
+                    onLongPress = { pos ->
+                        val l = layout.value ?: return@detectTapGestures
+                        val word = SelectionBounds.wordAt(text, l.getOffsetForPosition(pos))
+                        if (word.isEmpty()) return@detectTapGestures
+                        val cursor = l.getCursorRect(word.first)
+                        val global = windowBounds.value?.let { it.topLeft + cursor.centerLeft } ?: Offset.Zero
+                        onLongPress(word, IntOffset(global.x.roundToInt(), global.y.roundToInt()))
+                    },
+                )
             },
     )
 }

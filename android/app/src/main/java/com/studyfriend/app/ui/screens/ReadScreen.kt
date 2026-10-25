@@ -539,6 +539,8 @@ fun ReadScreen(
                                 onLongPress = { wordRange, anchor ->
                                     selection = TextSelection(row.p.id, wordRange, anchor)
                                 },
+                                // v7 沉浸单击必须在文本手势层透传（SelectableText 的 detectTapGestures 消费 tap）
+                                onTap = { chromeVisible = !chromeVisible },
                             )
                             val unit = anchorById[row.p.id]
                             if (unit != null) {
