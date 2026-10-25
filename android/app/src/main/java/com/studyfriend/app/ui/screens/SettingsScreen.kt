@@ -1,5 +1,7 @@
 package com.studyfriend.app.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,10 +21,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -82,6 +89,71 @@ fun SettingsScreen(
                     )
                 }
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "进入模型页")
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            // 外观主题三态（功能补齐轮）：即选即存，改完全 App 即时生效
+            Text("外观", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    SettingsRepository.THEME_SYSTEM to "跟随系统",
+                    SettingsRepository.THEME_LIGHT to "浅色",
+                    SettingsRepository.THEME_DARK to "深色",
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = vm.themeMode == mode,
+                        onClick = { vm.chooseThemeMode(mode) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            // 朗读语速（功能补齐轮正文听书）：阅读页「朗读」与本机朗读共用；拖完落库
+            Text("朗读语速", style = MaterialTheme.typography.labelLarge)
+            var rateDragging by remember { mutableStateOf(vm.ttsRate) }
+            Slider(
+                value = rateDragging,
+                onValueChange = { rateDragging = (it * 10).toInt() / 10f },
+                onValueChangeFinished = { vm.chooseTtsRate(rateDragging) },
+                valueRange = SettingsRepository.TTS_RATE_MIN..SettingsRepository.TTS_RATE_MAX,
+            )
+            Text(
+                "${rateDragging} 倍速（0.5 ~ 2.0）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            // 复习到期提醒（功能补齐轮）：每日本地通知；Android 13+ 打开时请求通知权限
+            val permissionLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission(),
+            ) { }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("复习到期提醒", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "有章目复习到期时每天提醒一次，点击通知直达 App",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = vm.reviewReminder,
+                    onCheckedChange = { enabled ->
+                        if (enabled && android.os.Build.VERSION.SDK_INT >= 33) {
+                            permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        vm.chooseReviewReminder(enabled)
+                    },
+                )
             }
 
             HorizontalDivider(Modifier.padding(vertical = 4.dp))

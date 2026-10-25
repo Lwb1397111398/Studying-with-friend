@@ -183,15 +183,57 @@ class SettingsRepository(
         }
     }
 
-    // ---- 阅读字号（随手问轮 P7）：四档即选即存，坏值回退默认 ----
+    // ---- 阅读字号/行距（功能补齐轮）：无级字号 14..30sp（旧四档 16/18/20/22 天然兼容），
+    // ---- 行距 1.4..2.2 倍；坏值回退默认。即调即预览、关弹层存库 ----
 
     suspend fun readFontSize(): Int =
         db.settingDao().get(KEY_READ_FONT_SIZE)?.value?.toIntOrNull()
-            ?.takeIf { it in READ_FONT_SIZES } ?: DEFAULT_READ_FONT_SIZE
+            ?.takeIf { it in READ_FONT_MIN..READ_FONT_MAX } ?: DEFAULT_READ_FONT_SIZE
 
     suspend fun saveReadFontSize(size: Int) {
-        if (size !in READ_FONT_SIZES) return
+        if (size !in READ_FONT_MIN..READ_FONT_MAX) return
         db.settingDao().upsert(SettingEntity(KEY_READ_FONT_SIZE, size.toString()))
+    }
+
+    suspend fun readLineHeight(): Float =
+        db.settingDao().get(KEY_READ_LINE_HEIGHT)?.value?.toFloatOrNull()
+            ?.takeIf { it in READ_LINE_MIN..READ_LINE_MAX } ?: DEFAULT_READ_LINE_HEIGHT
+
+    suspend fun saveReadLineHeight(mult: Float) {
+        if (mult !in READ_LINE_MIN..READ_LINE_MAX) return
+        db.settingDao().upsert(SettingEntity(KEY_READ_LINE_HEIGHT, mult.toString()))
+    }
+
+    // ---- 外观主题（功能补齐轮）：三态，默认跟随系统；MainActivity watch 本键即时生效 ----
+
+    suspend fun themeMode(): String {
+        val v = db.settingDao().get(KEY_THEME)?.value
+        return if (v in THEME_MODES) v!! else THEME_SYSTEM
+    }
+
+    suspend fun saveThemeMode(mode: String) {
+        if (mode !in THEME_MODES) return
+        db.settingDao().upsert(SettingEntity(KEY_THEME, mode))
+    }
+
+    // ---- 朗读语速（功能补齐轮正文听书）：0.5~2.0 倍，默认 1.0，坏值回退 ----
+
+    suspend fun ttsRate(): Float =
+        db.settingDao().get(KEY_TTS_RATE)?.value?.toFloatOrNull()
+            ?.takeIf { it in TTS_RATE_MIN..TTS_RATE_MAX } ?: DEFAULT_TTS_RATE
+
+    suspend fun saveTtsRate(rate: Float) {
+        if (rate !in TTS_RATE_MIN..TTS_RATE_MAX) return
+        db.settingDao().upsert(SettingEntity(KEY_TTS_RATE, rate.toString()))
+    }
+
+    // ---- 复习到期提醒（功能补齐轮）：默认开，"false" 显式关闭；StudyApp 按此注册每日查询 ----
+
+    suspend fun reviewReminderEnabled(): Boolean =
+        db.settingDao().get(KEY_REVIEW_REMINDER)?.value != "false"
+
+    suspend fun saveReviewReminderEnabled(enabled: Boolean) {
+        db.settingDao().upsert(SettingEntity(KEY_REVIEW_REMINDER, if (enabled) "true" else "false"))
     }
 
     // ---- 扫描书本地识别（P6b S4）：开关 / 用户反馈计数 / OCR 版本标记 ----
@@ -392,10 +434,28 @@ class SettingsRepository(
         const val KEY_UPDATE_AUTO = "update_auto_check"
         const val KEY_UPDATE_LAST = "update_last_check_ms"
         const val KEY_UPDATE_API_BASE = "update_api_base"
-        // 阅读字号（阅读页「Aa」四档）
+        // 阅读字号/行距（阅读页「Aa」弹层）
         const val KEY_READ_FONT_SIZE = "read_font_size"
-        val READ_FONT_SIZES = listOf(16, 18, 20, 22)
+        const val READ_FONT_MIN = 14
+        const val READ_FONT_MAX = 30
         const val DEFAULT_READ_FONT_SIZE = 18
+        const val KEY_READ_LINE_HEIGHT = "read_line_height"
+        const val READ_LINE_MIN = 1.4f
+        const val READ_LINE_MAX = 2.2f
+        const val DEFAULT_READ_LINE_HEIGHT = 1.7f
+        // 外观主题三态（system=跟随系统）
+        const val KEY_THEME = "theme_mode"
+        const val THEME_SYSTEM = "system"
+        const val THEME_LIGHT = "light"
+        const val THEME_DARK = "dark"
+        val THEME_MODES = listOf(THEME_SYSTEM, THEME_LIGHT, THEME_DARK)
+        // 朗读语速（正文听书）
+        const val KEY_TTS_RATE = "tts_rate"
+        const val TTS_RATE_MIN = 0.5f
+        const val TTS_RATE_MAX = 2.0f
+        const val DEFAULT_TTS_RATE = 1.0f
+        // 复习到期提醒（每日本地通知）
+        const val KEY_REVIEW_REMINDER = "review_reminder"
         val DETAIL_LEVELS = listOf("简略", "标准", "深入")
         const val DEFAULT_BASE = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"

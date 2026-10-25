@@ -1,14 +1,20 @@
 # M4a 阅读页与粗读流水线 · 模块总览
 
-> 状态：✅ 完成（计划 v1 82 分不通过 → v2 92 分通过 → 实现 → 质检第一轮 82 分 → 6 P1 全修复 → 复验 90 分通过 → 6 项 P2 收尾 → P5 章节树 UI → P4-D 阅读页示意图混排 → **P7 阅读页美化 + 长按随手问（去横线/字号四档/工具收纳 chips/长按取词浮条/QuickQaSheet 流式问答）**）
-> 验证：**750/750 单测全绿**（全模块，1 skipped），assembleDebug 构建通过；P7 E2E：阅读页新观感（无横线留白分段/单 chip 工具行/Aa 按钮）、字号弹层四档+默认 18 勾选、选 20 号即时生效、杀进程重进记忆 20 号、长按「法」字高亮+浮条四按钮、问含义→QuickQaSheet 引用块+自动发问+真实 AI 调用（429 错误态+重试按钮实证，流式 200 分支因 Key 限流未实测）、滚动取消划词（截图 .e2e/p7_*.png）
+> 状态：✅ 完成（计划 v2 92 分通过 → 实现质检修复 → P5 章节树 UI → P4-D 示意图混排 → P7 阅读页美化+长按随手问 → **功能补齐轮（2026-10-25）：阅读位置记忆/全书搜索/字号行距无级调节/进度显示与继续读/正文听书/目录书签抽屉/沉浸模式/屏幕常亮**）
+> 验证：功能补齐轮前全模块 **834+ 单测全绿**（1 skipped，含新增 DataV7Test 8 例 + TtsPlayerTest 2 例 + MigrationTest 6→7），assembleDebug 构建通过；模拟器手工验证与真机体验见 docs/当前进度.md
 
 ## 功能清单
 
 | 功能 | 说明 |
 | --- | --- |
-| 章目录页 | 路由 `BOOK/{bookId}`；书架点书进入；**P5 章节树**：`byBookTreeFlow` 全行投影（章+节）→ `buildChapterTree` 按 parentOrder 挂接（防御：越界/null 挂前最近 level1、零 level1 扁平自成树）→ `flattenTree` 拍平渲染，章行尾「展开/收起小节」箭头（无节行不显示）；**校准徽标**「✓ 已按目录校准」（任一行 calibrated=true 即显示）；章行 = 序号/标题/一行摘要/在读·读完·未读徽标/本章包徽标，行尾操作按数据推导：未粗读→"粗读"、中断或断点数据（READING+gist 空）→"继续"、已完成→"重读"、进行中→"进度 x/y+停止"；**节行**（level=2）= 缩进小字次级样式，无粗读按钮，点击=目录锚跳父章+highlight 滚动定位（节行段落恒空，不作为导航目的地）；点行进阅读页 |
-| 阅读页 | 顶栏章标题+返回+**Aa 字号按钮**；**P7 观感**：段落无分隔线（删 HorizontalDivider），段间留白 vertical padding 12dp；正文字号四档 16/18/20/22（默认 18）经 `settingsRepo.readFontSize/saveReadFontSize` 存 settings 表 KV（键 `read_font_size`，越界值回退默认），FontSizeSheet（ModalBottomSheet）示例文字按实际 sp 渲染、当前档 Check；本章要点卡（gist + key_terms，`byIdFlow` 收集，粗读完成即时刷新）**默认收起成「要点」chip，点开才展开 GistCard**；段落流按 aiAction 渲染：EXPLAIN/GROUP→"讲/合并讲"徽标+why 小字、SKIP→"已跳过"标签+全文半透明（alpha 0.55，仍可读）、NONE→正常文本；**role=TOC/FOOTNOTE/FRONT/BACK 段小字次级样式**（`ReadStyles.isSecondaryRole` 纯函数判定，P5-F 定案：FRONT/BACK 仅视觉降级，AI 规划/计数口径不变——展示与加工解耦），TOC/FOOTNOTE 不参与标注计数，粗读规划两处过滤同跳过 FOOTNOTE；**P5 highlight 定位**：Routes.READ 可选 `?highlight=` 参数（Uri.encode），`findHighlightIndex` 在正文段（排除 TOC/FOOTNOTE）里三级匹配（归一化精确 == → startsWith 多命中取最短 → null 静默不滚动），`listState.animateScrollToItem` 滚到节标题段；**P4-D 示意图混排**：`byChapterFlow` 收集本章 figures → `buildReadRows` sealed ReadRow（Para/Fig）——图插在同 pageNo 第 ordAfterPara 段后（渲染列表=页内全量段口径），ord=-1 三态（该页有段→页首段前/该页无段→页码更小的最后一段后/全章无更早段→章首），ord 越界 `coerceAtMost(页段数-1)` 兜底页末，同锚多图保持 byChapterFlow 序稳定展开；LazyColumn itemKey 段/图前缀防碰撞；highlight 滚动经 paraId 反查行下标（混排后下标不再相等） |
+| 章目录页 | 路由 `BOOK/{bookId}`；书架点书进入；**P5 章节树**：`byBookTreeFlow` 全行投影（章+节）→ `buildChapterTree` 按 parentOrder 挂接（防御：越界/null 挂前最近 level1、零 level1 扁平自成树）→ `flattenTree` 拍平渲染，章行尾「展开/收起小节」箭头（无节行不显示）；**校准徽标**「✓ 已按目录校准」（任一行 calibrated=true 即显示）；章行 = 序号/标题/一行摘要/在读·读完·未读徽标/本章包徽标，行尾操作按数据推导：未粗读→"粗读"、中断或断点数据（READING+gist 空）→"继续"、已完成→"重读"、进行中→"进度 x/y+停止"；**节行**（level=2）= 缩进小字次级样式，无粗读按钮，点击=目录锚跳父章+highlight 滚动定位；点行进阅读页；**顶栏搜索图标（v7）→ Routes.SEARCH 全书搜索页** |
+| 全书搜索（v7） | `SearchScreen.kt`：输入防抖 300ms → `paragraphDao.searchInBook(bookId, escapeLikePattern(q), limit=200)`（LIKE 含匹配 + %/_/\ 转义 ESCAPE '\'，join chapters 按章序段序排列）；结果行 = 章名 + 命中片段（首个命中位前后各 24 字，片段内全部命中词 primaryContainer 染色，snippet 内部函数）；点结果 → `Routes.read(chapterId, paraId=paraId)` 跳阅读页（scrollParaId 锚滚动，优先级最高）；入口在章目录页顶栏 |
+| 阅读位置记忆（v7） | 进章即 `bookDao.markReading`（books.lastReadChapterId/lastReadAt——书架继续读+排序）；滚动停止（snapshotFlow isScrollInProgress filter !it）经 itemKey "p{id}" 反查可视首段的段 idx → `chapterDao.updateLastReadPara` 写库（appScope 退页不取消）；重进恢复优先级：搜索 paraId > 节锚 highlight > lastReadParaIdx（scrollToItem 静默失败可接受）；图行/要点卡不是位置锚自动跳过 |
+| 阅读页 | 顶栏章标题+返回+**目录按钮（v7）**+上/下章+**Aa 字号按钮**；标题下小字「书名 · 已读 x/y 章」（getProgressFlow 首个消费方，标记读完即时刷新）；**P7 观感**：段落无分隔线，段间留白 12dp；正文字号 **14-30sp 无级（v7，旧四档 16/18/20/22 天然兼容）+行距 1.4-2.2 倍（默认 1.7）**，FontSizeSheet 双 Slider 即拖即预览、关弹层统一存库（settings 表 KV `read_font_size`/`read_line_height`，「恢复默认」= 18/1.7）；本章要点卡默认收起「要点」chip；段落流按 aiAction 渲染（EXPLAIN/GROUP 徽标+why、SKIP 半透明、NONE 正常）；role=TOC/FOOTNOTE/FRONT/BACK 次级样式（ReadStyles.isSecondaryRole）；**P5 highlight 定位** + **v7 scrollParaId 搜索锚**（优先级最高）+ **v7 位置记忆恢复**；**v7 屏幕常亮**（DisposableEffect FLAG_KEEP_SCREEN_ON，离页清除）；**P4-D 示意图混排**（buildReadRows/FigureRow/预览，详见下） |
+| 正文听书（v7） | 工具行「朗读」chip（本章 BODY 段非空才显示）→ 拼接本章 BODY 段文本（\n 连接）喂 TtsPlayer（引擎/状态机/分句全部复用 M5 记忆思路朗读基础设施，AndroidTtsEngine 新增 @Volatile var rate 语速——设置页 0.5~2.0 倍 Slider）；**句→段映射**：每段 splitSentences 计数做前缀和（sentenceToParaIndex 纯函数+单测），Speaking(sentenceIdx) 经映射定位当前段 → ParaRow 淡染底色（primary 8% alpha）+ 滚出视口才自动 animateScrollToItem（用户手动翻走不打扰）；朗读中 chip 变「停止朗读」；**换章即停**（拼接文本是旧章的）、离页 DisposableEffect shutdown；错误行（无中文语音/合成失败）显示在工具行下 |
+| 目录+书签抽屉（v7） | 顶栏目录按钮 → ReadTocSheet（ModalBottomSheet，window 级弹层挂 Column 内使书签操作函数同作用域）：上半=全书章列表（byBookFlow level=1，当前章高亮，点击跳章）；下半=书签区（「加书签」= 取当前可视首段（itemKey 反查）作锚落 bookmarks 表（preview 取段前 40 字）；书签列表 = 章名+段摘+删除（byBookWithChapterFlow 自动刷新）；点书签 → 查 byChapterAndIdx 拿 paraId，同章本地 scrollToItem、跨章 `Routes.read(chapterId, paraId)` 导航） |
+| 沉浸模式（v7） | 单击正文（LazyColumn pointerInput detectTapGestures.onTap——FigureRow clickable 消费点图预览不触发）切换顶栏/工具行 AnimatedVisibility 显隐；rememberSaveable 记忆状态；BackHandler 沉浸时返回键先退出沉浸 |
+| 随手问 QuickQa（P7+v7 历史） | QuickQaSheet（ModalBottomSheet）打开即自动发问，流式打字机（100ms 节流）；**v7 问答历史落库**：Ctx 补 bookId/chapterId（不进 user 消息），回答完成写 qa_history（appScope 关弹层不取消 + trim 每书 50 条）；引用块右侧「历史」入口 → 二级 ModalBottomSheet（本书最近 50 条：章名+时间+问题+答案，MdText 渲染）；仍不走 AiGate、问答 AI 调用次数零变化（历史只是展示，不做缓存） |
 | 工具行收纳（P7） | 原 ActionBar 七态+NoteBar+总结按钮+要点卡四层堆叠 → **ChapterToolsRow 一行横向滚动 chips**：粗读 chip（目录章灰/进行中"粗读 x/y"灰/重读→force 确认/继续 k/n/粗读）、讲解 chip（noteUnitCount>0 才显示，"讲解 x/y"进行中/"讲解 ✓"→force 确认/"讲解 k·n"）、总结 chip（markedCount>0）、要点 chip（hasGist，展开态"收起要点"）；**状态行按需展开**：仅进行中（TaskProgressRow 进度+停止）/interrupted/failed（degraded 重试归并、keyIssue 去设置）/succeeded/allMarked&&!hasGist（完成归并）时占位，`noteState is NoteRunState.Interrupted && noteState.chapterId == chapterId` 中断小字，gateLabel 占用提示「另一项 AI 任务进行中」，稳态 allMarked&&hasGist→标记读完/已读完；两个 force 确认 AlertDialog 保留 |
 | 长按取词（P7） | SelectableText：`pointerInput+detectTapGestures.onLongPress` → `TextLayoutResult.getOffsetForPosition` 定位 → `SelectionBounds.wordAt` 取词（ASCII 字母数字+下划线连续段成词、汉字/标点单字符；偏移 coerce 到段内）→ `getCursorRect(word.first).centerLeft` + `boundsInWindow` 换算全局锚点；选中词 SpanStyle(primaryContainer) 高亮；SelectionFloatBar（Popup）：问含义（扩句）/问整段/复制（ClipboardManager）/✕，x 居中于词 clamp 屏内、y 悬词上方 clamp；`expandToSentence` 句末标点集「。！？!?；;…：:」+右引号吸收（弯直引号，句首直引号开关两用不跳过=SKIP_AT_SENTENCE_HEAD 集合不含直引号）、换行收句、段无标点扩整段；**滚动即取消划词**（`LaunchedEffect(listState.isScrollInProgress)`） |
 | 随手问 QuickQa（P7） | QuickQaSheet（ModalBottomSheet，heightIn(max=560dp)+imePadding）：打开即自动发问（defaultQuestion：「选中的内容是什么意思？」/问整段「这一段是什么意思？」）；上下文经 `QuickQa.userMessage()` buildJsonObject 组装（chapter/gist/selection/paragraph/prev/next/question，截断 gist 300/selection 500/paragraph 800/prev·next 400）；messages 首轮带全上下文 JSON、追问只发问题正文、history.takeLast(10)；走**讲解模型** `cfg.noteModel.ifBlank { cfg.model }`，PromptLoader 加载 assets/prompts/quick_qa.txt（读书搭子人设：先答再补上下文、≤300 字）；AiClient.chat 流式 onDelta 打字机渲染；**不走 AiGate 全局互斥**（单请求轻量，粗读讲解跑着也能随手问），弹层内 streaming != null 防重入、关闭取消 job；无 Key→引导卡+去设置按钮；错误→红字+重试；滚底自动 scrollToItem；问答不落盘（第一版，关掉即没） |
@@ -38,16 +44,23 @@ assets/prompts/rough_read_merge.txt  归并 prompt
 ui/screens/ChapterListScreen.kt 章目录页（P5 章节树：buildChapterTree 挂接+flattenTree 拍平+校准徽标+SectionRow 目录锚；行尾操作按数据推导）
 ui/screens/ChapterTree.kt       P5 树纯函数：ChapterNode/TreeItem、buildChapterTree（onFallback 注入日志）、flattenTree、normalizeHighlight、findHighlightIndex
 ui/screens/ReadStyles.kt        P5-F 次级角色判定 isSecondaryRole（TOC/FOOTNOTE/FRONT/BACK）
-ui/screens/ReadScreen.kt        阅读页主屏：章三件套 TopAppBar + 段落流 LazyColumn（混排 rows）+ 划词/问答/字号/预览状态中枢 + force 确认弹窗 + highlight 滚动定位；TextSelection/QaTarget 数据类、buildQaTarget
-ui/screens/ReadTools.kt         ChapterToolsRow（粗读/讲解 chips 行 + 展开状态行）、ToolStatusRow、TaskProgressRow、FontSizeSheet（四档字号）、SelectionFloatBar（长按取词浮条：问含义/问整段/复制）
-ui/screens/ReadCards.kt         ParaRow（段落行：SelectableText 长按取词+高亮+图锚）、SelectableText、ParaTag、GistCard（要点卡）、NoteCard（讲解卡）
-ui/screens/QuickQaSheet.kt      随手问流式问答弹层：会话卡 + 输入行 + 100ms 节流流式渲染（不走全局互斥）
+ui/screens/ReadScreen.kt        阅读页主屏：章三件套 TopAppBar（+目录按钮/进度小字/沉浸 AnimatedVisibility）+ 段落流 LazyColumn（混排 rows+单击切沉浸）+ 划词/问答/字号/预览/目录书签抽屉状态中枢 + 位置记忆/听书跟随 + force 确认弹窗 + highlight/scrollParaId 滚动定位；TextSelection/QaTarget 数据类、buildQaTarget
+ui/screens/ReadTools.kt         ChapterToolsRow（粗读/讲解/总结/要点/朗读 chips 行 + 展开状态行）、ToolStatusRow、TaskProgressRow、FontSizeSheet（字号+行距双 Slider 无级）、SelectionFloatBar（长按取词浮条）
+ui/screens/ReadCards.kt         ParaRow（段落行：SelectableText 长按取词+高亮+图锚+听书当前段淡染）、SelectableText、ParaTag、GistCard（要点卡）、NoteCard（讲解卡）
+ui/screens/QuickQaSheet.kt      随手问流式问答弹层：会话卡 + 输入行 + 100ms 节流流式渲染（不走全局互斥）+ v7 历史落库（qa_history）与历史二级弹层
 ui/screens/FigureGallery.kt     P4-D 插图混排：buildReadRows（sealed ReadRow 三态混排）、FigureRow（aspectRatio 占位/IO 解码/LRU/失败双态/角标/vision Log.w）、FigurePreviewDialog 全屏预览、FigureBitmapCache（decodeDispatcher limitedParallelism(2)+按字节 LRU）、calcInSampleSize 官方采样
+ui/screens/ReadTocSheet.kt      v7 目录+书签抽屉：全书章列表（当前章高亮）+ 加书签/书签列表/删除/跳段
+ui/screens/SearchScreen.kt      v7 全书搜索页：防抖 300ms LIKE 查询 + 命中片段染色 + 点结果跳段（snippet 纯函数）
 ui/screens/SelectionBounds.kt   P7 划词纯函数：wordAt（ASCII 连续词/汉字标点单字+越界 coerce）、expandToSentence（句末标点+右引号吸收+SKIP_AT_SENTENCE_HEAD）、EMPTY
-data/study/QuickQa.kt           P7 随手问消息组装：Turn/Ctx、ASK_MEANING/ASK_PARA、userMessage()（buildJsonObject+截断）、messages()（首轮全上下文/追问仅正文/history.takeLast(10)）
-assets/prompts/quick_qa.txt     P7 随手问 system prompt（读书搭子人设、字段说明、≤300 字）
-ui/nav/AppNav.kt                BOOK/READ 路由（READ 传 onOpenSettings；READ 可选 highlight 参数 Uri.encode）
-StudyApp.kt                     database/appScope/roughReadRunner 三单例
+ui/screens/ChapterListScreen.kt 章目录页（P5 章节树 + v7 顶栏搜索入口）
+data/study/QuickQa.kt           P7 随手问消息组装：Turn/Ctx（v7 补 bookId/chapterId 落库定位字段）、ASK_MEANING/ASK_PARA、userMessage()、messages()
+data/tts/TtsPlayer.kt           朗读控制状态机 + splitSentences 分句 + v7 sentenceToParaIndex 句→段映射（正文听书跟随定位）
+data/tts/AndroidTtsEngine.kt    系统 TTS 封装 + v7 @Volatile var rate 语速（设置页 0.5~2.0 倍，prepare 时生效）
+data/db/Daos.kt                 v7 搜索/书签/历史/位置记忆 DAO（详见 M1）
+ui/nav/AppNav.kt                BOOK/READ（highlight+paraId 可选参数）/SEARCH 路由
+test/.../DataV7Test.kt             v7 8 例（书签/历史 trim/搜索通配转义/进度投影/markReading 排序/settingWatch）
+test/.../TtsPlayerTest.kt          7 例（原 5 + sentenceToParaIndex 映射/拼接对齐 2 例）
+test/.../MigrationTest.kt          6 例（含 6→7 位置记忆列+新表）
 test/.../RoughReadChunksTest.kt    5 例
 test/.../PlanParserTest.kt         14 例（含 LenientInt null→-1 专测）
 test/.../RoughReadPlannerTest.kt   14 例（Robolectric+真内存库+FakeChat 按 deserializer 分流）
@@ -108,6 +121,8 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 - **Runner/Planner 模式复用**：ChatJsonFn 构造注入 + StudyApp 单例 + StateFlow 五态 + 全局互斥——M4b 批量讲解队列沿用同一互斥纪律（讲解与粗读互斥或排队由 M4b 计划定）
 
 ## 最后更新
+- 2026-10-25 **功能补齐轮**（老板点名「字体调整/全文搜索等缺失功能」→ 盘点后选 A+B+C+D 四组全做）：①阅读位置记忆（进章 markReading + 滚停写 lastReadParaIdx + 重进恢复，优先级 搜索paraId>highlight>lastReadParaIdx）；②全书搜索 SearchScreen（防抖 300ms、escapeLikePattern 转义、命中片段染色、点结果 paraId 锚跳转，入口章目录页顶栏）；③字号 14-30 无级+行距 1.4-2.2 双 Slider（关弹层统一存库，旧四档值天然兼容）；④阅读页顶栏进度小字（getProgressFlow 首个消费方）+ 书架进度条/继续读横幅（见 M0/书架部分归 M0 总览）；⑤正文听书（BODY 段拼接喂 TtsPlayer、sentenceToParaIndex 句→段映射跟随高亮+滚出屏自动滚、换章即停、语速设置）；⑥目录+书签抽屉 ReadTocSheet（章列表跳章+加书签/删书签/跳段——同章本地滚、跨章带 paraId 导航）；⑦沉浸模式（单击正文切顶栏/工具行 AnimatedVisibility、BackHandler）；⑧屏幕常亮（DisposableEffect FLAG_KEEP_SCREEN_ON）；⑨随手问历史落库 qa_history（每书 50 条 trim+二级历史弹层，AI 调用零变化）。**踩坑**：①Kotlin inline lambda 内只有 fun 声明泄露到外层作用域（val 不行）——ReadTocSheet 挂载挪进 Column 内与书签操作函数同作用域；②StudyApp.onCreate 无条件调 WorkManager 崩 21 个 Robolectric UI 冒烟（WorkManager is not initialized）——注册必须 runCatching；③ESCAPE '\' 在 Kotlin 三引号字符串里写单反斜杠即可（`\\` 是两字符会报错）。
+
 - 2026-10-24 **P8 顺带修复：上/下章按钮跳空节行**——ReadScreen 上/下章按钮取 siblings 用的 `chapterDao().byBook` 不带 level 过滤，目录校准书的表里混有 level=2 节行（段落恒空），「下一章」会跳到空节行（显示「本章还没有内容」）。修法：查询结果 `.filter { it.level == 1 }`（不动 DAO，byBook 其他消费方零影响）。同日 M2 落地 P8 前置分块（封面/作者介绍/初版序/第二版序各自成章、role=FRONT 走本模块 isSecondaryRole 次级小字展示），详见 M2 总览 2026-10-24 条。
 
 - 2026-10-11 **ReadScreen.kt（原 1555 行）拆五文件**：ReadScreen.kt 450 行（主屏+TextSelection/QaTarget/buildQaTarget）、ReadTools.kt 368（工具 chips 行/状态行/字号弹层/划词浮条）、ReadCards.kt 247（段落行/要点卡/讲解卡）、QuickQaSheet.kt 216（流式问答弹层）、FigureGallery.kt 272（插图混排全家）。纯搬运，跨文件符号升 internal、文件内 private 不动；单测依赖面（buildReadRows/calcInSampleSize）不变，ReadScreenRowsTest 绿；模拟器实测阅读页渲染/插图解码/全屏预览正常。教训：import 按简单名裁剪会误删 `by remember` 依赖的 getValue/setValue 操作符导入（正文无字面名），引发 146 个连锁编译错误，已按字母序补回。

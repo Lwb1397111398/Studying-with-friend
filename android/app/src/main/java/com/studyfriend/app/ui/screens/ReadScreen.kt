@@ -1,12 +1,18 @@
 package com.studyfriend.app.ui.screens
 
+import android.app.Activity
 import android.util.Log
+import android.view.WindowManager
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -14,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -21,15 +28,21 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -53,6 +66,12 @@ import com.studyfriend.app.data.study.NoteRunState
 import com.studyfriend.app.data.study.ParaIdsCodec
 import com.studyfriend.app.data.study.QuickQa
 import com.studyfriend.app.data.study.enumerateUnits
+import com.studyfriend.app.data.tts.AndroidTtsEngine
+import com.studyfriend.app.data.tts.TtsPlayer
+import com.studyfriend.app.data.tts.TtsState
+import com.studyfriend.app.data.tts.sentenceToParaIndex
+import com.studyfriend.app.data.tts.splitSentences
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 
 
@@ -74,9 +93,12 @@ fun ReadScreen(
     onBack: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onOpenSummary: () -> Unit = {},
-    onOpenChapter: (Long) -> Unit = {},
+    /** 跳章（v7 第二参 paraId：书签/搜索定位段锚，-1=章首） */
+    onOpenChapter: (Long, Long) -> Unit = { _, _ -> },
     /** P5 章节树节行锚：非空时滚动定位到节标题段（匹配失败静默不滚动，见 findHighlightIndex） */
     highlight: String? = null,
+    /** v7 全书搜索跳转锚：>=0 时直接滚到该段（优先级高于 highlight 与位置记忆） */
+    scrollParaId: Long = -1L,
 ) {
     val app = LocalContext.current.applicationContext as StudyApp
     val chapter by app.database.chapterDao().byIdFlow(chapterId)
@@ -92,11 +114,65 @@ fun ReadScreen(
     val noteState by app.noteRunner.state.collectAsStateWithLifecycle()
     val gateLabel by app.aiGate.label.collectAsStateWithLifecycle()
 
-    // P7 阅读字号（四档，settings 记忆）与字号弹层
+    // P7 阅读字号 + 功能补齐轮行距（settings 记忆）；字号弹层拖动实时预览、关闭存库
     var readFontSize by remember { mutableIntStateOf(SettingsRepository.DEFAULT_READ_FONT_SIZE) }
+    var readLineHeight by remember { mutableFloatStateOf(SettingsRepository.DEFAULT_READ_LINE_HEIGHT) }
     var showFontSheet by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { readFontSize = app.settingsRepo.readFontSize() }
+    LaunchedEffect(Unit) {
+        readFontSize = app.settingsRepo.readFontSize()
+        readLineHeight = app.settingsRepo.readLineHeight()
+    }
     val scope = rememberCoroutineScope()
+
+    // v7 屏幕常亮：读书时不熄屏（离开页面即恢复系统默认）
+    val window = (LocalContext.current as? Activity)?.window
+    DisposableEffect(window) {
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
+
+    // v7 最近在读：进章即记（书架「继续读」入口 + 最近在读排序的数据源）
+    val bookIdForMark = chapter?.bookId
+    LaunchedEffect(chapterId, bookIdForMark) {
+        if (bookIdForMark != null) {
+            app.database.bookDao().markReading(bookIdForMark, chapterId, System.currentTimeMillis())
+        }
+    }
+
+    // v7 目录+书签抽屉数据：全书章列表（level=1）与本书书签，跟随 bookId 就绪后收集
+    @Suppress("ProduceStateDoesNotAssignValue")
+    val tocChapters by produceState<List<com.studyfriend.app.data.db.ChapterWithAsset>>(emptyList(), bookIdForMark) {
+        val bid = bookIdForMark ?: return@produceState
+        app.database.chapterDao().byBookFlow(bid).collect { value = it }
+    }
+    @Suppress("ProduceStateDoesNotAssignValue")
+    val bookmarks by produceState<List<com.studyfriend.app.data.db.BookmarkWithChapter>>(emptyList(), bookIdForMark) {
+        val bid = bookIdForMark ?: return@produceState
+        app.database.bookmarkDao().byBookWithChapterFlow(bid).collect { value = it }
+    }
+
+    // v7 沉浸模式：单击正文切换顶栏/工具行显隐；返回键先退出沉浸
+    var chromeVisible by rememberSaveable { mutableStateOf(true) }
+    BackHandler(enabled = !chromeVisible) { chromeVisible = true }
+    // v7 目录+书签抽屉开关
+    var showTocSheet by remember { mutableStateOf(false) }
+
+    // v7 正文听书：TtsPlayer 生命周期挂本页（换章停、离页 shutdown）；语速从设置读入
+    val ttsScope = rememberCoroutineScope()
+    val ttsEngine = remember { AndroidTtsEngine(app) }
+    LaunchedEffect(Unit) { ttsEngine.rate = app.settingsRepo.ttsRate() }
+    val ttsPlayer = remember { TtsPlayer(ttsEngine, ttsScope) }
+    val ttsState by ttsPlayer.state.collectAsStateWithLifecycle()
+    // 当前朗读段 id（null=没在读）：ParaRow 淡染底色 + 自动滚动跟随
+    var ttsParaId by remember { mutableStateOf<Long?>(null) }
+    DisposableEffect(ttsPlayer) {
+        onDispose { ttsPlayer.shutdown() }
+    }
+    // 换章即停：朗读内容是旧章拼接文本，跳章后继续读会错位
+    LaunchedEffect(chapterId) {
+        ttsPlayer.stop()
+        ttsParaId = null
+    }
 
     // P7 划词与随手问：selection 驱动高亮+浮条；qaTarget 非空开问答弹层
     var selection by remember { mutableStateOf<TextSelection?>(null) }
@@ -146,13 +222,39 @@ fun ReadScreen(
                 }
             }
 
+            // v7 顶栏进度小字：书名 + 已读 x/y 章（getProgressFlow 首个消费方，标记读完即时刷新）
+            @Suppress("ProduceStateDoesNotAssignValue")
+            val bookProgress by produceState<com.studyfriend.app.data.db.BookProgress?>(null, bookId) {
+                if (bookId == null) return@produceState
+                app.database.bookDao().getProgressFlow(bookId).collect { value = it }
+            }
+            @Suppress("ProduceStateDoesNotAssignValue")
+            val bookTitle by produceState("", bookId) {
+                value = if (bookId == null) "" else app.database.bookDao().get(bookId)?.title.orEmpty()
+            }
+
+            // v7 沉浸模式：顶栏随单击正文收起/展开
+            AnimatedVisibility(visible = chromeVisible) {
             TopAppBar(
                 title = {
-                    Text(
-                        chapter?.title.orEmpty().ifBlank { "阅读" },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Column {
+                        Text(
+                            chapter?.title.orEmpty().ifBlank { "阅读" },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        // 委托属性不能 smart cast（M4a 坑 #15）：取局部变量再判空
+                        val bp = bookProgress
+                        if (bp != null && bp.totalChapters > 0) {
+                            Text(
+                                "$bookTitle · 已读 ${bp.readChapters}/${bp.totalChapters} 章",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -160,13 +262,17 @@ fun ReadScreen(
                     }
                 },
                 actions = {
+                    // v7 目录+书签抽屉入口
+                    IconButton(onClick = { showTocSheet = true }) {
+                        Icon(Icons.Filled.Menu, contentDescription = "目录与书签")
+                    }
                     IconButton(
                         enabled = prevChapter != null,
-                        onClick = { prevChapter?.let { onOpenChapter(it.id) } },
+                        onClick = { prevChapter?.let { onOpenChapter(it.id, -1L) } },
                     ) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "上一章") }
                     IconButton(
                         enabled = nextChapter != null,
-                        onClick = { nextChapter?.let { onOpenChapter(it.id) } },
+                        onClick = { nextChapter?.let { onOpenChapter(it.id, -1L) } },
                     ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "下一章") }
                     // P7 阅读字号调节
                     IconButton(onClick = { showFontSheet = true }) {
@@ -178,6 +284,7 @@ fun ReadScreen(
                     }
                 },
             )
+            }
 
             // OPT-C C4：计数用正文视图（TOC/脚注/图描述段永远无标注，混入计数会让"部分标注"态无法收敛）；
             // LazyColumn 渲染仍用全量列表（目录条目/脚注/图描述按次级样式展示）
@@ -188,6 +295,23 @@ fun ReadScreen(
                 }
             }
             val markedCount = bodyParagraphs.count { it.aiAction != DbValues.ACT_NONE }
+
+            // v7 正文听书：朗读文本 = 本章 BODY 段顺序拼接（\n 连接，分句在换行处断开，
+            // 段边界与句→段映射对齐）；句→段映射数据在 toggle 时一次性算好
+            val ttsParagraphs = remember(bodyParagraphs) { bodyParagraphs.filter { it.role == DbValues.ROLE_BODY } }
+            var ttsParaCounts by remember { mutableStateOf(listOf<Int>()) }
+            var ttsParaIds by remember { mutableStateOf(listOf<Long>()) }
+            fun toggleTts() {
+                if (ttsState is TtsState.Speaking || ttsState is TtsState.Preparing) {
+                    ttsPlayer.stop()
+                    ttsParaId = null
+                } else {
+                    if (ttsParagraphs.isEmpty()) return
+                    ttsParaCounts = ttsParagraphs.map { splitSentences(it.text).size }
+                    ttsParaIds = ttsParagraphs.map { it.id }
+                    ttsPlayer.toggle(ttsParagraphs.joinToString("\n") { it.text })
+                }
+            }
 
             // 讲解单元与 note 映射（原 NoteBar 内部推导上提）：卡片只渲染在锚段下（M4b §3.2）
             val units = remember(paragraphs) { enumerateUnits(paragraphs) }
@@ -202,6 +326,8 @@ fun ReadScreen(
             val noteRunningThis = (noteState as? NoteRunState.Running)?.chapterId == chapterId
             val notesByParaIds = remember(notes) { notes.associateBy { it.paraIds } }
 
+            // v7 沉浸模式：工具行同样随单击收起/展开
+            AnimatedVisibility(visible = chromeVisible) {
             ChapterToolsRow(
                 chapterId = chapterId,
                 hasGist = !chapter?.gist.isNullOrBlank(),
@@ -216,6 +342,9 @@ fun ReadScreen(
                 gateLabel = gateLabel,
                 noteUnitCount = units.size,
                 noteValidCount = noteValidCount,
+                ttsActive = ttsState is TtsState.Speaking || ttsState is TtsState.Preparing,
+                ttsAvailable = ttsParagraphs.isNotEmpty(),
+                onToggleTts = { toggleTts() },
                 onStart = { app.roughReadRunner.start(chapterId, force = false) },
                 onForce = { app.roughReadRunner.start(chapterId, force = true) },
                 onMerge = { app.roughReadRunner.mergeOnly(chapterId) },
@@ -230,6 +359,17 @@ fun ReadScreen(
                 onOpenSettings = onOpenSettings,
                 onOpenSummary = onOpenSummary,
             )
+            }
+
+            // v7 TTS 错误提示行（朗读中引擎报错——无中文语音/合成失败）
+            (ttsState as? TtsState.Error)?.let { err ->
+                Text(
+                    err.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                )
+            }
 
             if (paragraphs.isEmpty()) {
                 EmptyState(title = "本章还没有内容", subtitle = "段落解析可能没有完成")
@@ -257,7 +397,121 @@ fun ReadScreen(
                     }
                 }
             }
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            // v7 全书搜索跳转：直接滚到命中段（优先级最高，定位后随即被下方保存逻辑记账）
+            LaunchedEffect(scrollParaId, rows) {
+                if (scrollParaId >= 0 && rows.isNotEmpty()) {
+                    rows.indexOfFirst { it is ReadRow.Para && it.p.id == scrollParaId }
+                        .takeIf { it >= 0 }
+                        ?.let { listState.scrollToItem(it) }
+                }
+            }
+            // v7 位置记忆恢复：无显式跳转参数（搜索 paraId / 节锚 highlight）时滚回上次读到的段
+            val savedParaIdx = chapter?.lastReadParaIdx
+            LaunchedEffect(chapter?.id, rows) {
+                if (scrollParaId < 0 && highlight.isNullOrBlank() && savedParaIdx != null && rows.isNotEmpty()) {
+                    val pid = paragraphs.firstOrNull { it.idx == savedParaIdx }?.id
+                    if (pid != null) {
+                        rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
+                            .takeIf { it >= 0 }
+                            ?.let { listState.scrollToItem(it) }
+                    }
+                }
+            }
+            // v7 位置记忆保存：滚动停止后把可视首段（经 itemKey "p{id}" 反查段 idx）写库；
+            // 图行/要点卡不是位置锚，跳过找下一个可见段。应用级 scope：退页不取消写库
+            val latestParagraphs by rememberUpdatedState(paragraphs)
+            LaunchedEffect(listState, rows) {
+                snapshotFlow { listState.isScrollInProgress }
+                    .filter { !it }
+                    .collect {
+                        val paraIdx = listState.layoutInfo.visibleItemsInfo.firstNotNullOfOrNull { info ->
+                            (info.key as? String)?.takeIf { k -> k.startsWith("p") }
+                                ?.removePrefix("p")?.toLongOrNull()
+                                ?.let { pid -> latestParagraphs.firstOrNull { p -> p.id == pid }?.idx }
+                        } ?: return@collect
+                        app.appScope.launch {
+                            app.database.chapterDao().updateLastReadPara(chapterId, paraIdx)
+                        }
+                    }
+            }
+            // v7 TTS 跟随：句→段映射定位当前段，滚出视口才自动滚（用户手动翻走不打扰）
+            LaunchedEffect(ttsState, ttsParaCounts) {
+                val s = ttsState as? TtsState.Speaking ?: return@LaunchedEffect
+                val paraPos = sentenceToParaIndex(ttsParaCounts, s.sentenceIdx)
+                val pid = ttsParaIds.getOrNull(paraPos) ?: return@LaunchedEffect
+                ttsParaId = pid
+                val rowIdx = rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
+                if (rowIdx >= 0) {
+                    val inView = listState.layoutInfo.visibleItemsInfo.any { it.index == rowIdx }
+                    if (!inView) listState.animateScrollToItem(rowIdx)
+                }
+            }
+
+            // v7 书签操作：取当前可视首段为锚；同章本地滚动、跨章导航带段锚。
+            // 用局部 fun（非 val lambda）：inline lambda 里的 fun 声明才对外层作用域可见（ReadTocSheet 挂载要用）
+            fun addBookmarkAtCurrent() {
+                val para = listState.layoutInfo.visibleItemsInfo.firstNotNullOfOrNull { info ->
+                    (info.key as? String)?.takeIf { k -> k.startsWith("p") }
+                        ?.removePrefix("p")?.toLongOrNull()
+                        ?.let { pid -> paragraphs.firstOrNull { p -> p.id == pid } }
+                } ?: return
+                val bid = bookIdForMark ?: return
+                app.appScope.launch {
+                    app.database.bookmarkDao().insert(
+                        com.studyfriend.app.data.db.BookmarkEntity(
+                            bookId = bid,
+                            chapterId = chapterId,
+                            paraIdx = para.idx,
+                            preview = para.text.take(40),
+                            createdAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+            }
+            fun openBookmark(bm: com.studyfriend.app.data.db.BookmarkWithChapter) {
+                showTocSheet = false
+                scope.launch {
+                    val pid = app.database.paragraphDao()
+                        .byChapterAndIdx(bm.bookmark.chapterId, bm.bookmark.paraIdx)?.id ?: -1L
+                    if (bm.bookmark.chapterId == chapterId) {
+                        // 同章：不重复入栈，本地滚到锚段
+                        if (pid >= 0) {
+                            rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
+                                .takeIf { it >= 0 }
+                                ?.let { listState.scrollToItem(it) }
+                        }
+                    } else {
+                        onOpenChapter(bm.bookmark.chapterId, pid)
+                    }
+                }
+            }
+
+            // v7 目录+书签抽屉（ModalBottomSheet 是 window 级弹层，挂载位置不影响渲染，
+            // 放这里为了让书签操作函数落在同一作用域）
+            if (showTocSheet) {
+                ReadTocSheet(
+                    chapters = tocChapters,
+                    currentChapterId = chapterId,
+                    bookmarks = bookmarks,
+                    onOpenChapter = { target ->
+                        showTocSheet = false
+                        onOpenChapter(target, -1L)
+                    },
+                    onAddBookmark = { addBookmarkAtCurrent() },
+                    onOpenBookmark = { openBookmark(it) },
+                    onDeleteBookmark = { bm ->
+                        app.appScope.launch { app.database.bookmarkDao().delete(bm.bookmark.id) }
+                    },
+                    onDismiss = { showTocSheet = false },
+                )
+            }
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    // v7 沉浸模式：单击正文切换顶栏/工具行；图行点击由 FigureRow 消费不触发
+                    .pointerInput(Unit) { detectTapGestures(onTap = { chromeVisible = !chromeVisible }) },
+            ) {
                 // P7 要点卡（折叠）：默认收起，「要点」chip 展开；随正文滚动不占固定空间
                 if (gistExpanded && !chapter?.gist.isNullOrBlank()) {
                     item(key = "gist-card") {
@@ -279,7 +533,9 @@ fun ReadScreen(
                             ParaRow(
                                 p = row.p,
                                 fontSize = readFontSize,
+                                lineHeightMult = readLineHeight,
                                 selectedRange = selection?.takeIf { it.paraId == row.p.id }?.range,
+                                ttsActive = ttsParaId == row.p.id,
                                 onLongPress = { wordRange, anchor ->
                                     selection = TextSelection(row.p.id, wordRange, anchor)
                                 },
@@ -345,13 +601,17 @@ fun ReadScreen(
 
     if (showFontSheet) {
         FontSizeSheet(
-            current = readFontSize,
-            onPick = { size ->
-                readFontSize = size
+            fontSize = readFontSize,
+            lineHeightMult = readLineHeight,
+            onChange = { size, line -> readFontSize = size; readLineHeight = line },
+            onDismiss = {
                 showFontSheet = false
-                scope.launch { app.settingsRepo.saveReadFontSize(size) }
+                // 关弹层时统一存库（拖动过程只改内存态，避免高频写库）
+                scope.launch {
+                    app.settingsRepo.saveReadFontSize(readFontSize)
+                    app.settingsRepo.saveReadLineHeight(readLineHeight)
+                }
             },
-            onDismiss = { showFontSheet = false },
         )
     }
 
@@ -369,7 +629,8 @@ fun ReadScreen(
     }
 }
 
-/** 随手问上下文组装：章标题/要点 + 选中文字 + 所在段全文 + 前后段（截断在 QuickQa 内统一做） */
+/** 随手问上下文组装：章标题/要点 + 选中文字 + 所在段全文 + 前后段（截断在 QuickQa 内统一做）；
+ *  v7 补 bookId/chapterId——问答历史落库定位（不进 user 消息） */
 internal fun buildQaTarget(
     chapter: ChapterEntity?,
     paragraphs: List<ParagraphEntity>,
@@ -384,6 +645,8 @@ internal fun buildQaTarget(
         paragraph = para.text,
         prev = paragraphs.firstOrNull { it.idx == para.idx - 1 }?.text,
         next = paragraphs.firstOrNull { it.idx == para.idx + 1 }?.text,
+        bookId = chapter?.bookId ?: -1L,
+        chapterId = chapter?.id ?: -1L,
     ),
     defaultQuestion = question,
 )

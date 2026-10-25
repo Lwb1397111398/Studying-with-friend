@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -65,6 +66,7 @@ fun ChapterListScreen(
     onBack: () -> Unit,
     onOpenChapter: (Long, String?) -> Unit,
     onOpenOverview: () -> Unit = {},
+    onOpenSearch: () -> Unit = {},
 ) {
     val app = LocalContext.current.applicationContext as StudyApp
     // P5：全行投影（章+节），树形挂接在 buildChapterTree（纯函数）；byBookFlow（仅章）
@@ -101,6 +103,12 @@ fun ChapterListScreen(
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                }
+            },
+            actions = {
+                // v7 全书搜索入口
+                IconButton(onClick = onOpenSearch) {
+                    Icon(Icons.Filled.Search, contentDescription = "全书搜索")
                 }
             },
         )

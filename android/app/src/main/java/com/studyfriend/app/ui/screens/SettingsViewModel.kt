@@ -23,6 +23,18 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     var detailLevel by mutableStateOf("标准")
         private set
 
+    /** 外观主题三态（功能补齐轮）：即选即存，MainActivity watch 键即时生效 */
+    var themeMode by mutableStateOf(SettingsRepository.THEME_SYSTEM)
+        private set
+
+    /** 朗读语速（功能补齐轮正文听书）：0.5~2.0 倍，即拖即存（松手才落库由 UI 控制） */
+    var ttsRate by mutableStateOf(SettingsRepository.DEFAULT_TTS_RATE)
+        private set
+
+    /** 复习到期提醒（功能补齐轮）：开关即点即存 + 同步注册/取消每日任务 */
+    var reviewReminder by mutableStateOf(true)
+        private set
+
     /** 模型入口摘要：主力模型名与 Key/讲解/视觉的生效状态，进设置页时刷新 */
     var mainModel by mutableStateOf("")
         private set
@@ -36,6 +48,9 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refreshSummary()
         viewModelScope.launch { detailLevel = repo.detailLevel() }
+        viewModelScope.launch { themeMode = repo.themeMode() }
+        viewModelScope.launch { ttsRate = repo.ttsRate() }
+        viewModelScope.launch { reviewReminder = repo.reviewReminderEnabled() }
     }
 
     /** 从模型页改完配置返回设置页时刷新摘要 */
@@ -66,6 +81,60 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 // 档位保存失败不阻塞界面；下拉重进会回读库里的真实值
+            }
+        }
+    }
+
+    /** 外观主题三态：即点即存 */
+    fun chooseThemeMode(mode: String) {
+        if (mode !in SettingsRepository.THEME_MODES || mode == themeMode) return
+        themeMode = mode
+        viewModelScope.launch {
+            try {
+                repo.saveThemeMode(mode)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 同讲解详略：保存失败静默，重进回读真实值
+            }
+        }
+    }
+
+    /** 朗读语速：拖动结束落库（UI 侧 onChange 更新内存态、onValueChangeFinished 调本方法） */
+    fun chooseTtsRate(rate: Float) {
+        val clamped = rate.coerceIn(SettingsRepository.TTS_RATE_MIN, SettingsRepository.TTS_RATE_MAX)
+        ttsRate = clamped
+        viewModelScope.launch {
+            try {
+                repo.saveTtsRate(clamped)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 保存失败静默，重进回读真实值
+            }
+        }
+    }
+
+    /** 复习到期提醒：开关即点即存 + 同步注册/取消每日查询任务 */
+    fun chooseReviewReminder(enabled: Boolean) {
+        if (enabled == reviewReminder) return
+        reviewReminder = enabled
+        val app = getApplication<StudyApp>()
+        viewModelScope.launch {
+            try {
+                repo.saveReviewReminderEnabled(enabled)
+                // runCatching：WorkManager 未初始化的环境（测试沙盒）静默跳过
+                runCatching {
+                    if (enabled) {
+                        com.studyfriend.app.data.study.ReviewReminderWorker.schedule(app)
+                    } else {
+                        com.studyfriend.app.data.study.ReviewReminderWorker.cancel(app)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 保存失败静默，重进回读真实值
             }
         }
     }

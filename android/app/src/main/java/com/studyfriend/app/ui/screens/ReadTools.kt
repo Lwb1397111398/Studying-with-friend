@@ -25,6 +25,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,6 +45,7 @@ import androidx.compose.ui.window.Popup
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.study.NoteRunState
 import com.studyfriend.app.data.study.RoughRunState
+import kotlin.math.roundToInt
 
 
 // 从 ReadScreen.kt 拆出（2026-10-11 结构批次）：工具 chips 行/状态行/字号弹层/划词浮条
@@ -69,6 +71,9 @@ internal fun ChapterToolsRow(
     gateLabel: String?,
     noteUnitCount: Int,
     noteValidCount: Int,
+    ttsActive: Boolean = false,
+    ttsAvailable: Boolean = false,
+    onToggleTts: () -> Unit = {},
     onStart: () -> Unit,
     onForce: () -> Unit,
     onMerge: () -> Unit,
@@ -142,6 +147,13 @@ internal fun ChapterToolsRow(
             // 要点卡开关：本章要点存在才显示
             if (hasGist) {
                 AssistChip(onClick = onToggleGist, label = { Text(if (gistExpanded) "收起要点" else "要点") })
+            }
+            // v7 正文听书：有可读段才显示；朗读中变「停止朗读」
+            if (ttsAvailable) {
+                AssistChip(
+                    onClick = onToggleTts,
+                    label = { Text(if (ttsActive) "停止朗读" else "朗读") },
+                )
             }
         }
 
@@ -329,10 +341,16 @@ private fun TaskProgressRow(label: String, progress: Float, onStop: () -> Unit) 
     }
 }
 
-/** 阅读字号弹层（P7）：四档即选即存（存库由调用方 onPick 回调处理） */
+/** 阅读字号/行距弹层（功能补齐轮）：无级 Slider 即拖即预览（onChange 由调用方改内存态），
+ *  关弹层时由调用方统一存库；「恢复默认」= 18sp / 1.7 倍 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun FontSizeSheet(current: Int, onPick: (Int) -> Unit, onDismiss: () -> Unit) {
+internal fun FontSizeSheet(
+    fontSize: Int,
+    lineHeightMult: Float,
+    onChange: (Int, Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier
@@ -341,31 +359,50 @@ internal fun FontSizeSheet(current: Int, onPick: (Int) -> Unit, onDismiss: () ->
                 .navigationBarsPadding()
                 .padding(bottom = 24.dp),
         ) {
-            Text("阅读字号", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
-            SettingsRepository.READ_FONT_SIZES.forEach { size ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onPick(size) }
-                        .padding(vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "示例文字（$size 号）",
-                        fontSize = size.sp,
-                        lineHeight = (size * 1.6f).sp,
-                        modifier = Modifier.weight(1f),
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("阅读字号", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = {
+                    onChange(
+                        SettingsRepository.DEFAULT_READ_FONT_SIZE,
+                        SettingsRepository.DEFAULT_READ_LINE_HEIGHT,
                     )
-                    if (current == size) {
-                        Icon(
-                            Icons.Filled.Check,
-                            contentDescription = "当前字号",
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                }
+                }) { Text("恢复默认") }
             }
+            // 预览文字按当前字号/行距渲染，拖动即时看到效果
+            Text(
+                "示例文字：保理合同是应收账款债权人将现有的……",
+                fontSize = fontSize.sp,
+                lineHeight = (fontSize * lineHeightMult).toInt().sp,
+            )
+            Slider(
+                value = fontSize.toFloat(),
+                onValueChange = { onChange(it.roundToInt(), lineHeightMult) },
+                valueRange = SettingsRepository.READ_FONT_MIN.toFloat()..SettingsRepository.READ_FONT_MAX.toFloat(),
+                steps = SettingsRepository.READ_FONT_MAX - SettingsRepository.READ_FONT_MIN - 1,
+            )
+            Text(
+                "字号 $fontSize sp",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Text("行距", style = MaterialTheme.typography.titleMedium)
+            Slider(
+                value = lineHeightMult,
+                onValueChange = { onChange(fontSize, (it * 10).roundToInt() / 10f) },
+                valueRange = SettingsRepository.READ_LINE_MIN..SettingsRepository.READ_LINE_MAX,
+                steps = ((SettingsRepository.READ_LINE_MAX - SettingsRepository.READ_LINE_MIN) * 10).toInt() - 1,
+            )
+            Text(
+                "行距 ${lineHeightMult} 倍",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

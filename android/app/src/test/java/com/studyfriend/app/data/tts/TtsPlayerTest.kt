@@ -149,4 +149,33 @@ class TtsPlayerTest {
         engine.onErrorCb?.invoke("stop 引发的错误")
         assertEquals("晚到错误被依状态忽略", TtsState.Idle, player.state.value)
     }
+
+    // ---------- 6. 句→段映射（功能补齐轮正文听书） ----------
+
+    @Test
+    fun sentenceToParaIndex_mapsGlobalSentenceToParagraph() {
+        // 三段句数 2/1/3（与拼接文本 splitSentences 同口径：\n 连接在换行处断开）
+        val counts = listOf(2, 1, 3)
+        assertEquals(0, sentenceToParaIndex(counts, 0))
+        assertEquals(0, sentenceToParaIndex(counts, 1))
+        assertEquals(1, sentenceToParaIndex(counts, 2))
+        assertEquals(2, sentenceToParaIndex(counts, 3))
+        assertEquals(2, sentenceToParaIndex(counts, 5))
+        // 越界：钳到末段
+        assertEquals(2, sentenceToParaIndex(counts, 99))
+        // 空列表/空段计数防御：句 0 落在第一个实际有句子的段
+        assertEquals(0, sentenceToParaIndex(emptyList(), 0))
+        assertEquals(2, sentenceToParaIndex(listOf(0, 0, 1), 0))
+    }
+
+    @Test
+    fun joinedParagraphsSplitting_staysAlignedWithPerParaCounts() {
+        // 拼接口径对齐验证：\n 连接的多段整体分句数 == 各段独立分句数之和
+        val paras = listOf("第一段。有两句！第二段只有一句？", "第三段。也是两句。", "无标点结尾段")
+        val joined = paras.joinToString("\n") { it }
+        val counts = paras.map { splitSentences(it).size }
+        assertEquals(splitSentences(joined).size, counts.sum())
+        // 最后一段（无标点）作为当前句时映射回段 2
+        assertEquals(2, sentenceToParaIndex(counts, counts.sum() - 1))
+    }
 }

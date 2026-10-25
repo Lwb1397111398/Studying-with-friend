@@ -84,5 +84,16 @@ class StudyApp : Application() {
         // 视觉后台队列断点续跑（OPT-F）：进程死亡/设备重启后，把仍有 PENDING 页的书
         // 重新挂上 WorkManager（KEEP 不打断在跑的任务；WorkManager 自身持久化是主保障）
         appScope.launch { VisionScheduler.restorePending(database, this@StudyApp) }
+        // 复习到期提醒（功能补齐轮）：按设置注册/取消每日查询任务（默认开；关 = 取消注册）。
+        // runCatching：WorkManager 未初始化的环境（Robolectric 测试沙盒）静默跳过，不拦启动
+        appScope.launch {
+            runCatching {
+                if (settingsRepo.reviewReminderEnabled()) {
+                    com.studyfriend.app.data.study.ReviewReminderWorker.schedule(this@StudyApp)
+                } else {
+                    com.studyfriend.app.data.study.ReviewReminderWorker.cancel(this@StudyApp)
+                }
+            }
+        }
     }
 }

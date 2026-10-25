@@ -31,6 +31,7 @@ import com.studyfriend.app.ui.screens.ModelsScreen
 import com.studyfriend.app.ui.screens.ModelsViewModel
 import com.studyfriend.app.ui.screens.ReadScreen
 import com.studyfriend.app.ui.screens.ReviewScreen
+import com.studyfriend.app.ui.screens.SearchScreen
 import com.studyfriend.app.ui.screens.SettingsScreen
 import com.studyfriend.app.ui.screens.SettingsViewModel
 import com.studyfriend.app.ui.screens.ShelfScreen
@@ -48,16 +49,24 @@ object Routes {
     const val TOC = "toc"
     const val BOOK = "book/{bookId}"
     // highlight 为可选参数（P5 章节树）：节行点击带节标题，ReadScreen 滚动定位到该段
-    const val READ = "read/{chapterId}?highlight={highlight}"
+    // paraId 为可选参数（功能补齐轮全书搜索）：点搜索结果直接滚到命中段，优先级高于 highlight
+    const val READ = "read/{chapterId}?highlight={highlight}&paraId={paraId}"
     const val SUMMARY = "summary/{chapterId}"
     const val OVERVIEW = "overview/{bookId}"
+    // v7 全书搜索页：bookId 限定搜索范围
+    const val SEARCH = "search/{bookId}"
 
     fun book(bookId: Long) = "book/$bookId"
-    fun read(chapterId: Long, highlight: String? = null) =
-        if (highlight.isNullOrBlank()) "read/$chapterId"
-        else "read/$chapterId?highlight=${android.net.Uri.encode(highlight)}"
+    fun read(chapterId: Long, highlight: String? = null, paraId: Long = -1L): String {
+        val params = buildList {
+            if (!highlight.isNullOrBlank()) add("highlight=${android.net.Uri.encode(highlight)}")
+            if (paraId >= 0) add("paraId=$paraId")
+        }
+        return if (params.isEmpty()) "read/$chapterId" else "read/$chapterId?${params.joinToString("&")}"
+    }
     fun summary(chapterId: Long) = "summary/$chapterId"
     fun overview(bookId: Long) = "overview/$bookId"
+    fun search(bookId: Long) = "search/$bookId"
 }
 
 private data class TabItem(val route: String, val label: String, val icon: ImageVector)
@@ -117,6 +126,7 @@ fun AppNav() {
                         navController.navigate(Routes.IMPORT)
                     },
                     onOpenBook = { bookId -> navController.navigate(Routes.book(bookId)) },
+                    onContinueRead = { chapterId -> navController.navigate(Routes.read(chapterId)) },
                 )
             }
             composable(Routes.REVIEW) { ReviewScreen() }
@@ -157,6 +167,7 @@ fun AppNav() {
                         navController.navigate(Routes.read(chapterId, highlight))
                     },
                     onOpenOverview = { navController.navigate(Routes.overview(bookId)) },
+                    onOpenSearch = { navController.navigate(Routes.search(bookId)) },
                 )
             }
             composable(
@@ -168,17 +179,38 @@ fun AppNav() {
                         nullable = true
                         defaultValue = null
                     },
+                    navArgument("paraId") {
+                        type = NavType.LongType
+                        defaultValue = -1L
+                    },
                 ),
             ) { entry ->
                 val chapterId = entry.arguments?.getLong("chapterId") ?: 0L
                 val highlight = entry.arguments?.getString("highlight")
+                val paraId = entry.arguments?.getLong("paraId") ?: -1L
                 ReadScreen(
                     chapterId = chapterId,
                     highlight = highlight,
+                    scrollParaId = paraId,
                     onBack = { navController.popBackStack() },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                     onOpenSummary = { navController.navigate(Routes.summary(chapterId)) },
-                    onOpenChapter = { navController.navigate(Routes.read(it)) },
+                    onOpenChapter = { target, pid ->
+                        navController.navigate(Routes.read(target, paraId = pid))
+                    },
+                )
+            }
+            composable(
+                Routes.SEARCH,
+                arguments = listOf(navArgument("bookId") { type = NavType.LongType }),
+            ) { entry ->
+                val bookId = entry.arguments?.getLong("bookId") ?: 0L
+                SearchScreen(
+                    bookId = bookId,
+                    onBack = { navController.popBackStack() },
+                    onOpenHit = { chapterId, paraId ->
+                        navController.navigate(Routes.read(chapterId, paraId = paraId))
+                    },
                 )
             }
             composable(

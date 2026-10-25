@@ -48,9 +48,9 @@ import kotlin.math.roundToInt
 
 // 从 ReadScreen.kt 拆出（2026-10-11 结构批次）：段落行/划词文本/概要卡/讲解卡的渲染
 
-/** 正文阅读字号：随「Aa」弹层四档切换（P7），行高 1.7 倍保持阅读节奏 */
-private fun bodyTextStyle(fontSize: Int): TextStyle =
-    TextStyle(fontSize = fontSize.sp, lineHeight = (fontSize * 1.7f).roundToInt().sp)
+/** 正文阅读字号/行距：随「Aa」弹层调节（功能补齐轮起行距可调，默认 1.7 倍） */
+private fun bodyTextStyle(fontSize: Int, lineMult: Float): TextStyle =
+    TextStyle(fontSize = fontSize.sp, lineHeight = (fontSize * lineMult).roundToInt().sp)
 
 /**
  * 段落行（计划 M4a §3 + 质检 P1-6 + §3.4 视觉 + P7 划词）：讲/合并讲徽标 + why；
@@ -60,7 +60,9 @@ private fun bodyTextStyle(fontSize: Int): TextStyle =
 internal fun ParaRow(
     p: ParagraphEntity,
     fontSize: Int,
+    lineHeightMult: Float,
     selectedRange: IntRange?,
+    ttsActive: Boolean = false,
     onLongPress: (IntRange, IntOffset) -> Unit,
 ) {
     // OPT-C C4：目录条目特殊展示——小字次级色，无重点竖条/无 AI 徽标（TOC 段也不参与 AI 标注）
@@ -84,7 +86,11 @@ internal fun ParaRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min),
+            .height(IntrinsicSize.Min)
+            // v7 正文听书：当前朗读段淡染底色（跟随高亮）
+            .background(
+                if (ttsActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent,
+            ),
     ) {
         if (explained) {
             Box(
@@ -112,7 +118,7 @@ internal fun ParaRow(
                     }
                     SelectableText(
                         text = p.text,
-                        style = bodyTextStyle(fontSize),
+                        style = bodyTextStyle(fontSize, lineHeightMult),
                         highlightRange = selectedRange,
                         onLongPress = onLongPress,
                     )
@@ -125,7 +131,7 @@ internal fun ParaRow(
                     )
                     SelectableText(
                         text = p.text,
-                        style = bodyTextStyle(fontSize),
+                        style = bodyTextStyle(fontSize, lineHeightMult),
                         highlightRange = selectedRange,
                         onLongPress = onLongPress,
                         modifier = Modifier.alpha(0.55f),
@@ -133,7 +139,7 @@ internal fun ParaRow(
                 }
                 else -> SelectableText(
                     text = p.text,
-                    style = bodyTextStyle(fontSize),
+                    style = bodyTextStyle(fontSize, lineHeightMult),
                     highlightRange = selectedRange,
                     onLongPress = onLongPress,
                 )

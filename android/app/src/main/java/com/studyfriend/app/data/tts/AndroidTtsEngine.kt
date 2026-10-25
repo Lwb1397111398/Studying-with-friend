@@ -8,8 +8,13 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.Locale
 import kotlin.coroutines.resume
 
-/** 系统 TextToSpeech 封装：prepare 确认简体中文可用；utteranceId 编码句序号逐句回调 */
+/** 系统 TextToSpeech 封装：prepare 确认简体中文可用；utteranceId 编码句序号逐句回调；
+ *  [rate] 语速倍率（功能补齐轮正文听书用，设置页可调 0.5~2.0，默认 1.0；prepare 时生效，
+ *  可变属性——设置读到后随时赋值，下次 prepare 应用） */
 class AndroidTtsEngine(private val context: Context) : TtsEngine {
+
+    @Volatile
+    var rate: Float = 1.0f
 
     // init 回调在 binder 线程读、主线程重建/置空，volatile 保证可见
     @Volatile
@@ -18,8 +23,10 @@ class AndroidTtsEngine(private val context: Context) : TtsEngine {
     override suspend fun prepare(): Boolean = suspendCancellableCoroutine { cont ->
         val engine = TextToSpeech(context) { status ->
             val ok = if (status == TextToSpeech.SUCCESS) {
-                val r = engineSafe()?.setLanguage(Locale.SIMPLIFIED_CHINESE)
-                r == TextToSpeech.LANG_AVAILABLE || r == TextToSpeech.LANG_COUNTRY_AVAILABLE
+                val e = engineSafe()
+                val lang = e?.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                e?.setSpeechRate(rate)
+                lang == TextToSpeech.LANG_AVAILABLE || lang == TextToSpeech.LANG_COUNTRY_AVAILABLE
             } else {
                 false
             }

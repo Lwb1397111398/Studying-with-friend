@@ -1,5 +1,6 @@
 package com.studyfriend.app.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -29,10 +30,14 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.BookRepository
 import com.studyfriend.app.data.db.BookEntity
+import com.studyfriend.app.data.db.BookProgress
 import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.VisionProgress
 import kotlinx.coroutines.launch
@@ -72,10 +78,25 @@ private val COVER_PALETTES = listOf(
 )
 
 @Composable
-fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
+fun ShelfScreen(
+    onImport: () -> Unit,
+    onOpenBook: (Long) -> Unit = {},
+    onContinueRead: (chapterId: Long) -> Unit = {},
+) {
     val app = LocalContext.current.applicationContext as StudyApp
     val repo = remember { BookRepository(app.database, app.filesDir) }
     val books by repo.shelfFlow().collectAsStateWithLifecycle(initialValue = null)
+    // v7 全书架进度（已读 x/y 章）：书卡进度条数据源
+    val progressAll by app.database.bookDao().progressAllFlow()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val progressByBook = remember(progressAll) { progressAll.associateBy { it.id } }
+    // v7 继续读：最近在读的书（getAllFlow 已按 lastReadAt DESC 排序）
+    val continueBook = books?.firstOrNull { it.lastReadAt != null && it.lastReadChapterId != null }
+    var continueChapterTitle by remember { mutableStateOf("") }
+    LaunchedEffect(continueBook?.lastReadChapterId) {
+        val cid = continueBook?.lastReadChapterId ?: return@LaunchedEffect
+        continueChapterTitle = app.database.chapterDao().byIdOnce(cid)?.title.orEmpty()
+    }
     // 书架复习徽标（M6 计划 §3.3）：待复习章数角标；now 进页固化
     val now = remember { System.currentTimeMillis() }
     val dueCounts by repo.dueCountByBookFlow(now).collectAsStateWithLifecycle(initialValue = emptyList())
@@ -83,8 +104,11 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
     // 视觉增强徽标（OPT-F）：后台转写进度 "视觉增强 x/y"，有队列的书才显示
     val visionProgress by repo.visionProgressFlow().collectAsStateWithLifecycle(initialValue = emptyList())
     val visionByBook = remember(visionProgress) { visionProgress.associate { it.bookId to it } }
-    // 长按删除：数据层 removeBook 已有（CASCADE+磁盘图清理），此处只补 UI 入口
+    // 长按菜单（v7 重命名/删除）：数据层 removeBook 已有，重命名走 bookDao.update
     var pendingDelete by remember { mutableStateOf<BookEntity?>(null) }
+    var pendingRename by remember { mutableStateOf<BookEntity?>(null) }
+    var menuFor by remember { mutableStateOf<BookEntity?>(null) }
+    var renameInput by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     Box(Modifier.fillMaxSize()) {
@@ -96,8 +120,12 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
                 subtitle = "点右下角 + 导入 TXT，开始和搭子一起读书",
             )
             else -> BookShelf(
-                list, dueByBook, visionByBook, onOpenBook,
-                onDeleteRequest = { pendingDelete = it },
+                list, dueByBook, visionByBook, progressByBook,
+                continueBook = continueBook?.takeIf { it.status == DbValues.BOOK_READY },
+                continueChapterTitle = continueChapterTitle,
+                onContinueRead = onContinueRead,
+                onOpenBook = onOpenBook,
+                onMenu = { menuFor = it },
             )
         }
 
@@ -109,6 +137,64 @@ fun ShelfScreen(onImport: () -> Unit, onOpenBook: (Long) -> Unit = {}) {
         ) {
             Icon(Icons.Filled.Add, contentDescription = "导入书籍")
         }
+    }
+
+    // v7 长按书卡三选：重命名 / 删除 / 取消
+    menuFor?.let { book ->
+        AlertDialog(
+            onDismissRequest = { menuFor = null },
+            title = { Text("《${book.title}》") },
+            text = { Text("书架共 ${books?.size ?: 0} 本。要做什么？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRename = book
+                    renameInput = book.title
+                    menuFor = null
+                }) { Text("重命名") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        pendingDelete = book
+                        menuFor = null
+                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                    TextButton(onClick = { menuFor = null }) { Text("取消") }
+                }
+            },
+        )
+    }
+
+    // v7 重命名弹层：预填现名，确认即存（title + updatedAt，书架/章节页/总览同步刷新）
+    pendingRename?.let { book ->
+        AlertDialog(
+            onDismissRequest = { pendingRename = null },
+            title = { Text("重命名书籍") },
+            text = {
+                OutlinedTextField(
+                    value = renameInput,
+                    onValueChange = { renameInput = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val t = renameInput.trim()
+                        pendingRename = null
+                        if (t.isNotEmpty() && t != book.title) {
+                            scope.launch {
+                                app.database.bookDao().update(book.copy(title = t, updatedAt = System.currentTimeMillis()))
+                            }
+                        }
+                    },
+                    enabled = renameInput.isNotBlank(),
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRename = null }) { Text("取消") }
+            },
+        )
     }
 
     pendingDelete?.let { book ->
@@ -136,8 +222,12 @@ private fun BookShelf(
     books: List<BookEntity>,
     dueByBook: Map<Long, Int>,
     visionByBook: Map<Long, VisionProgress>,
+    progressByBook: Map<Long, BookProgress>,
+    continueBook: BookEntity?,
+    continueChapterTitle: String,
+    onContinueRead: (Long) -> Unit,
     onOpenBook: (Long) -> Unit,
-    onDeleteRequest: (BookEntity) -> Unit,
+    onMenu: (BookEntity) -> Unit,
 ) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 108.dp),
@@ -161,25 +251,53 @@ private fun BookShelf(
                 )
             }
         }
+        // v7 继续读横幅：最近在读的书 + 上次读到的章，点击直达阅读页（位置记忆恢复到段）
+        if (continueBook != null && continueChapterTitle.isNotBlank()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { continueBook.lastReadChapterId?.let(onContinueRead) },
+                ) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        Text(
+                            "继续读",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            "《${continueBook.title}》· $continueChapterTitle",
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
         items(books, key = { it.id }) { book ->
             BookCard(
                 book,
                 due = dueByBook[book.id] ?: 0,
                 vision = visionByBook[book.id],
+                progress = progressByBook[book.id],
                 onClick = { onOpenBook(book.id) },
-                onLongClick = { onDeleteRequest(book) },
+                onLongClick = { onMenu(book) },
             )
         }
     }
 }
 
-/** 一张书卡：实体书封面（渐变+书脊+厚度阴影+装饰框）+ 封面下状态行 */
+/** 一张书卡：实体书封面（渐变+书脊+厚度阴影+装饰框）+ 封面下状态行 + 阅读进度条（v7） */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookCard(
     book: BookEntity,
     due: Int,
     vision: VisionProgress?,
+    progress: BookProgress?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -311,6 +429,26 @@ private fun BookCard(
                 modifier = Modifier.padding(top = 6.dp),
             )
             else -> Unit
+        }
+        // v7 阅读进度条：已读 x/y 章（总计划 §4.2 书卡进度条落地）
+        if (ready && progress != null && progress.totalChapters > 0) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                LinearProgressIndicator(
+                    progress = { progress.readChapters.toFloat() / progress.totalChapters },
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "${progress.readChapters}/${progress.totalChapters}",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

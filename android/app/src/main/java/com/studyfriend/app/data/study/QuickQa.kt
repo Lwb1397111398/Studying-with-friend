@@ -15,7 +15,10 @@ object QuickQa {
     /** 一轮已完成的问答 */
     data class Turn(val question: String, val answer: String)
 
-    /** 选中文字及其所在章/段上下文（截断在这里统一做，UI 层传原始文本） */
+    /**
+     * 选中文字及其所在章/段上下文（截断在这里统一做，UI 层传原始文本）。
+     * bookId/chapterId（v7）：随手问历史落库定位用，不进 user 消息；-1=未知（测试/旧调用方默认）。
+     */
     data class Ctx(
         val chapterTitle: String,
         val gist: String?,
@@ -25,6 +28,8 @@ object QuickQa {
         val paragraph: String,
         val prev: String?,
         val next: String?,
+        val bookId: Long = -1L,
+        val chapterId: Long = -1L,
     )
 
     /** 浮条「问这是什么意思」的默认问题（词/句粒度共用，selection 字段即答案指向） */

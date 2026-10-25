@@ -38,6 +38,7 @@ import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.PromptLoader
+import com.studyfriend.app.data.db.QaHistoryEntity
 import com.studyfriend.app.data.study.QuickQa
 import com.studyfriend.app.ui.components.MdText
 import kotlinx.coroutines.CancellationException
@@ -54,6 +55,9 @@ import kotlinx.coroutines.withContext
 
 /** 流式回答的打字机刷新间隔：攒增量至多每 100ms 刷一次状态，避免逐 delta 全卡重组 */
 private const val QA_STREAM_FLUSH_MS = 100L
+
+/** v7 问答历史每书保留条数（与 QaHistoryDao.trim 口径一致） */
+private const val QA_HISTORY_KEEP = 50
 
 /**
  * 随手问底部问答卡（P7）：打开即按默认问题自动发问（词/句/段粒度由浮条决定），
@@ -78,6 +82,16 @@ internal fun QuickQaSheet(
     var lastQuestion by remember { mutableStateOf(defaultQuestion) }
     var noKey by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
+    // v7 问答历史弹层
+    var showHistory by remember { mutableStateOf(false) }
+    var historyRows by remember { mutableStateOf(listOf<QaHistoryEntity>()) }
+    LaunchedEffect(showHistory, ctx.bookId) {
+        if (showHistory && ctx.bookId >= 0) {
+            historyRows = withContext(Dispatchers.IO) {
+                app.database.qaHistoryDao().latestByBook(ctx.bookId)
+            }
+        }
+    }
     val listState = rememberLazyListState()
 
     fun ask(question: String) {
@@ -124,6 +138,23 @@ internal fun QuickQaSheet(
                 }
                 streaming = answer.toString() // 收尾补刷：节流窗口内的尾部增量上屏
                 history = history + QuickQa.Turn(question, result)
+                // v7 问答历史落库：应用级 scope（关弹层不取消写库）；每书保留最近 50 条
+                if (ctx.bookId >= 0) {
+                    app.appScope.launch {
+                        val dao = app.database.qaHistoryDao()
+                        dao.insert(
+                            QaHistoryEntity(
+                                bookId = ctx.bookId,
+                                chapterId = ctx.chapterId,
+                                chapterTitle = ctx.chapterTitle,
+                                question = question,
+                                answer = result,
+                                createdAt = System.currentTimeMillis(),
+                            ),
+                        )
+                        dao.trim(ctx.bookId, keep = QA_HISTORY_KEEP)
+                    }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -162,12 +193,21 @@ internal fun QuickQaSheet(
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(
-                    "「${ctx.selection.take(120)}${if (ctx.selection.length > 120) "…" else ""}」",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Row(
                     modifier = Modifier.padding(10.dp),
-                )
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "「${ctx.selection.take(120)}${if (ctx.selection.length > 120) "…" else ""}」",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    // v7 历史入口：本书最近 50 条问答
+                    if (ctx.bookId >= 0) {
+                        TextButton(onClick = { showHistory = true }) { Text("历史") }
+                    }
+                }
             }
             Spacer(Modifier.height(8.dp))
 
@@ -262,6 +302,55 @@ internal fun QuickQaSheet(
                 ) { Text("发送") }
             }
             Spacer(Modifier.height(8.dp))
+        }
+    }
+
+    // v7 问答历史二级弹层：本书最近 50 条（问题+答案+章名）
+    if (showHistory) {
+        ModalBottomSheet(onDismissRequest = { showHistory = false }) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .navigationBarsPadding()
+                    .padding(bottom = 24.dp),
+            ) {
+                Text("随手问历史", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                if (historyRows.isEmpty()) {
+                    Text(
+                        "还没有历史。问过的每一条都会存在这里（本书最近 50 条）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        itemsIndexed(historyRows) { _, row ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(Modifier.padding(10.dp)) {
+                                    Text(
+                                        "${row.chapterTitle} · ${java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(row.createdAt))}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        row.question,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                    MdText(md = row.answer)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

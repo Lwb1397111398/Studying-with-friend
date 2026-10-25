@@ -119,4 +119,19 @@ internal fun splitSentences(text: String): List<String> {
     return result
 }
 
+/**
+ * 句→段定位（功能补齐轮正文听书）：朗读文本 = 多段顺序拼接，[paraSentenceCounts]
+ * 是每段的分句数（splitSentences 同口径）；返回全局句序号 [sentenceIdx] 落在第几段
+ * （0-based，paraSentenceCounts 的下标）。越界取首/末段。
+ */
+internal fun sentenceToParaIndex(paraSentenceCounts: List<Int>, sentenceIdx: Int): Int {
+    if (paraSentenceCounts.isEmpty()) return 0
+    var acc = 0
+    for ((i, n) in paraSentenceCounts.withIndex()) {
+        acc += n
+        if (sentenceIdx < acc) return i
+    }
+    return paraSentenceCounts.size - 1
+}
+
 private const val MAX_LEN = 4000
