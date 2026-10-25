@@ -54,6 +54,19 @@ object UpdateChecker {
     const val UPDATE_TAG = "latest"
 
     /**
+     * 下载兜底镜像：GitHub 的资产 CDN（release-assets.githubusercontent.com）在国内常被整段
+     * 阻断（2026-10-25 实测：检查更新走的 api.github.com 通，下载 302 跳转后的资产 CDN
+     * TCP 建连即超时，80MB 包 0 字节到手），直连失败后依次改走「镜像前缀 + 原地址」重试。
+     * 镜像站随时会死：这里只保留实测能用的，死一个删一个（改此列表 → push → CI 自动出新版）；
+     * 判活命令见 docs/模块总览/M7-应用自更新.md「换源兜底」一节。
+     */
+    val DOWNLOAD_MIRRORS = listOf(
+        "https://ghfast.top/",   // 2026-10-25 实测可用，80MB 包持续约 440KB/s
+        "https://gh-proxy.com/", // 2026-10-25 本网络 TLS 握手被掐（约 1s 快速失败）；他网可能可用，留作备胎
+        "https://ghproxy.net/",  // 同上
+    )
+
+    /**
      * 查询最新发布并与当前版本比较（versionCode 大于当前才算有更新）。
      * 失败抛 [UpdateException]。
      */
@@ -86,12 +99,17 @@ object UpdateChecker {
      * 下载 APK 到 [dest]，onProgress 回调整数百分比（IO 线程回调）。
      * 同版本号的完整文件已存在（长度与远端一致）时直接复用，不重复下载。
      * 先写 .part 临时文件、校验长度后再改名，中断不会留下半截冒充完整包。
+     *
+     * 多源兜底：直连优先（未被墙的网络最快），失败后依次改走镜像（原地址拼镜像前缀），
+     * 全部失败才抛人话汇总错误。仅 github.com 的地址拼镜像（E2E/单测的本地假服务器
+     * 地址不拼）；测试用 [mirrors] 参数注入本地假镜像。
      */
     fun downloadApk(
         url: String,
         token: String?,
         dest: File,
         expectedSize: Long,
+        mirrors: List<String> = if (url.startsWith("https://github.com/")) DOWNLOAD_MIRRORS else emptyList(),
         onProgress: (Int) -> Unit,
     ) {
         dest.parentFile?.mkdirs()
@@ -100,10 +118,31 @@ object UpdateChecker {
             return
         }
         val tmp = File(dest.parentFile, dest.name + ".part")
+        var lastError: Exception? = null
+        for (source in listOf(url) + mirrors.map { it + url }) {
+            try {
+                downloadFrom(source, token, tmp, onProgress)
+                return
+            } catch (e: java.util.concurrent.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw UpdateException(
+            "下载失败：GitHub 直连和 ${mirrors.size} 个镜像源都没连上" +
+                "（${lastError?.message ?: "未知错误"}）。请稍后或换网络重试",
+            lastError,
+        )
+    }
+
+    /** 单源下载到 [tmp]：成功即校验长度并改名；失败抛出由 [downloadApk] 决定是否换源重下 */
+    private fun downloadFrom(url: String, token: String?, tmp: File, onProgress: (Int) -> Unit) {
         val conn = open(url, token)
         try {
             conn.connectTimeout = 15000
-            conn.readTimeout = 120000
+            // 30 秒读不出数据才判死：正常链路单个 64KB 块远快于此；被墙直连假死别拖满 2 分钟才换源
+            conn.readTimeout = 30000
             val code = conn.responseCode
             if (code !in 200..299) {
                 throw UpdateException("下载失败（HTTP $code）：请稍后再试")
@@ -133,6 +172,7 @@ object UpdateChecker {
                 tmp.delete()
                 throw UpdateException("下载不完整（收到 ${tmp.length()} / $total 字节），请重试")
             }
+            val dest = File(tmp.parentFile, tmp.name.removeSuffix(".part"))
             dest.delete()
             if (!tmp.renameTo(dest)) {
                 throw UpdateException("保存安装包失败（文件被占用？）")

@@ -175,6 +175,80 @@ class UpdateCheckerTest {
         assertEquals(100, progress.last())
         assertEquals(0, fake.downloadRequests.get())
     }
+
+    @Test
+    fun `downloadApk 直连失败自动换镜像成功`() {
+        tmp.newFolder("updates")
+        fake.downloadStatus = 500
+        val mirror = FakeGitHub().also { it.start() }
+        try {
+            val dest = File(tmp.root, "updates/update-20.apk")
+            val progress = mutableListOf<Int>()
+            // 镜像前缀拼原地址，与线上镜像同构（路径里带完整原始 URL）
+            UpdateChecker.downloadApk(
+                "http://127.0.0.1:${fake.port}/download/app.apk",
+                token = null,
+                dest = dest,
+                expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+                mirrors = listOf("http://127.0.0.1:${mirror.port}/"),
+            ) { progress.add(it) }
+            assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
+            assertEquals(100, progress.last())
+            assertEquals(1, fake.downloadRequests.get())
+            assertEquals(1, mirror.downloadRequests.get())
+            assertNull(File(dest.parentFile, dest.name + ".part").takeIf { it.exists() })
+        } finally {
+            mirror.stop()
+        }
+    }
+
+    @Test
+    fun `downloadApk 直连与镜像全部失败时抛人话汇总`() {
+        tmp.newFolder("updates")
+        fake.downloadStatus = 500
+        val mirror = FakeGitHub().also { it.start() }
+        mirror.downloadStatus = 500
+        try {
+            val dest = File(tmp.root, "updates/update-20.apk")
+            try {
+                UpdateChecker.downloadApk(
+                    "http://127.0.0.1:${fake.port}/download/app.apk",
+                    token = null,
+                    dest = dest,
+                    expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+                    mirrors = listOf("http://127.0.0.1:${mirror.port}/"),
+                ) { }
+                throw AssertionError("应当抛出 UpdateException")
+            } catch (e: UpdateException) {
+                assertTrue(e.message!!.contains("直连"))
+                assertTrue(e.message!!.contains("镜像"))
+            }
+            assertEquals(1, fake.downloadRequests.get())
+            assertEquals(1, mirror.downloadRequests.get())
+        } finally {
+            mirror.stop()
+        }
+    }
+
+    @Test
+    fun `downloadApk 非 github 地址默认不拼镜像报单源原始错误`() {
+        tmp.newFolder("updates")
+        fake.downloadStatus = 500
+        val dest = File(tmp.root, "updates/update-20.apk")
+        try {
+            // 不传 mirrors：本地 http 地址不该触发镜像拼接（E2E 假服务器同此形态）
+            UpdateChecker.downloadApk(
+                "http://127.0.0.1:${fake.port}/download/app.apk",
+                token = null,
+                dest = dest,
+                expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            ) { }
+            throw AssertionError("应当抛出 UpdateException")
+        } catch (e: UpdateException) {
+            assertTrue(e.message!!.contains("HTTP 500"))
+        }
+        assertEquals(1, fake.downloadRequests.get())
+    }
 }
 
 /** 单线程极简 HTTP 服务器：只回 /releases/latest（可配状态码）与 /download/app.apk 两个路径 */
@@ -191,6 +265,7 @@ private class FakeGitHub {
     @Volatile var userAgent: String? = null
     @Volatile var latestStatus: Int = 200
     @Volatile var latestBody: String = ""
+    @Volatile var downloadStatus: Int = 200
 
     fun start() {
         val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
@@ -238,12 +313,20 @@ private class FakeGitHub {
             }
             path.endsWith("/download/app.apk") -> {
                 downloadRequests.incrementAndGet()
-                val bytes = ByteArray(DOWNLOAD_BYTES) { (it % 251).toByte() }
-                out.write(
-                    ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
-                        "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray(),
-                )
-                out.write(bytes)
+                if (downloadStatus == 200) {
+                    val bytes = ByteArray(DOWNLOAD_BYTES) { (it % 251).toByte() }
+                    out.write(
+                        ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
+                            "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray(),
+                    )
+                    out.write(bytes)
+                } else {
+                    out.write(
+                        ("HTTP/1.1 $downloadStatus St\r\nContent-Type: application/json\r\n" +
+                            "Content-Length: 2\r\nConnection: close\r\n\r\n").toByteArray(),
+                    )
+                    out.write("{}".toByteArray())
+                }
             }
             else -> out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
         }
