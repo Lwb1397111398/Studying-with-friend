@@ -92,13 +92,16 @@ internal fun ChapterToolsRow(
     val succeeded = runState is RoughRunState.Succeeded && runState.chapterId == chapterId
     val interrupted = runState is RoughRunState.Interrupted && runState.chapterId == chapterId
     val failed = runState is RoughRunState.Failed && runState.chapterId == chapterId
+    // 排队等待中（体验增量轮）：自己的任务在等全局锁（前一个任务没跑完）
+    val queuedThis = runState is RoughRunState.Queued && runState.chapterId == chapterId
 
     val allMarked = paragraphCount > 0 && markedCount == paragraphCount
     val partiallyMarked = markedCount in 1 until paragraphCount
 
     val noteRunningThis = noteState is NoteRunState.Running && noteState.chapterId == chapterId
-    val roughBusy = runState is RoughRunState.Running
-    val noteBusy = (gateLabel != null && !noteRunningThis) || roughBusy
+    val noteQueuedThis = noteState is NoteRunState.Queued && noteState.chapterId == chapterId
+    val roughBusy = runState is RoughRunState.Running || runState is RoughRunState.Queued
+    val noteBusy = (gateLabel != null && !noteRunningThis && !noteQueuedThis) || roughBusy
 
     // force 重读/重生成会覆盖既有标注：二次确认防误触（原 ActionBar/NoteBar 保留）
     var showRoughForceConfirm by remember { mutableStateOf(false) }
@@ -117,6 +120,7 @@ internal fun ChapterToolsRow(
             val roughLabel = when {
                 pureToc || paragraphCount == 0 -> "目录章"
                 runningThis -> "粗读 ${(runState as RoughRunState.Running).done}/${runState.total}"
+                queuedThis -> "粗读排队中"
                 allMarked -> "重读"
                 partiallyMarked -> "继续 $markedCount/$paragraphCount"
                 else -> "粗读"
@@ -130,6 +134,7 @@ internal fun ChapterToolsRow(
             if (noteUnitCount > 0) {
                 val noteLabel = when {
                     noteRunningThis -> "讲解 ${(noteState as NoteRunState.Running).done}/${noteState.total}"
+                    noteQueuedThis -> "讲解排队中"
                     noteValidCount == noteUnitCount -> "讲解 ✓"
                     noteValidCount > 0 -> "讲解 $noteValidCount/$noteUnitCount"
                     else -> "讲解 $noteUnitCount"
@@ -168,6 +173,15 @@ internal fun ChapterToolsRow(
                     progress = if (r.total > 0) r.done.toFloat() / r.total else 0f,
                     onStop = onStop,
                 )
+            }
+
+            // 排队等待中（体验增量轮）：前一个任务释放全局锁后自动开跑，可取消
+            queuedThis -> {
+                TaskProgressRow(label = "排队等待中（搭子正忙别的 AI 任务）", progress = 0f, onStop = onStop)
+            }
+
+            noteQueuedThis -> {
+                TaskProgressRow(label = "排队等待中（搭子正忙别的 AI 任务）", progress = 0f, onStop = onNoteStop)
             }
 
             noteRunningThis -> {

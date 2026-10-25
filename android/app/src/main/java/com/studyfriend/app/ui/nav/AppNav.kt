@@ -222,6 +222,7 @@ fun AppNav() {
                     chapterId = chapterId,
                     onBack = { navController.popBackStack() },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    onOpenChapter = { cid -> navController.navigate(Routes.read(cid)) },
                 )
             }
             composable(

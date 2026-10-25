@@ -233,8 +233,103 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            BackupSection(vm)
         }
     }
+}
+
+/** 备份与恢复（数据安全轮）：SAF 选位置导出 JSON / 选文件校验后确认整库替换 */
+@Composable
+private fun BackupSection(vm: SettingsViewModel) {
+    // SAF 存新文件（导出）：系统文件选择器落到用户选的位置
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri -> uri?.let(vm::exportBackup) }
+    // SAF 选已有文件（恢复）：先只解析校验，确认框点了才动库
+    val restoreLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> uri?.let(vm::previewRestore) }
+    // 诊断日志导出（数据安全轮）：最近 7 天日志合并成一个 txt
+    val diagLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri -> uri?.let(vm::exportDiag) }
+
+    Text("备份与恢复", style = MaterialTheme.typography.labelLarge)
+    Text(
+        "导出全部学习数据（书、讲解、批注、进度）为一个 JSON 文件，换机/重装后可整库恢复。" +
+            "API Key 不包含在备份里，恢复后需重新填写。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            enabled = !vm.backupBusy,
+            onClick = { exportLauncher.launch(backupFileName()) },
+        ) { Text("导出备份") }
+        OutlinedButton(
+            enabled = !vm.backupBusy,
+            onClick = { restoreLauncher.launch(arrayOf("*/*")) },
+        ) { Text("从备份恢复") }
+    }
+    vm.backupMessage?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (vm.backupIsError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+        )
+    }
+
+    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+    // 诊断日志（数据安全轮）：崩溃与 AI 任务失败原因按天滚动记 7 天，这里合并导出
+    Text("诊断", style = MaterialTheme.typography.labelLarge)
+    Text(
+        "App 崩溃与 AI 任务失败的原因会自动记录（保留最近 7 天）。遇到问题时导出发给 AI 排障。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    OutlinedButton(onClick = { diagLauncher.launch(diagFileName()) }) { Text("导出诊断日志") }
+
+    // 恢复确认：明示覆盖语义（整库替换，无法撤销）
+    vm.pendingRestore?.let { pending ->
+        val s = pending.summary
+        AlertDialog(
+            onDismissRequest = { vm.cancelRestore() },
+            title = { Text("恢复这个备份？") },
+            text = {
+                Text(
+                    "备份内容：${s.books} 本书、${s.chapters} 章、${s.paragraphs} 段正文、" +
+                        "讲解 ${s.paraNotes} 条、批注 ${s.paraMemos} 条。\n\n" +
+                        "当前全部学习数据（书、讲解、批注、做题与复习记录）将被覆盖，此操作无法撤销。",
+                )
+            },
+            confirmButton = {
+                Button(onClick = { vm.confirmRestore() }) {
+                    Text("覆盖并恢复", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { vm.cancelRestore() }) { Text("取消") }
+            },
+        )
+    }
+}
+
+/** 导出文件默认名：studyfriend-backup-20261025-1530.json */
+private fun backupFileName(): String {
+    val stamp = java.time.LocalDateTime.now()
+        .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmm"))
+    return "studyfriend-backup-$stamp.json"
+}
+
+/** 诊断日志导出默认名：studyfriend-diag-20261025-1530.txt */
+private fun diagFileName(): String {
+    val stamp = java.time.LocalDateTime.now()
+        .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmm"))
+    return "studyfriend-diag-$stamp.txt"
 }
 
 /** 离线朗读模型下载管理区（TTS 双模式之「离线模型」）：状态/进度/下载/删除。

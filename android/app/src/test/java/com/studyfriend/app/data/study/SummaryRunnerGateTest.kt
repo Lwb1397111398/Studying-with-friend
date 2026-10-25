@@ -119,10 +119,10 @@ class SummaryRunnerGateTest {
         db, ApplicationProvider.getApplicationContext(), SettingsRepository(db, FakeSecretStore()), chatFn, scope, gate,
     )
 
-    // ---------- 1. 总结进行中 → 讲解被拒 ----------
+    // ---------- 1. 总结进行中 → 讲解排队，总结结束后自动接力 ----------
 
     @Test
-    fun summaryRunning_rejectsNoteStart(): Unit = runBlocking {
+    fun summaryRunning_noteQueuesThenRunsAfterRelease(): Unit = runBlocking {
         val hold = CompletableDeferred<Unit>()
         val entered = CompletableDeferred<Unit>()
         val summary = summaryRunner(summaryChatFn(hold, entered))
@@ -132,17 +132,17 @@ class SummaryRunnerGateTest {
         awaitSummary(summary) { it is SummaryRunState.Streaming }
         withTimeout(5_000) { entered.await() }
         note.start(ch)
-        val failed = awaitNote(note) { it is NoteRunState.Failed } as NoteRunState.Failed
-
-        assertTrue(failed.message.contains("另一项 AI 任务"))
+        // 体验增量轮：不再立即拒绝，而是发 Queued 等待
+        awaitNote(note) { it is NoteRunState.Queued }
         hold.complete(Unit)
         awaitSummary(summary) { it is SummaryRunState.Succeeded }
+        awaitNote(note) { it is NoteRunState.Succeeded }
     }
 
-    // ---------- 2. 讲解进行中 → 总结被拒 ----------
+    // ---------- 2. 讲解进行中 → 总结排队，讲解结束后自动接力 ----------
 
     @Test
-    fun noteRunning_rejectsSummaryStart(): Unit = runBlocking {
+    fun noteRunning_summaryQueuesThenRunsAfterRelease(): Unit = runBlocking {
         val hold = CompletableDeferred<Unit>()
         val summary = summaryRunner(summaryChatFn(null))
         val note = noteRunner(noteChatFn(hold))
@@ -150,11 +150,10 @@ class SummaryRunnerGateTest {
         note.start(ch)
         awaitNote(note) { it is NoteRunState.Running }
         summary.start(ch)
-        val failed = awaitSummary(summary) { it is SummaryRunState.Failed } as SummaryRunState.Failed
-
-        assertTrue(failed.message.contains("另一项 AI 任务"))
+        awaitSummary(summary) { it is SummaryRunState.Queued }
         hold.complete(Unit)
         awaitNote(note) { it is NoteRunState.Succeeded }
+        awaitSummary(summary) { it is SummaryRunState.Succeeded }
     }
 
     // ---------- 3. 总结自替换：join 后重获 gate 正常完成 ----------

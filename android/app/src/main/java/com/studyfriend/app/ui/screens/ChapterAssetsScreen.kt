@@ -90,7 +90,13 @@ internal fun safeFileName(name: String) = name.replace(Regex("[\\\\/:*?\"<>|]"),
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChapterAssetsScreen(chapterId: Long, onBack: () -> Unit, onOpenSettings: () -> Unit = {}) {
+fun ChapterAssetsScreen(
+    chapterId: Long,
+    onBack: () -> Unit,
+    onOpenSettings: () -> Unit = {},
+    /** 导图跳章（体验增量轮）：导图节点文本匹配本书章标题时跳阅读页 */
+    onOpenChapter: (Long) -> Unit = {},
+) {
     val app = LocalContext.current.applicationContext as StudyApp
     val db = app.database
     val runner = app.summaryRunner
@@ -184,6 +190,7 @@ fun ChapterAssetsScreen(chapterId: Long, onBack: () -> Unit, onOpenSettings: () 
                     tab = tab,
                     onTab = { tab = it },
                     onOpenSettings = onOpenSettings,
+                    onOpenChapter = onOpenChapter,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -225,6 +232,17 @@ private fun GeneratePane(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         when (val s = state) {
+            // 排队等待中（体验增量轮）：前一个 AI 任务释放全局锁后自动开跑
+            is SummaryRunState.Queued -> if (s.chapterId == chapterId) {
+                Text("排队等待中…", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "搭子正在忙另一项 AI 任务，完成后自动开始总结本章",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                Button(onClick = onStop) { Text("取消排队") }
+            }
+
             is SummaryRunState.Streaming -> if (s.chapterId == chapterId) {
                 Text("搭子正在总结本章…", style = MaterialTheme.typography.titleMedium)
                 Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
@@ -274,6 +292,7 @@ private fun AssetTabs(
     tab: Int,
     onTab: (Int) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenChapter: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val titles = listOf("总结", "导图", "记忆", "自测")
@@ -289,7 +308,7 @@ private fun AssetTabs(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) { MdText(asset.summaryMd) }
 
-            1 -> MindmapPane(asset, chapterTitle)
+            1 -> MindmapPane(asset, chapterTitle, onOpenChapter)
 
             2 -> MemoryPane(asset)
 
@@ -556,10 +575,18 @@ private fun MemoryPane(asset: ChapterAssetEntity, modifier: Modifier = Modifier)
     }
 }
 
-/** 导图 Tab（计划 M5 §3.4）：TAB 树现转 mind-elixir 数据只读渲染，底部导出 PNG（SAF） */
+/** 导图 Tab（计划 M5 §3.4）：TAB 树现转 mind-elixir 数据只读渲染，底部导出 PNG（SAF）。
+ *  体验增量轮：节点点击匹配本书章标题（去空白后等值）跳对应章阅读页，匹配不上不动 */
 @Composable
-private fun MindmapPane(asset: ChapterAssetEntity, chapterTitle: String, modifier: Modifier = Modifier) {
+private fun MindmapPane(
+    asset: ChapterAssetEntity,
+    chapterTitle: String,
+    onOpenChapter: (Long) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
+    val app = context.applicationContext as com.studyfriend.app.StudyApp
+    val clickScope = rememberCoroutineScope()
     var controller by remember { mutableStateOf<MapController?>(null) }
     var pendingPng by remember { mutableStateOf<ByteArray?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -598,6 +625,20 @@ private fun MindmapPane(asset: ChapterAssetEntity, chapterTitle: String, modifie
                         mainHandler.post {
                             pendingPng = bytes
                             exportLauncher.launch("$safeName-导图.png")
+                        }
+                    }
+                },
+                onNodeClick = { topic ->
+                    // 查本书章标题匹配（level=1 章行；去空白后等值），命中跳阅读页
+                    clickScope.launch(Dispatchers.IO) {
+                        val bookId = app.database.chapterDao().byIdOnce(asset.chapterId)?.bookId
+                            ?: return@launch
+                        val norm = { t: String -> t.replace(Regex("\\s+"), "") }
+                        val target = app.database.chapterDao().byBook(bookId).firstOrNull {
+                            it.level == 1 && norm(it.title) == norm(topic)
+                        }
+                        if (target != null) {
+                            withContext(Dispatchers.Main) { onOpenChapter(target.id) }
                         }
                     }
                 },

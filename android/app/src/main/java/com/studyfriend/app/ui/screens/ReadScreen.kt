@@ -141,6 +141,40 @@ fun ReadScreen(
         }
     }
 
+    // 体验增量轮：阅读时长统计——页面可见期间计时，离开阅读页/切后台把可视时长按
+    // 分钟入账（四舍五入，不足 1 分钟的零头丢弃；ON_PAUSE 已入账置哨兵防双计）。
+    // 写库走 appScope：离开页面协程不取消
+    var readingSinceMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    val readingLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(bookIdForMark, readingLifecycleOwner) {
+        fun flush() {
+            val bid = bookIdForMark ?: return
+            val since = readingSinceMs
+            if (since < 0) return
+            val minutes = Math.round((System.currentTimeMillis() - since) / 60000.0).toInt()
+            readingSinceMs = -1L
+            if (minutes > 0) {
+                app.appScope.launch {
+                    app.database.readingStatDao()
+                        .addMinutes(bid, java.time.LocalDate.now().toString(), minutes)
+                }
+            }
+        }
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> flush()
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME ->
+                    readingSinceMs = System.currentTimeMillis()
+                else -> {}
+            }
+        }
+        readingLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            readingLifecycleOwner.lifecycle.removeObserver(observer)
+            flush()
+        }
+    }
+
     // v7 目录+书签抽屉数据：全书章列表（level=1）与本书书签，跟随 bookId 就绪后收集
     @Suppress("ProduceStateDoesNotAssignValue")
     val tocChapters by produceState<List<com.studyfriend.app.data.db.ChapterWithAsset>>(emptyList(), bookIdForMark) {

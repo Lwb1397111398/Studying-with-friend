@@ -118,10 +118,10 @@ class NoteRunnerGateTest {
 
     private fun roughRunner(chatFn: ChatJsonFn) = RoughReadRunner(db, ApplicationProvider.getApplicationContext(), SettingsRepository(db, FakeSecretStore()), chatFn, scope, gate)
 
-    // ---------- 1. 讲解进行中 → 粗读被拒 ----------
+    // ---------- 1. 讲解进行中 → 粗读排队，讲解结束后自动接力 ----------
 
     @Test
-    fun noteRunning_rejectsRoughStart(): Unit = runBlocking {
+    fun noteRunning_roughQueuesThenRunsAfterRelease(): Unit = runBlocking {
         val hold = CompletableDeferred<Unit>()
         val note = noteRunner(noteChatFn(hold))
         val rough = roughRunner(roughChatFn(null))
@@ -129,17 +129,17 @@ class NoteRunnerGateTest {
         note.start(ch)
         awaitNoteState(note) { it is NoteRunState.Running }
         rough.start(ch)
-        val failed = awaitRoughState(rough) { it is RoughRunState.Failed } as RoughRunState.Failed
-
-        assertTrue(failed.message.contains("另一项 AI 任务"))
-        hold.complete(Unit)
+        // 体验增量轮：不再立即拒绝，而是发 Queued 等待
+        awaitRoughState(rough) { it is RoughRunState.Queued }
+        hold.complete(Unit) // 讲解结束释放锁 → 粗读自动开跑
         awaitNoteState(note) { it is NoteRunState.Succeeded }
+        awaitRoughState(rough) { it is RoughRunState.Succeeded }
     }
 
-    // ---------- 2. 粗读进行中 → 讲解被拒 ----------
+    // ---------- 2. 粗读进行中 → 讲解排队，粗读结束后自动接力 ----------
 
     @Test
-    fun roughRunning_rejectsNoteStart(): Unit = runBlocking {
+    fun roughRunning_noteQueuesThenRunsAfterRelease(): Unit = runBlocking {
         val hold = CompletableDeferred<Unit>()
         val rough = roughRunner(roughChatFn(hold))
         val note = noteRunner(noteChatFn(null))
@@ -147,11 +147,32 @@ class NoteRunnerGateTest {
         rough.start(ch)
         awaitRoughState(rough) { it is RoughRunState.Running }
         note.start(ch)
-        val failed = awaitNoteState(note) { it is NoteRunState.Failed } as NoteRunState.Failed
-
-        assertTrue(failed.message.contains("另一项 AI 任务"))
+        awaitNoteState(note) { it is NoteRunState.Queued }
         hold.complete(Unit)
         awaitRoughState(rough) { it is RoughRunState.Succeeded }
+        awaitNoteState(note) { it is NoteRunState.Succeeded }
+    }
+
+    // ---------- 2b. 排队等待期间 stop：取消排队，不打扰持锁任务 ----------
+
+    @Test
+    fun queuedStop_cancelsWaitingWithoutTouchingHolder(): Unit = runBlocking {
+        val hold = CompletableDeferred<Unit>()
+        val rough = roughRunner(roughChatFn(hold))
+        val note = noteRunner(noteChatFn(null))
+
+        rough.start(ch)
+        awaitRoughState(rough) { it is RoughRunState.Running }
+        note.start(ch)
+        awaitNoteState(note) { it is NoteRunState.Queued }
+        note.stop() // 取消排队
+
+        awaitNoteState(note) { it is NoteRunState.Idle }
+        assertTrue("锁仍由粗读持有", gate.label.value == "粗读")
+        hold.complete(Unit)
+        awaitRoughState(rough) { it is RoughRunState.Succeeded }
+        // 粗读结束后锁空出（被取消的排队任务不应再来抢）
+        assertTrue(gate.label.value == null)
     }
 
     // ---------- 3. 同 runner 自替换：join 后重获 gate 正常完成 ----------

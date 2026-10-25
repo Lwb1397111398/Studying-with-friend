@@ -136,6 +136,22 @@ window.appInit = function (jsonText, darkMode) {
     try {
       mind.bus.addListener('operation', function () { scheduleSave(); updateButtons(); });
     } catch (e) { console.log('bus fail: ' + e); }
+    // 体验增量轮：节点点击上报（Kotlin 侧按节点文本匹配章节标题跳章）。
+    // mind-elixir 的 selectNode 在单击选中时触发；文本取 .text 子元素保底 textContent
+    try {
+      mind.bus.addListener('selectNode', function (node) {
+        if (!node) return;
+        var t = '';
+        try {
+          var textEl = node.querySelector ? node.querySelector('.text') : null;
+          t = (textEl && textEl.textContent) || node.textContent || '';
+        } catch (e) {}
+        t = String(t).trim();
+        if (t) {
+          try { AndroidBridge.onNodeClick(t); } catch (e) { /* 非安卓容器（本地调试）静默 */ }
+        }
+      });
+    } catch (e) { console.log('selectNode bus fail: ' + e); }
     setTimeout(function () { updateButtons(); }, 60);
   } catch (e) {
     console.log('appInit exception: ' + (e && e.stack || e));

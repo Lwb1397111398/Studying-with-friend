@@ -237,7 +237,7 @@ class RoughReadPlanner(
             } catch (e: Exception) {
                 lastError = e
             }
-            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError) // 末次失败不再等
+            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError, attempt) // 末次失败不再等
         }
         throw lastError ?: PlannerException("本块执行失败")
     }
@@ -350,7 +350,7 @@ class RoughReadPlanner(
             } catch (e: Exception) {
                 lastError = e
             }
-            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError)
+            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError, attempt)
         }
 
         // 归并失败：非 force 且旧 gist 非空 → 保留旧值；否则（force 重标注 / 首次）写降级新值

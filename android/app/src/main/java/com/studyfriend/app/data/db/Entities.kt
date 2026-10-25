@@ -372,3 +372,26 @@ data class ParaMemoEntity(
     val text: String,
     val createdAt: Long,
 )
+
+/**
+ * 阅读时长统计（体验增量轮）：一本书一天一行，minutes 累计（upsert 递增）。
+ * 复合主键 (bookId, day)，day 为本地时区 yyyy-MM-dd；删书 CASCADE。
+ * 复合主键前缀已覆盖 bookId，不另建索引。
+ */
+@Entity(
+    tableName = "reading_stats",
+    primaryKeys = ["bookId", "day"],
+    foreignKeys = [
+        ForeignKey(
+            entity = BookEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["bookId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class ReadingStatEntity(
+    val bookId: Long,
+    val day: String,
+    val minutes: Int,
+)

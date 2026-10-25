@@ -168,7 +168,7 @@ class NotePlanner(
             } catch (e: Exception) {
                 lastError = e
             }
-            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError)
+            if (attempt < ATTEMPTS - 1) plannerBackoff(lastError, attempt)
         }
         throw lastError ?: PlannerException("本单元讲解失败")
     }

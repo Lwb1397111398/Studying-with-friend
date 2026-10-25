@@ -208,6 +208,17 @@ private fun OverviewGeneratePane(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         when (val s = state) {
+            // 排队等待中（体验增量轮）：前一个 AI 任务释放全局锁后自动开跑
+            is OverviewRunState.Queued -> if (s.bookId == bookId) {
+                Text("排队等待中…", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "搭子正在忙另一项 AI 任务，完成后自动开始通览全书",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                Button(onClick = onStop) { Text("取消排队") }
+            }
+
             is OverviewRunState.Streaming -> if (s.bookId == bookId) {
                 Text("搭子正在通览全书…", style = MaterialTheme.typography.titleMedium)
                 Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {

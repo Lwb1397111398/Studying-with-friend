@@ -20,8 +20,9 @@ import androidx.room.RoomDatabase
         BookmarkEntity::class,
         QaHistoryEntity::class,
         ParaMemoEntity::class,
+        ReadingStatEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 abstract class StudyDatabase : RoomDatabase() {
@@ -38,6 +39,8 @@ abstract class StudyDatabase : RoomDatabase() {
     abstract fun bookmarkDao(): BookmarkDao
     abstract fun qaHistoryDao(): QaHistoryDao
     abstract fun paraMemoDao(): ParaMemoDao
+    abstract fun readingStatDao(): ReadingStatDao
+    abstract fun backupDao(): BackupDao
 
     companion object {
         fun build(context: Context): StudyDatabase =

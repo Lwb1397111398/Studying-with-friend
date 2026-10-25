@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 /** 全书总览生成四态（计划 M6 §2.6，与 SummaryRunState 同构）：Streaming.partial 为本次尝试累计 raw */
 sealed interface OverviewRunState {
     data object Idle : OverviewRunState
+    data class Queued(val bookId: Long) : OverviewRunState
     data class Streaming(val bookId: Long, val partial: String) : OverviewRunState
     data class Succeeded(val bookId: Long, val message: String) : OverviewRunState
     data class Failed(val bookId: Long, val message: String, val keyIssue: Boolean = false) : OverviewRunState
@@ -46,6 +47,7 @@ class OverviewRunner(
         _state.value = state
     }
     override fun idleState(): OverviewRunState = OverviewRunState.Idle
+    override fun queuedState(id: Long): OverviewRunState = OverviewRunState.Queued(id)
     override fun failureState(id: Long, message: String, keyIssue: Boolean) =
         OverviewRunState.Failed(id, message, keyIssue)
 

@@ -289,4 +289,34 @@ fun migrate7To8_paraMemosTableUsable() {
         }
     }
 }
+
+@Test
+fun migrate8To9_readingStatsUsable() {
+    val dbName = "migration-test-89.db"
+    helper.createDatabase(dbName, 8).use { v8 ->
+        v8.execSQL(
+            "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                "overviewJson, createdAt, updatedAt) VALUES ('旧书', '', 'TXT', '', 'READY', 1, NULL, 1, 1)",
+        )
+    }
+    // 跑 8→9 迁移 + schema 校验（reading_stats 建表与 Entity 对齐，失败即抛）
+    helper.runMigrationsAndValidate(dbName, 9, true, MIGRATIONS.last()).use { v9 ->
+        // 写读回验：同书同天递增（DAO 层的 addMinutes 走 INSERT OR IGNORE + UPDATE，
+        // 这里手工 SQL 等价复刻——Robolectric legacy SQLite 不认 UPSERT 语法）
+        v9.execSQL("INSERT INTO reading_stats (bookId, day, minutes) VALUES (1, '2026-10-25', 12)")
+        v9.execSQL(
+            "INSERT OR IGNORE INTO reading_stats (bookId, day, minutes) VALUES (1, '2026-10-25', 3)",
+        )
+        v9.execSQL(
+            "UPDATE reading_stats SET minutes = minutes + 3 WHERE bookId = 1 AND day = '2026-10-25'",
+        )
+        v9.query("SELECT day, minutes FROM reading_stats").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals("2026-10-25", cur.getString(0))
+            assertEquals(15, cur.getInt(1))
+        }
+        // 删书 CASCADE 清统计的语义在 DataV9Test 内存库验证——helper 库不开 FK
+        // enforcement，级联删除不会触发（Room 打开真实库时才启用 FK）
+    }
+}
 }

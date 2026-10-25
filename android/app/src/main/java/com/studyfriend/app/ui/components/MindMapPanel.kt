@@ -23,6 +23,7 @@ class MapBridge(
     private val onMapChangedCb: (String) -> Unit,
     private val onLogCb: (String) -> Unit,
     private val onPngCb: (String) -> Unit = {},
+    private val onNodeClickCb: (String) -> Unit = {},
 ) {
     @JavascriptInterface
     fun onReady() {
@@ -42,6 +43,12 @@ class MapBridge(
     @JavascriptInterface
     fun onPngReady(base64: String) {
         onPngCb(base64)
+    }
+
+    /** 节点点击（体验增量轮）：topic=节点文本，Kotlin 侧匹配章节标题跳章 */
+    @JavascriptInterface
+    fun onNodeClick(topic: String) {
+        onNodeClickCb(topic)
     }
 }
 
@@ -81,12 +88,14 @@ fun MindMapPanel(
     modifier: Modifier = Modifier,
     darkTheme: Boolean = isSystemInDarkTheme(),
     onPngReady: (String) -> Unit = {},
+    onNodeClick: (String) -> Unit = {},
 ) {
     val latestOnMapChanged = rememberUpdatedState(onMapChanged)
     val latestOnController = rememberUpdatedState(onController)
     val latestEditable = rememberUpdatedState(editable)
     val latestDark = rememberUpdatedState(darkTheme)
     val latestOnPngReady = rememberUpdatedState(onPngReady)
+    val latestOnNodeClick = rememberUpdatedState(onNodeClick)
 
     var pageLoaded by remember { mutableStateOf(false) }
     // 最近一次本地产生的数据（自己拖动导致的变化不回推画布，防循环）
@@ -138,6 +147,7 @@ fun MindMapPanel(
                         },
                         onLogCb = { Log.i("MindMap", it) },
                         onPngCb = { base64 -> latestOnPngReady.value(base64) },
+                        onNodeClickCb = { topic -> latestOnNodeClick.value(topic) },
                     ),
                     "AndroidBridge",
                 )

@@ -83,6 +83,9 @@ test/.../M4bUiSmokeTest.kt      3 例（Compose 冒烟）
 
 ## 最后更新
 
+- 2026-10-26 **数据安全与体验增量轮：AiTaskRunner 排队化 + 429 退避递增**：①AiTaskRunner（四 Runner 共享骨架）抢锁从 tryBegin 立即拒绝改 gate.awaitBegin 排队——新抽象 queuedState(id)（四子类各加 Queued 变体）、10 分钟超时走 Failed「排队等待超时」、stop 挂起期间可取消（锁无半获得）；排队/失败/取消原因同步写 DiagLog（设置页可导出，见 M3）；NoteRunnerGateTest 前两例改排队接力语义+新增排队取消例。②NotePlanner 的 plannerBackoff 传 attempt：429 退避 30→60→120s 封顶（backoffDelayMs 纯函数）。
+
+
 - 2026-10-25 **学习闭环轮：换个讲法（NoteCard）**：NoteCard 加可选参数 onReNote（默认 null 不渲染按钮，向后兼容），ReadScreen 传入时底部右对齐「没看懂？换个讲法」TextButton——点击带 ParaNoteEntity+单元成员原文进 ReNoteSheet 流式重讲（详见 M4a 最后更新；**不落库**，ParaNoteEntity/promptVersion 缓存与批量重生成链路零改动）。
 
 - 2026-10-11 **优化批次：讲解 2 路并发**——NotePlanner 串行改共享游标 worker 池×2（单元互不依赖；失败 CAS 取最小序号保"中断于第N条"语义，在途单元跑完落库；删旧插新包 withTransaction 防并发写裂）；prev/next 上下文 800→200 字（边界段最多发 3 遍，整章约 1/3 输入是重复 token）。测试：FakeChat 计数改原子（并发后真同时调用）、中断用例改按单元身份键（"context_prev":"正文0）。2 路并发下长章等待约砍半（端点限流约束下的保守值）。

@@ -168,7 +168,20 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
     }
 }
 
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // 体验增量轮：阅读时长统计新表（一本书一天一行，minutes upsert 递增）。
+        // createSql 逐字段抄自 Entity 定义，漏抄会被迁移校验报红
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `reading_stats` (`bookId` INTEGER NOT NULL, " +
+                "`day` TEXT NOT NULL, `minutes` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`bookId`, `day`), " +
+                "FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        )
+    }
+}
+
 val MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-    MIGRATION_7_8,
+    MIGRATION_7_8, MIGRATION_8_9,
 )

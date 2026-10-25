@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 sealed interface RoughRunState {
     data object Idle : RoughRunState
 
+    /** 排队等待中（体验增量轮）：前面有别的 AI 任务在跑，等它释放全局锁 */
+    data class Queued(val chapterId: Long) : RoughRunState
+
     data class Running(
         val chapterId: Long,
         val done: Int,
@@ -70,6 +73,7 @@ class RoughReadRunner(
         _state.value = state
     }
     override fun idleState(): RoughRunState = RoughRunState.Idle
+    override fun queuedState(id: Long): RoughRunState = RoughRunState.Queued(id)
     override fun failureState(id: Long, message: String, keyIssue: Boolean) =
         RoughRunState.Failed(id, message, keyIssue)
 

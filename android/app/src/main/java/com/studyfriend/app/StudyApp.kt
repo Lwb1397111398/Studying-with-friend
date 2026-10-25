@@ -81,6 +81,9 @@ class StudyApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 诊断日志（数据安全轮）：崩溃捕获 + AI 任务失败原因，filesDir/logs/ 滚动 7 天；
+        // 设置页「导出诊断日志」可把最近几天合并发给 AI 排障。须在任何 Runner 启动前挂好
+        com.studyfriend.app.data.DiagLog.install(this)
         // 视觉后台队列断点续跑（OPT-F）：进程死亡/设备重启后，把仍有 PENDING 页的书
         // 重新挂上 WorkManager（KEEP 不打断在跑的任务；WorkManager 自身持久化是主保障）
         appScope.launch { VisionScheduler.restorePending(database, this@StudyApp) }

@@ -73,6 +73,13 @@ test/.../SettingsRepoTest.kt   9 用例（-presets 用例，+noteModel 往返与
 - 模型列表拉取复用 `AiClient.listModels(baseUrl, apiKey)`；VM 层照抄 ModelsViewModel.fetchModels 的目标解析模式即可加新角色。
 
 ## 最后更新
+
+- 2026-10-26 **数据安全与体验增量轮：设置页「备份与恢复」+「诊断」区块 + AiGate 排队**：
+  ①**备份与恢复**（BackupSection）：SAF CreateDocument 导出 JSON（默认名 studyfriend-backup-yyyyMMdd-HHmm.json）+ OpenDocument 选文件→先只 peek 解析校验（版本/引用完整性，不动库）→确认框明示「当前全部学习数据将被覆盖」→confirmRestore 才整库替换（BackupManager 见 M1）；恢复完成回读设置页五项状态防残留旧值；
+  ②**诊断日志**（`data/DiagLog.kt` object，StudyApp.onCreate 挂载）：filesDir/logs/ 按天分文件滚动保留 7 天；崩溃捕获挂 Thread.setDefaultUncaughtExceptionHandler（先写盘再交原 handler）；AiTaskRunner 四 Runner 的失败/取消/占线原因写入（一处埋点覆盖四个任务）；设置页「导出诊断日志」按钮 SAF 存最近 7 天合并 txt（DiagLogTest 5 例）；
+  ③**AI 排队**：AiGate 加 awaitBegin(tag, timeoutMs)（Mutex.lock 挂起+withTimeoutOrNull，取消即退出队列无半获得锁）→ AiTaskRunner 抢锁从 tryLock 立即拒绝改排队（Queued 态→UI「排队等待中」，10 分钟超时失败态；stop 可取消排队），AiGateTest 4 例。
+  AI 配置零变化。
+
 - 2026-10-25 **功能补齐轮新增设置项（SettingsScreen + SettingsViewModel + SettingsRepository）**：①外观三 FilterChip（system/light/dark → MainActivity watch 即时生效）；②朗读语速 Slider 0.5~2.0 倍（KV `tts_rate`，拖完落库，正文听书与记忆思路朗读共用）；③复习到期提醒 Switch（KV `review_reminder` 默认开，开关同步注册/取消 WorkManager 每日任务——ReviewReminderWorker.schedule/cancel 必须包 runCatching，Robolectric 沙盒 WorkManager 未初始化会炸 21 个 UI 冒烟测试）；Android 13+ 打开开关时顺带请求 POST_NOTIFICATIONS 权限（rememberLauncherForActivityResult）。AI 配置零变化。
 
 - 2026-10-11 **优化批次**：AiBudgets 从单一输入预算扩为输出预算+超时集中地（OUTPUT_TOKENS_PLANNER=16000、粗读线性公式常量、视觉页 8000/判定 2000、连接/读超时五档）；NotePlanner/SummaryPlanner/OverviewPlanner/RoughReadPlanner/VisionTranscriber/TocVisionParser/AiClient 九处字面量收口引用。

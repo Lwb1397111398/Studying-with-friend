@@ -41,6 +41,7 @@ import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.BookRepository
 import com.studyfriend.app.data.db.DueItem
 import com.studyfriend.app.data.db.QuizAttemptEntity
+import com.studyfriend.app.data.db.computeStreak
 import com.studyfriend.app.data.study.DAY_MS
 import com.studyfriend.app.data.study.QuizCodec
 import com.studyfriend.app.data.study.QuizQuestion
@@ -109,6 +110,27 @@ fun ReviewScreen() {
     }
 
     Column(Modifier.fillMaxSize()) {
+        // 体验增量轮：阅读统计卡（今日/连续/累计）——进页查一次（阅读页按分钟入账）
+        val today = remember { java.time.LocalDate.now().toString() }
+        val stats by produceState<ReadingSummary?>(initialValue = null) {
+            val byDay = app.database.readingStatDao().minutesByDay()
+            value = ReadingSummary(
+                todayMinutes = byDay.firstOrNull { it.day == today }?.minutes ?: 0,
+                streakDays = computeStreak(byDay.map { it.day }.toSet(), java.time.LocalDate.now()),
+                totalMinutes = byDay.sumOf { it.minutes },
+            )
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            StatCell(label = "今日", value = "${stats?.todayMinutes ?: 0} 分钟")
+            StatCell(label = "连续", value = "${stats?.streakDays ?: 0} 天")
+            StatCell(label = "累计", value = "%.1f 小时".format((stats?.totalMinutes ?: 0) / 60f))
+        }
+        HorizontalDivider()
         TabRow(selectedTabIndex = tab) {
             listOf("今日复习", "错题本", "术语").forEachIndexed { i, t ->
                 Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
@@ -127,6 +149,21 @@ fun ReviewScreen() {
             })
             else -> TermsPane(repo = repo)
         }
+    }
+}
+
+/** 统计卡数据（体验增量轮）：minutesByDay 一次查出后内存汇总 */
+private data class ReadingSummary(
+    val todayMinutes: Int,
+    val streakDays: Int,
+    val totalMinutes: Int,
+)
+
+@Composable
+private fun StatCell(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

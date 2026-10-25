@@ -6,6 +6,7 @@ import androidx.room.Embedded
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
@@ -534,4 +535,182 @@ interface ParaMemoDao {
         WHERE m.bookId = :bookId ORDER BY m.createdAt DESC, m.id DESC""",
     )
     fun byBookWithChapterFlow(bookId: Long): Flow<List<ParaMemoWithChapter>>
+}
+
+// ============ 备份与恢复（数据安全轮） ============
+
+/**
+ * 备份导出/整库恢复专用：10 张学习表的全量读、清空与带 id 重插。
+ * 只被 BackupManager 调用；普通业务路径继续走各自 DAO。
+ * 清空顺序子先父后（FK 即时约束下先删子行才不炸）；带 id 插入靠 AUTOINCREMENT
+ * 的 sequence 推进语义保证恢复后新自增 id 不与恢复行冲突。
+ */
+@Dao
+interface BackupDao {
+
+    // ---- 全量读（id 升序，导出文件内容稳定可 diff） ----
+    @Query("SELECT * FROM books ORDER BY id")
+    suspend fun allBooks(): List<BookEntity>
+
+    @Query("SELECT * FROM chapters ORDER BY id")
+    suspend fun allChapters(): List<ChapterEntity>
+
+    @Query("SELECT * FROM paragraphs ORDER BY id")
+    suspend fun allParagraphs(): List<ParagraphEntity>
+
+    @Query("SELECT * FROM para_notes ORDER BY id")
+    suspend fun allParaNotes(): List<ParaNoteEntity>
+
+    @Query("SELECT * FROM chapter_assets ORDER BY chapterId")
+    suspend fun allChapterAssets(): List<ChapterAssetEntity>
+
+    @Query("SELECT * FROM quiz_attempts ORDER BY id")
+    suspend fun allQuizAttempts(): List<QuizAttemptEntity>
+
+    @Query("SELECT * FROM review_items ORDER BY id")
+    suspend fun allReviewItems(): List<ReviewItemEntity>
+
+    @Query("SELECT * FROM bookmarks ORDER BY id")
+    suspend fun allBookmarks(): List<BookmarkEntity>
+
+    @Query("SELECT * FROM qa_history ORDER BY id")
+    suspend fun allQaHistory(): List<QaHistoryEntity>
+
+    @Query("SELECT * FROM para_memos ORDER BY id")
+    suspend fun allParaMemos(): List<ParaMemoEntity>
+
+    @Query("SELECT * FROM settings ORDER BY `key`")
+    suspend fun allSettings(): List<SettingEntity>
+
+    @Query("SELECT * FROM reading_stats ORDER BY bookId, day")
+    suspend fun allReadingStats(): List<ReadingStatEntity>
+
+    // ---- 清空（子先父后；figures/vision_queue 不在备份里，但同属「整库替换」语义一并清） ----
+    @Query("DELETE FROM paragraphs")
+    suspend fun clearParagraphs()
+
+    @Query("DELETE FROM para_notes")
+    suspend fun clearParaNotes()
+
+    @Query("DELETE FROM chapter_assets")
+    suspend fun clearChapterAssets()
+
+    @Query("DELETE FROM quiz_attempts")
+    suspend fun clearQuizAttempts()
+
+    @Query("DELETE FROM review_items")
+    suspend fun clearReviewItems()
+
+    @Query("DELETE FROM bookmarks")
+    suspend fun clearBookmarks()
+
+    @Query("DELETE FROM qa_history")
+    suspend fun clearQaHistory()
+
+    @Query("DELETE FROM para_memos")
+    suspend fun clearParaMemos()
+
+    @Query("DELETE FROM reading_stats")
+    suspend fun clearReadingStats()
+
+    @Query("DELETE FROM figures")
+    suspend fun clearFigures()
+
+    @Query("DELETE FROM vision_queue")
+    suspend fun clearVisionQueue()
+
+    @Query("DELETE FROM chapters")
+    suspend fun clearChapters()
+
+    @Query("DELETE FROM books")
+    suspend fun clearBooks()
+
+    @Query("DELETE FROM settings WHERE `key` = :key")
+    suspend fun deleteSetting(key: String)
+
+    // ---- 带 id 重插（恢复路径专用；表已清空，无冲突） ----
+    @Insert
+    suspend fun insertBooks(books: List<BookEntity>)
+
+    @Insert
+    suspend fun insertChapters(chapters: List<ChapterEntity>)
+
+    @Insert
+    suspend fun insertParagraphs(paragraphs: List<ParagraphEntity>)
+
+    @Insert
+    suspend fun insertParaNotes(notes: List<ParaNoteEntity>)
+
+    @Insert
+    suspend fun insertChapterAssets(assets: List<ChapterAssetEntity>)
+
+    @Insert
+    suspend fun insertQuizAttempts(attempts: List<QuizAttemptEntity>)
+
+    @Insert
+    suspend fun insertReviewItems(items: List<ReviewItemEntity>)
+
+    @Insert
+    suspend fun insertBookmarks(bookmarks: List<BookmarkEntity>)
+
+    @Insert
+    suspend fun insertQaHistory(entries: List<QaHistoryEntity>)
+
+    @Insert
+    suspend fun insertParaMemos(memos: List<ParaMemoEntity>)
+
+    @Insert
+    suspend fun insertReadingStats(stats: List<ReadingStatEntity>)
+
+    @Insert
+    suspend fun insertSettings(settings: List<SettingEntity>)
+}
+
+// ============ 阅读统计（体验增量轮） ============
+
+/** 按天合计行（统计卡数据源）：day yyyy-MM-dd + 当天全部书分钟合计 */
+data class DayMinutes(
+    val day: String,
+    val minutes: Int,
+)
+
+@Dao
+interface ReadingStatDao {
+
+    /** 当前累计值（无行=null） */
+    @Query("SELECT minutes FROM reading_stats WHERE bookId = :bookId AND day = :day")
+    suspend fun minutesFor(bookId: Long, day: String): Int?
+
+    @Upsert
+    suspend fun upsert(stat: ReadingStatEntity)
+
+    /** 分钟入账：同书同天读出旧值后递增写回（分钟粒度）。
+     *  不用 SQL UPSERT（ON CONFLICT DO UPDATE）——Robolectric 的 legacy SQLite
+     *  内核低于 3.24 不认该语法，@Transaction 默认方法 + @Upsert 全环境可跑 */
+    @Transaction
+    suspend fun addMinutes(bookId: Long, day: String, minutes: Int) {
+        upsert(ReadingStatEntity(bookId, day, (minutesFor(bookId, day) ?: 0) + minutes))
+    }
+
+    /** 某天全部书分钟合计（无行=0） */
+    @Query("SELECT COALESCE(SUM(minutes), 0) FROM reading_stats WHERE day = :day")
+    suspend fun minutesOnDay(day: String): Int
+
+    /** 全部天数行（day 降序）：今日/累计/连续天数一次查齐，复习中心统计卡用 */
+    @Query("SELECT day AS day, SUM(minutes) AS minutes FROM reading_stats GROUP BY day ORDER BY day DESC")
+    suspend fun minutesByDay(): List<DayMinutes>
+}
+
+/**
+ * 连续阅读天数（体验增量轮）：从今天往回数有记录的连续日；今天还没读不打断
+ * （从昨天起算），一旦断档即停。纯函数，方便单测。
+ */
+fun computeStreak(days: Set<String>, today: java.time.LocalDate): Int {
+    var streak = 0
+    var cursor = if (today.toString() in days) today else today.minusDays(1)
+    while (cursor.toString() in days) {
+        streak++
+        cursor = cursor.minusDays(1)
+    }
+    return streak
 }

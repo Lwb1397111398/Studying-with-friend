@@ -149,6 +149,9 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 
 ## 最后更新
 
+- 2026-10-26 **数据安全与体验增量轮**：①**阅读时长统计**（ReadScreen）：markReading 后加计时 DisposableEffect——页面可见期间计时，ON_PAUSE/离开页 flush 按「分钟」入账 reading_stats（四舍五入，不足 1 分钟丢弃，ON_PAUSE 置哨兵 -1 防双计，写库走 appScope 不随退页取消）；②**粗读排队**：RoughRunState 加 Queued 态（AiTaskRunner 骨架排队化，见 M3），ReadTools chip 显示「粗读排队中/讲解排队中」+ 状态行「排队等待中（搭子正忙别的 AI 任务）」可停止；③**429 退避递增**：RoughReadPlanner 两处 plannerBackoff 传 attempt，429 按重试次数 30→60→120s 封顶（backoffDelayMs 纯函数，PlannerBackoffTest 2 例）。
+
+
 - 2026-10-25 **学习闭环轮：段落批注 + 换个讲法**：①划词浮条五按钮→六按钮（+「记一笔」）：SelectionFloatBar 宽 292→356dp，选中态快照进 memoDraft（弹 Dialog 时浮条先关）；②MemoDraftDialog（ReadMemos.kt：预览选中原文+输入笔记，空白不保存）与 ParaMemosDialog（段内批注列表：引用+内容+时间+逐条删除）；③ParaRow 有批注的段右上角 16dp 铅笔标记（Icons.Filled.Edit，Icons/IconButton/Alignment import 补齐；次级角色段不显示）；④ReadTocSheet 下半区改「书签/批注」双 FilterChip Tab（批注 Tab=全书笔记列表：章名+「quote」+内容预览+删除+点击跳段；paraId 直接定位无需像书签按 idx 反查，scrollToItem 包 scope.launch——挂起函数坑）；⑤NoteCard 加「没看懂？换个讲法」按钮 → ReNoteSheet 流式弹层（抄 QuickQaSheet 核心：打开即问/100ms 节流/无 Key 引导/不走 AiGate；**不落库不覆盖原讲解**，explain-note-v2 缓存语义不动；prompt `renote.txt`，走讲解模型 temp 0.6/4000 tokens；输入=单元成员原文 4000 字+旧 friendly 1500+旧 analogy 500）。数据层见 M1（para_memos v8）。
 
 - 2026-10-25 **TTS 双模式轮**（老板点名「同一台手机听的思维系统语音 OK、学伴报未识别到语音模型」→ 根因修复+扩双引擎，详见语音朗读模块总览）：①根因修复——Manifest 补 `<queries>` TTS_SERVICE（targetSdk 30+ 包可见性，缺它 TextToSpeech 绑不上引擎）+ setLanguage 放宽（国产引擎返回 MISSING_DATA 不再一票否决）+ 初始化 6 秒超时；②本地离线引擎 SherpaTtsEngine（sherpa-onnx kokoro 205MB，经验学自听的思维：官方完整 aar + pickFirst 解同名 ort 冲突——剔除共享微软 1.22.0 方案实测失败（versioned symbol），JNI 回调必须 Java）；③TtsModelManager 模型下载（hf-mirror 直连 + .part 断点续传 + 200 自愈 + **小文件 8 路并发**（串行实测 13s/个要 40 分钟），M7 同款思路）；④TtsPlayer 双模式分发 + 自动回落 + notice；⑤设置页「朗读引擎」选择与模型下载管理。模拟器实测：系统模式分级文案正确（AOSP 无引擎报「本机没有可用的系统朗读引擎」）、模型下载全量完成（205.3MB 就绪判定过）、**离线朗读完整跑通**（模型加载→逐句合成→AudioTrack 出声→进度推进→自动滚动跟随）。

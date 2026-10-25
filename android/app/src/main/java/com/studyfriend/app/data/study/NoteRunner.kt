@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 sealed interface NoteRunState {
     data object Idle : NoteRunState
 
+    /** 排队等待中（体验增量轮）：前面有别的 AI 任务在跑，等它释放全局锁 */
+    data class Queued(val chapterId: Long) : NoteRunState
+
     data class Running(
         val chapterId: Long,
         val done: Int,
@@ -67,6 +70,7 @@ class NoteRunner(
         _state.value = state
     }
     override fun idleState(): NoteRunState = NoteRunState.Idle
+    override fun queuedState(id: Long): NoteRunState = NoteRunState.Queued(id)
     override fun failureState(id: Long, message: String, keyIssue: Boolean) =
         NoteRunState.Failed(id, message, keyIssue)
 
