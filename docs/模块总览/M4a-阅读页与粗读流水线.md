@@ -30,6 +30,27 @@
 | 结构化错误 | 无 Key/密钥失效 → `MissingKeyException`（`PlannerException` 子类）→ Failed.keyIssue=true → UI"去设置"按钮，避免文案字符串耦合 |
 | 标记读完 | `app.appScope.launch` 写 readState=DONE——应用级作用域，用户点完立即返回上一页也不取消写库 |
 
+## 入口文件
+
+```
+ui/screens/ReadScreen.kt        阅读页主屏（状态中枢：沉浸/划词/问答/字号/目录书签/位置记忆/听书跟随）
+ui/screens/ReadTools.kt         工具 chips 行 + 字号行距 Slider + 取词浮条
+ui/screens/ReadCards.kt         段落行渲染（SelectableText/高亮/图锚/听书淡染）+ 要点卡/讲解卡
+ui/screens/ChapterListScreen.kt 章目录页（P5 章节树）
+ui/screens/ReadTocSheet.kt      目录+书签抽屉
+ui/screens/SearchScreen.kt      全书搜索页
+ui/screens/QuickQaSheet.kt      随手问流式问答弹层
+ui/screens/FigureGallery.kt     插图混排与全屏预览
+ui/nav/AppNav.kt                BOOK/READ/SEARCH 路由（与 M0 共享）
+data/study/RoughReadPlanner.kt  粗读流水线 run() 入口
+data/study/RoughReadRunner.kt   粗读全局单例状态机
+data/study/QuickQa.kt           随手问消息组装
+data/tts/TtsPlayer.kt           朗读控制状态机（正文听书）
+data/tts/AndroidTtsEngine.kt    系统 TTS 封装
+```
+
+完整文件清单（含测试与纯函数）见下节「关键文件」。
+
 ## 关键文件
 
 ```
