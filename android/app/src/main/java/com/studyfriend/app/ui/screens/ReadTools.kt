@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,6 +43,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.study.NoteRunState
 import com.studyfriend.app.data.study.RoughRunState
@@ -407,27 +409,34 @@ internal fun FontSizeSheet(
     }
 }
 
-/** 划词浮条（P7）：定位在选中文字上方，提供问含义/问整段/复制/关闭 */
+/**
+ * 划词浮条（P7 + 划词扩选轮）：定位在选中文字上方，问含义问的就是当前高亮的整块；
+ * 「扩句/扩段」一键改选区（拖拽把手之外的快捷路径），复制取当前高亮。
+ */
 @Composable
 internal fun SelectionFloatBar(
     anchor: IntOffset,
     boxOrigin: IntOffset,
     onMeaning: () -> Unit,
-    onPara: () -> Unit,
+    onExpandSentence: () -> Unit,
+    onExpandPara: () -> Unit,
     onCopy: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val density = LocalDensity.current
     val screenWpx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }.toInt()
-    val barWpx = with(density) { 300.dp.toPx() }.toInt()
+    val barWpx = with(density) { 292.dp.toPx() }.toInt()
     val barHpx = with(density) { 52.dp.toPx() }.toInt()
     val gap = with(density) { 8.dp.toPx() }.toInt()
     val x = (anchor.x - boxOrigin.x - barWpx / 2).coerceIn(0, (screenWpx - barWpx).coerceAtLeast(0))
     val y = (anchor.y - boxOrigin.y - barHpx - gap).coerceAtLeast(0)
+    // dismissOnClickOutside 必须显式关：部分 Compose 版本非 focusable Popup 也会把浮条外
+    // 的按下判成 outside → onDismissRequest 清选区，拖把手 down 一落选区就没了（模拟器实测）
     Popup(
         alignment = Alignment.TopStart,
         offset = IntOffset(x, y),
         onDismissRequest = onDismiss,
+        properties = PopupProperties(dismissOnClickOutside = false),
     ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
@@ -435,16 +444,31 @@ internal fun SelectionFloatBar(
             color = MaterialTheme.colorScheme.surface,
         ) {
             Row(
-                Modifier.padding(horizontal = 4.dp),
+                Modifier.padding(horizontal = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onMeaning) {
+                TextButton(
+                    onClick = onMeaning,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
                     Text("问含义", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
-                TextButton(onClick = onPara) {
-                    Text("问整段", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                TextButton(
+                    onClick = onExpandSentence,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("扩句", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
-                TextButton(onClick = onCopy) {
+                TextButton(
+                    onClick = onExpandPara,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("扩段", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                }
+                TextButton(
+                    onClick = onCopy,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
                     Text("复制", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = onDismiss) {

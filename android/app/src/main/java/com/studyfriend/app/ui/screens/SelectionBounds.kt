@@ -37,6 +37,27 @@ object SelectionBounds {
     }
 
     /**
+     * 长按点取「词组」（划词默认整句前的定位）：汉字连续段（到标点/空白/非汉字停）
+     * 成一个词组，ASCII 段沿用 wordAt，标点/空白取单字符。中文没有空格分词、词典
+     * 分词不可依赖，词组只作扩句定位与把手拖拽的起点，精确范围交给把手与扩句/扩段。
+     */
+    fun phraseAt(text: String, offset: Int): IntRange {
+        if (text.isEmpty()) return IntRange.EMPTY
+        val n = text.length
+        val o = offset.coerceIn(0, n - 1)
+        if (isAsciiWord(text[o])) return wordAt(text, o)
+        if (!isCjk(text[o])) return o..o
+        var s = o
+        var e = o
+        while (s > 0 && isCjk(text[s - 1])) s--
+        while (e < n - 1 && isCjk(text[e + 1])) e++
+        return s..e
+    }
+
+    /** 汉字（CJK 统一表意文字基本区 + 扩展 A）：中文书正文主体字符 */
+    private fun isCjk(c: Char): Boolean = c in '\u3400'..'\u9FFF'
+
+    /**
      * 把选中范围扩展到所在整句（闭区间）：从选中尾部向后找最近句末标点（吸收其后的
      * 连续右引号），从选中头部向前找最近句末标点/换行（跳过其前应归前一句的右引号）；
      * 段内没有句末标点时扩到整段（换行收句，不跨段）。

@@ -174,8 +174,10 @@ fun ReadScreen(
         ttsParaId = null
     }
 
-    // P7 划词与随手问：selection 驱动高亮+浮条；qaTarget 非空开问答弹层
+    // P7 划词与随手问：selection 驱动高亮+把手+浮条；qaTarget 非空开问答弹层；
+    // 划词扩选轮：拖把手时藏浮条（松手后随新锚点重现），selectionDragging 标记拖动中
     var selection by remember { mutableStateOf<TextSelection?>(null) }
+    var selectionDragging by remember { mutableStateOf(false) }
     var qaTarget by remember { mutableStateOf<QaTarget?>(null) }
     // P7 要点卡折叠（默认收起，「要点」chip 开关）
     var gistExpanded by remember { mutableStateOf(false) }
@@ -381,7 +383,9 @@ fun ReadScreen(
             val listState = rememberLazyListState()
             // 滚动即取消划词：浮条锚点是 window 坐标，滚动后必然错位
             LaunchedEffect(listState.isScrollInProgress) {
-                if (listState.isScrollInProgress) selection = null
+                if (listState.isScrollInProgress) {
+                    selection = null
+                }
             }
             // P5 highlight 定位：段落异步到达后滚到节标题段（v1 只滚动不做高亮底色）；
             // 混排后 LazyColumn 下标 ≠ 段落下标，经 paraId 反查行下标
@@ -536,9 +540,17 @@ fun ReadScreen(
                                 lineHeightMult = readLineHeight,
                                 selectedRange = selection?.takeIf { it.paraId == row.p.id }?.range,
                                 ttsActive = ttsParaId == row.p.id,
-                                onLongPress = { wordRange, anchor ->
-                                    selection = TextSelection(row.p.id, wordRange, anchor)
+                                onLongPress = { range, anchor ->
+                                    selection = TextSelection(row.p.id, range, anchor)
                                 },
+                                // 拖把手改选区（只动 range；锚点由 SelectableText 校准回调更新）
+                                onSelectionChange = { range ->
+                                    selection = selection?.takeIf { it.paraId == row.p.id }?.copy(range = range)
+                                },
+                                onAnchorChange = { anchor ->
+                                    selection = selection?.copy(anchor = anchor)
+                                },
+                                onDragStateChange = { selectionDragging = it },
                                 // v7 沉浸单击必须在文本手势层透传（SelectableText 的 detectTapGestures 消费 tap）
                                 onTap = { chromeVisible = !chromeVisible },
                             )
@@ -562,10 +574,13 @@ fun ReadScreen(
             }
         }
 
-        // 划词浮条：选中段仍存在且区间合法才显示（段落 Flow 刷新后失效自动消失）
+        // 划词浮条：选中段仍存在且区间合法才显示（段落 Flow 刷新后失效自动消失）；
+        // 拖把手期间隐藏（拖完随新锚点重现）
         selection?.let { sel ->
             val selPara = paragraphs.firstOrNull { it.id == sel.paraId }
-            if (selPara != null && selPara.text.isNotEmpty() && sel.range.last < selPara.text.length) {
+            if (selPara != null && selPara.text.isNotEmpty() &&
+                sel.range.last < selPara.text.length && !selectionDragging
+            ) {
                 SelectionFloatBar(
                     anchor = sel.anchor,
                     boxOrigin = rootOrigin,
@@ -580,16 +595,12 @@ fun ReadScreen(
                         qaTarget = target
                         selection = null
                     },
-                    onPara = {
-                        val target = buildQaTarget(
-                            chapter = chapter,
-                            paragraphs = paragraphs,
-                            para = selPara,
-                            selectionText = selPara.text,
-                            question = QuickQa.ASK_PARA,
-                        )
-                        qaTarget = target
-                        selection = null
+                    onExpandSentence = {
+                        val expanded = SelectionBounds.expandToSentence(selPara.text, sel.range.first, sel.range.last)
+                        selection = sel.copy(range = expanded)
+                    },
+                    onExpandPara = {
+                        selection = sel.copy(range = 0 until selPara.text.length)
                     },
                     onCopy = {
                         clipboard.setText(AnnotatedString(selPara.text.substring(sel.range.first, sel.range.last + 1)))

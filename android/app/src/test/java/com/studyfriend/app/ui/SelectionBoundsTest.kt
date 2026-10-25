@@ -110,4 +110,49 @@ class SelectionBoundsTest {
         // 越界不崩，coerce 到合法范围
         assertEquals(0..2, SelectionBounds.expandToSentence("abc", 10, 20))
     }
+
+    // ---- phraseAt（划词扩选轮：长按默认选句前的词组定位） ----
+
+    @Test
+    fun phraseAt_cjkRunIsOnePhrase() {
+        // 汉字连续段成一个词组，标点/空白是天然边界
+        assertEquals(0..1, SelectionBounds.phraseAt("你好。世界", 1))
+        assertEquals(3..4, SelectionBounds.phraseAt("你好。世界", 4))
+        assertEquals(0..1, SelectionBounds.phraseAt("你好 世界", 1))
+    }
+
+    @Test
+    fun phraseAt_asciiReusesWordAt() {
+        assertEquals(0..4, SelectionBounds.phraseAt("hello 世界", 3))
+        assertEquals(3..6, SelectionBounds.phraseAt("民法典2026条", 5))
+    }
+
+    @Test
+    fun phraseAt_cjkAndDigitsAdjacentDoNotMerge() {
+        // 汉字段与数字段相邻但互不吞并：民法典=0..2，2026=3..6，条=7
+        assertEquals(0..2, SelectionBounds.phraseAt("民法典2026条", 1))
+        assertEquals(3..6, SelectionBounds.phraseAt("民法典2026条", 5))
+        assertEquals(7..7, SelectionBounds.phraseAt("民法典2026条", 7))
+    }
+
+    @Test
+    fun phraseAt_punctuationAndSpaceSingleChar() {
+        assertEquals(1..1, SelectionBounds.phraseAt("好。走", 1))  // 「。」标点本身取单字
+        assertEquals(2..2, SelectionBounds.phraseAt("你 好", 2))  // 「好」左邻空格，单字词组
+    }
+
+    @Test
+    fun phraseAt_clampedAndEmpty() {
+        assertTrue(SelectionBounds.phraseAt("", 0).isEmpty())
+        assertEquals(0..2, SelectionBounds.phraseAt("你好走", 99))
+    }
+
+    @Test
+    fun longPress_phraseThenSentence() {
+        // 长按链路：词组定位 → 扩到整句。按在「搭」上应选中整句「合同是保理合同。」
+        val t = "他说了句话。合同是保理合同。所谓保理，指……"
+        val phrase = SelectionBounds.phraseAt(t, 11)
+        val sentence = SelectionBounds.expandToSentence(t, phrase.first, phrase.last)
+        assertEquals("合同是保理合同。", t.substring(sentence.first, sentence.last + 1))
+    }
 }
