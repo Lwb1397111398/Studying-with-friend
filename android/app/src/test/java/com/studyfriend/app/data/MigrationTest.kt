@@ -194,4 +194,61 @@ fun migrate5To6_visionQueueLowQualityColumn() {
         }
     }
 }
+
+@Test
+fun migrate6To7_positionColumnsAndNewTables() {
+    val dbName = "migration-test-67.db"
+    helper.createDatabase(dbName, 6).use { v6 ->
+        v6.execSQL(
+            "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                "overviewJson, createdAt, updatedAt) VALUES ('旧书', '', 'TXT', '', 'READY', 1, NULL, 1, 1)",
+        )
+        v6.execSQL(
+            "INSERT INTO chapters (bookId, idx, title, readState, gist, keyTermsJson, level, parentOrder, calibrated) " +
+                "VALUES (1, 0, '第一章', 'NOT_READ', NULL, NULL, 1, NULL, 0)",
+        )
+    }
+    // 跑 1→7 全链迁移 + schema 校验（加列与两新表和 Entity 对齐，失败即抛）
+    helper.runMigrationsAndValidate(dbName, 7, true, *MIGRATIONS).use { v7 ->
+        // 旧行新列取 NULL=未记录
+        v7.query("SELECT lastReadChapterId, lastReadAt FROM books").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertTrue("旧书 lastReadChapterId 应为 NULL", cur.isNull(0))
+            assertTrue(cur.isNull(1))
+        }
+        v7.query("SELECT lastReadParaIdx FROM chapters").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertTrue("旧章 lastReadParaIdx 应为 NULL", cur.isNull(0))
+        }
+        // 新列可写读回（位置记忆 + 最近在读）
+        v7.execSQL("UPDATE chapters SET lastReadParaIdx = 7 WHERE id = 1")
+        v7.execSQL("UPDATE books SET lastReadChapterId = 1, lastReadAt = 123 WHERE id = 1")
+        v7.query("SELECT lastReadParaIdx FROM chapters").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals(7, cur.getInt(0))
+        }
+        v7.query("SELECT lastReadChapterId, lastReadAt FROM books").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals(1, cur.getInt(0))
+            assertEquals(123, cur.getLong(1))
+        }
+        // bookmarks 双 FK 表写读回验
+        v7.execSQL(
+            "INSERT INTO bookmarks (bookId, chapterId, paraIdx, preview, createdAt) VALUES (1, 1, 7, '读到代理权', 99)",
+        )
+        v7.query("SELECT preview FROM bookmarks").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals("读到代理权", cur.getString(0))
+        }
+        // qa_history 单 FK 表写读回验
+        v7.execSQL(
+            "INSERT INTO qa_history (bookId, chapterId, chapterTitle, question, answer, createdAt) " +
+                "VALUES (1, 1, '第一章', '什么是代理？', '以他人名义……', 100)",
+        )
+        v7.query("SELECT question FROM qa_history").use { cur ->
+            assertTrue(cur.moveToFirst())
+            assertEquals("什么是代理？", cur.getString(0))
+        }
+    }
+}
 }

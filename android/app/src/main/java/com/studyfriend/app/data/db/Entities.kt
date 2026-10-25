@@ -25,6 +25,9 @@ data class BookEntity(
     val overviewJson: String?, // M6 全书总览落点
     val createdAt: Long,
     val updatedAt: Long,
+    /** 最近在读位置（v7）：进阅读页即更新——「继续读」入口与书架最近在读排序的数据源 */
+    val lastReadChapterId: Long? = null,
+    val lastReadAt: Long? = null,
 )
 
 /** 一章/单元；gist、keyTermsJson 是粗读规划的章节级产物 */
@@ -57,6 +60,9 @@ data class ChapterEntity(
     val parentOrder: Int? = null,
     /** P3b-2 目录校准标志（false=未校准/目录不可用）。本期加列不消费，语义定义权归 P5 */
     val calibrated: Boolean = false,
+    /** 阅读位置记忆（v7）：读到哪段的 0-based paragraphs.idx；null=未记录（重进从顶部）。
+     *  存段 idx 而非列表行下标——图行混排与段落重排都会让行下标漂移，段 idx 稳定 */
+    val lastReadParaIdx: Int? = null,
 )
 
 /** 一个自然段；aiAction 是粗读规划的三态决定（NONE 仅占位） */
@@ -272,4 +278,62 @@ data class ReviewItemEntity(
     val intervalIdx: Int, // 0..4 对应 1/3/7/14/30 天
     val dueAt: Long,
     val done: Boolean = false,
+)
+
+/**
+ * 书签（v7）：锚到一个自然段（chapterId + paraIdx）；preview 冗余存段前 40 字，
+ * 免得展示时再 join paragraphs（段落无 FK 依赖，章重建后段 id 会漂，preview 保底可读）。
+ */
+@Entity(
+    tableName = "bookmarks",
+    foreignKeys = [
+        ForeignKey(
+            entity = BookEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["bookId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = ChapterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["chapterId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("bookId"), Index("chapterId")],
+)
+data class BookmarkEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val chapterId: Long,
+    val paraIdx: Int,
+    val preview: String,
+    val createdAt: Long,
+)
+
+/**
+ * 随手问历史（v7）：每轮问答一行，每书保留最近 50 条（写入时 trim）。
+ * chapterId 故意不建 FK——章可能因目录重切消失，历史应存活到删书为止；
+ * chapterTitle 写入时冗余，展示不再依赖 chapters 行存在。
+ */
+@Entity(
+    tableName = "qa_history",
+    foreignKeys = [
+        ForeignKey(
+            entity = BookEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["bookId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("bookId")],
+)
+data class QaHistoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val chapterId: Long,
+    val chapterTitle: String,
+    val question: String,
+    val answer: String,
+    val createdAt: Long,
 )

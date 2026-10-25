@@ -124,6 +124,33 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
     }
 }
 
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // 功能补齐轮：阅读位置记忆（books.lastReadChapterId/lastReadAt + chapters.lastReadParaIdx
+        // 加列，nullable 无默认值，旧行 NULL=未记录）+ bookmarks/qa_history 两张新表。
+        // createSql 逐字段抄自 Entity 定义，漏抄会被迁移校验报红
+        db.execSQL("ALTER TABLE `books` ADD COLUMN `lastReadChapterId` INTEGER")
+        db.execSQL("ALTER TABLE `books` ADD COLUMN `lastReadAt` INTEGER")
+        db.execSQL("ALTER TABLE `chapters` ADD COLUMN `lastReadParaIdx` INTEGER")
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `bookmarks` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                "`bookId` INTEGER NOT NULL, `chapterId` INTEGER NOT NULL, `paraIdx` INTEGER NOT NULL, " +
+                "`preview` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , " +
+                "FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_bookmarks_bookId` ON `bookmarks` (`bookId`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_bookmarks_chapterId` ON `bookmarks` (`chapterId`)")
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `qa_history` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                "`bookId` INTEGER NOT NULL, `chapterId` INTEGER NOT NULL, `chapterTitle` TEXT NOT NULL, " +
+                "`question` TEXT NOT NULL, `answer` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_qa_history_bookId` ON `qa_history` (`bookId`)")
+    }
+}
+
 val MIGRATIONS: Array<Migration> = arrayOf(
-    MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
+    MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
 )

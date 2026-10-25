@@ -20,6 +20,10 @@ interface SettingDao {
 
     @Query("DELETE FROM settings WHERE `key` = :key")
     suspend fun delete(key: String)
+
+    /** 单键监听（v7 主题三态用）：settings 表任何写入都会让 Flow 重发，改完即时生效 */
+    @Query("SELECT value FROM settings WHERE `key` = :key")
+    fun watch(key: String): Flow<String?>
 }
 
 /** 书架行投影：书信息 + 已读章数 */
@@ -34,7 +38,8 @@ data class BookProgress(
 
 @Dao
 interface BookDao {
-    @Query("SELECT * FROM books ORDER BY updatedAt DESC")
+    // v7 排序：最近在读优先（lastReadAt DESC，NULL 视为最小自然沉底），从未读过的书按导入/更新时间排后
+    @Query("SELECT * FROM books ORDER BY lastReadAt DESC, updatedAt DESC")
     fun getAllFlow(): Flow<List<BookEntity>>
 
     @Query("SELECT * FROM books WHERE id = :id")
@@ -47,6 +52,19 @@ interface BookDao {
         FROM books b WHERE b.id = :id""",
     )
     fun getProgressFlow(id: Long): Flow<BookProgress?>
+
+    /** v7 书架进度条批量源：全部书的已读章数投影（同 getProgressFlow 口径，去 WHERE） */
+    @Query(
+        """SELECT b.id AS id, b.title AS title, b.author AS author, b.status AS status,
+               b.totalChapters AS totalChapters,
+               (SELECT COUNT(*) FROM chapters c WHERE c.bookId = b.id AND c.readState = 'DONE') AS readChapters
+        FROM books b""",
+    )
+    fun progressAllFlow(): Flow<List<BookProgress>>
+
+    /** v7 进章即记最近在读：书架「继续读」入口与排序的数据源 */
+    @Query("UPDATE books SET lastReadChapterId = :chapterId, lastReadAt = :now WHERE id = :bookId")
+    suspend fun markReading(bookId: Long, chapterId: Long, now: Long)
 
     @Insert
     suspend fun insert(book: BookEntity): Long
@@ -147,6 +165,10 @@ interface ChapterDao {
     @Query("UPDATE chapters SET gist = :gist, keyTermsJson = :keyTermsJson WHERE id = :id")
     suspend fun updateAiGist(id: Long, gist: String, keyTermsJson: String)
 
+    /** v7 阅读位置记忆：滚动停止后写读到哪段（0-based paragraphs.idx） */
+    @Query("UPDATE chapters SET lastReadParaIdx = :paraIdx WHERE id = :id")
+    suspend fun updateLastReadPara(id: Long, paraIdx: Int)
+
     @Query("DELETE FROM chapters WHERE bookId = :bookId")
     suspend fun deleteByBook(bookId: Long)
 }
@@ -158,6 +180,10 @@ interface ParagraphDao {
 
     @Query("SELECT * FROM paragraphs WHERE chapterId = :chapterId ORDER BY idx")
     suspend fun byChapter(chapterId: Long): List<ParagraphEntity>
+
+    /** v7 书签跳转定位：按段 idx 取单段（拿 paraId 给 READ 路由滚动锚） */
+    @Query("SELECT * FROM paragraphs WHERE chapterId = :chapterId AND idx = :idx LIMIT 1")
+    suspend fun byChapterAndIdx(chapterId: Long, idx: Int): ParagraphEntity?
 
     @Insert
     suspend fun insertAll(paragraphs: List<ParagraphEntity>): List<Long>
@@ -176,7 +202,31 @@ interface ParagraphDao {
         WHERE c.bookId = :bookId ORDER BY p.pageNo, c.idx, p.idx""",
     )
     suspend fun byBookForRebuild(bookId: Long): List<ParagraphEntity>
+
+    /** v7 全书搜索：pattern 由 [escapeLikePattern] 生成（通配符已转义），SQLite LIKE 对 ASCII 默认不区分大小写 */
+    @Query(
+        """SELECT p.id AS paraId, p.chapterId AS chapterId, c.idx AS chapterIdx,
+               c.title AS chapterTitle, p.idx AS paraIdx, p.text AS text
+        FROM paragraphs p JOIN chapters c ON p.chapterId = c.id
+        WHERE c.bookId = :bookId AND p.text LIKE :pattern ESCAPE '\'
+        ORDER BY c.idx, p.idx LIMIT :limit""",
+    )
+    suspend fun searchInBook(bookId: Long, pattern: String, limit: Int): List<SearchHit>
 }
+
+/** 搜索结果行（v7）：段命中 + 所属章信息（点结果跳章滚动到段） */
+data class SearchHit(
+    val paraId: Long,
+    val chapterId: Long,
+    val chapterIdx: Int,
+    val chapterTitle: String,
+    val paraIdx: Int,
+    val text: String,
+)
+
+/** LIKE 模式串：转义用户输入里的 % _ \（ESCAPE '\' 口径），两端包 % 做包含匹配 */
+fun escapeLikePattern(q: String): String =
+    "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 @Dao
 interface ParaNoteDao {
@@ -387,4 +437,51 @@ interface FigureDao {
 
     @Query("DELETE FROM figures WHERE bookId = :bookId")
     suspend fun deleteByBook(bookId: Long)
+}
+
+// ============ 书签（v7） ============
+
+/** 书签行投影：书签 + 章名/章序（阅读页目录抽屉展示用） */
+data class BookmarkWithChapter(
+    @Embedded val bookmark: BookmarkEntity,
+    val chapterTitle: String,
+    val chapterIdx: Int,
+)
+
+@Dao
+interface BookmarkDao {
+    @Insert
+    suspend fun insert(bookmark: BookmarkEntity): Long
+
+    @Query("DELETE FROM bookmarks WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query(
+        """SELECT b.*, c.title AS chapterTitle, c.idx AS chapterIdx FROM bookmarks b
+        JOIN chapters c ON c.id = b.chapterId
+        WHERE b.bookId = :bookId ORDER BY b.createdAt DESC, b.id DESC""",
+    )
+    fun byBookWithChapterFlow(bookId: Long): Flow<List<BookmarkWithChapter>>
+}
+
+// ============ 随手问历史（v7） ============
+
+@Dao
+interface QaHistoryDao {
+    @Insert
+    suspend fun insert(entry: QaHistoryEntity)
+
+    /** 每书最近 50 条（id 降序破同毫秒平票，口径同错题本 wrongLatest） */
+    @Query(
+        "SELECT * FROM qa_history WHERE bookId = :bookId ORDER BY createdAt DESC, id DESC LIMIT 50",
+    )
+    suspend fun latestByBook(bookId: Long): List<QaHistoryEntity>
+
+    /** 淘汰超出保留窗的旧行：append 后调用，keep=50 */
+    @Query(
+        """DELETE FROM qa_history WHERE bookId = :bookId AND id NOT IN (
+            SELECT id FROM qa_history WHERE bookId = :bookId ORDER BY createdAt DESC, id DESC LIMIT :keep
+        )""",
+    )
+    suspend fun trim(bookId: Long, keep: Int)
 }
