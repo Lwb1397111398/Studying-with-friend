@@ -9,10 +9,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/** TTS 引擎抽象（计划 M5 §2.6）：逐句进度与错误都要有出口（评审 P1-2） */
+/** 朗读引擎模式（TTS 双模式）：SYSTEM=手机自带系统引擎 / LOCAL=本地离线模型（sherpa kokoro） */
+enum class TtsEngineMode { SYSTEM, LOCAL }
+
+/** TTS 引擎抽象（计划 M5 §2.6）：逐句进度与错误都要有出口（评审 P1-2）。
+ *  [prepare] 返回 null=可用；非 null=用户可读的不可用原因（错误文案分级由引擎决定） */
 interface TtsEngine {
-    /** 初始化并确认中文语音可用；不可用返回 false（UI 引导，不抛错） */
-    suspend fun prepare(): Boolean
+    suspend fun prepare(): String?
 
     /** 全文朗读：分句后逐句入队；onSentence(已播完句数) 推进进度，onDone 整体完成 */
     fun speak(text: String, onSentence: (Int) -> Unit, onDone: () -> Unit, onError: (String) -> Unit)
@@ -31,17 +34,33 @@ sealed interface TtsState {
 }
 
 /**
- * 朗读控制：toggle 切换播放/停止；stop 回 Idle；
+ * 朗读控制（TTS 双模式）：按 [mode] 选引擎，本地模型不可用时自动回落系统语音并经
+ * [notice] 说明原因（「听的思维」回落链经验）；toggle 切换播放/停止；stop 回 Idle；
  * 引擎晚到的"用户停止引发 onError"依状态忽略（已回 Idle 即不报错）。
  */
-class TtsPlayer(private val engine: TtsEngine, private val scope: CoroutineScope) {
+class TtsPlayer(
+    private val systemEngine: TtsEngine,
+    private val scope: CoroutineScope,
+    private val localEngine: TtsEngine? = null,
+) {
 
     private val _state = MutableStateFlow<TtsState>(TtsState.Idle)
     val state: StateFlow<TtsState> = _state.asStateFlow()
 
-    // 引擎回调线程（onDone/onError 置 null）与主线程（toggle/stop）并发读写，volatile 保证可见
+    /** 一次性提示（如「离线模型没下载，这次先用系统语音」）：朗读中显示，stop/播完/下次 toggle 清掉 */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    /** 当前引擎模式：设置读到后随时赋值，下次 toggle 生效 */
+    @Volatile
+    var mode: TtsEngineMode = TtsEngineMode.SYSTEM
+
+    // 引擎回调线程与主线程并发读写，volatile 保证可见
     @Volatile
     private var job: Job? = null
+
+    @Volatile
+    private var activeEngine: TtsEngine? = null
 
     fun toggle(text: String) {
         if (job != null) {
@@ -49,9 +68,18 @@ class TtsPlayer(private val engine: TtsEngine, private val scope: CoroutineScope
             return
         }
         job = scope.launch {
+            _notice.value = null
             _state.value = TtsState.Preparing
-            if (!engine.prepare()) {
-                _state.value = TtsState.Error("本机没有可用的中文语音，无法朗读")
+            var engine = if (mode == TtsEngineMode.LOCAL) localEngine ?: systemEngine else systemEngine
+            var err = engine.prepare()
+            if (err != null && engine !== systemEngine) {
+                // 本地模型不可用：自动回落系统语音，明说原因（回落文案留给 UI 朗读中显示）
+                _notice.value = "离线朗读暂不可用（$err），这次先用系统语音"
+                engine = systemEngine
+                err = engine.prepare()
+            }
+            if (err != null) {
+                _state.value = TtsState.Error(err)
                 job = null
                 return@launch
             }
@@ -63,12 +91,14 @@ class TtsPlayer(private val engine: TtsEngine, private val scope: CoroutineScope
             }
             // prepare 与 speak 入队之间无挂起点，这里补一次取消检查：stop 已执行过就不再入队发声
             ensureActive()
+            activeEngine = engine
             _state.value = TtsState.Speaking(sentenceIdx = 0, total = sentences.size)
             engine.speak(
                 text,
                 onSentence = { idx -> _state.update { if (it is TtsState.Speaking) TtsState.Speaking(idx, sentences.size) else it } },
                 onDone = {
                     _state.value = TtsState.Idle
+                    _notice.value = null
                     job = null
                 },
                 onError = { msg ->
@@ -83,13 +113,15 @@ class TtsPlayer(private val engine: TtsEngine, private val scope: CoroutineScope
     fun stop() {
         job?.cancel()
         job = null
-        engine.stop()
+        (activeEngine ?: systemEngine).stop()
         _state.value = TtsState.Idle
+        _notice.value = null
     }
 
     fun shutdown() {
         stop()
-        engine.shutdown()
+        systemEngine.shutdown()
+        localEngine?.shutdown()
     }
 }
 

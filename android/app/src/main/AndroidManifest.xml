@@ -6,6 +6,16 @@
     <!-- 应用自更新（M7）：覆盖安装下载好的新 APK 需要声明；首次安装时系统会让用户确认 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Android 11+ 包可见性：允许发现系统 TTS 语音引擎（朗读功能用）。
+         缺此声明时 targetSdk 30+ 的 TextToSpeech 绑不上默认引擎、初始化必失败，
+         真机报「本机没有可用的中文语音」的根因之一（听的思维项目同款声明已验证可用） -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+            <category android:name="android.intent.category.DEFAULT" />
+        </intent>
+    </queries>
+
     <!-- 视觉转写前台服务（R3）：Worker 前台化规避 JobScheduler 10 分钟超时
          （超时被杀每次记一笔，24h 窗口超 10 次配额耗尽、调度全停——实测实录） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

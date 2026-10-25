@@ -35,6 +35,16 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     var reviewReminder by mutableStateOf(true)
         private set
 
+    /** 朗读引擎（TTS 双模式）：即点即存，下次朗读生效 */
+    var ttsEngine by mutableStateOf(SettingsRepository.TTS_ENGINE_SYSTEM)
+        private set
+
+    /** 离线朗读模型就绪与已下字节（设置页下载管理区展示用，refreshTtsModel 刷新） */
+    var ttsModelReady by mutableStateOf(false)
+        private set
+    var ttsModelBytes by mutableStateOf(0L)
+        private set
+
     /** 模型入口摘要：主力模型名与 Key/讲解/视觉的生效状态，进设置页时刷新 */
     var mainModel by mutableStateOf("")
         private set
@@ -51,6 +61,14 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { themeMode = repo.themeMode() }
         viewModelScope.launch { ttsRate = repo.ttsRate() }
         viewModelScope.launch { reviewReminder = repo.reviewReminderEnabled() }
+        viewModelScope.launch { ttsEngine = repo.ttsEngineMode() }
+        refreshTtsModel()
+        // 下载结束（成功/失败/中断）后刷新就绪状态与已下字节
+        viewModelScope.launch {
+            com.studyfriend.app.data.tts.TtsModelManager.state.collect {
+                if (it !is com.studyfriend.app.data.tts.TtsModelManager.DownloadState.Running) refreshTtsModel()
+            }
+        }
     }
 
     /** 从模型页改完配置返回设置页时刷新摘要 */
@@ -113,6 +131,39 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                 // 保存失败静默，重进回读真实值
             }
         }
+    }
+
+    /** 朗读引擎：即点即存（手机自带 / 离线模型），下次朗读生效 */
+    fun chooseTtsEngine(mode: String) {
+        if (mode != SettingsRepository.TTS_ENGINE_SYSTEM && mode != SettingsRepository.TTS_ENGINE_LOCAL) return
+        ttsEngine = mode
+        viewModelScope.launch {
+            try {
+                repo.saveTtsEngineMode(mode)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 保存失败静默，重进回读真实值
+            }
+        }
+    }
+
+    /** 刷新离线朗读模型的就绪状态与已下字节 */
+    fun refreshTtsModel() {
+        val app = getApplication<StudyApp>()
+        ttsModelReady = com.studyfriend.app.data.tts.TtsModelManager.isTtsReady(app)
+        ttsModelBytes = com.studyfriend.app.data.tts.TtsModelManager.downloadedBytes(app)
+    }
+
+    /** 开始下载离线朗读模型（App 级任务，离开设置页继续；重复点幂等） */
+    fun startModelDownload() {
+        com.studyfriend.app.data.tts.TtsModelManager.startDownload(getApplication<StudyApp>())
+    }
+
+    /** 删除离线朗读模型（可再生数据，UI 二次确认后调用） */
+    fun deleteTtsModel() {
+        com.studyfriend.app.data.tts.TtsModelManager.deleteTtsModel(getApplication<StudyApp>())
+        refreshTtsModel()
     }
 
     /** 复习到期提醒：开关即点即存 + 同步注册/取消每日查询任务 */

@@ -35,7 +35,8 @@ class TtsPlayerTest {
     }
 
     private class FakeEngine : TtsEngine {
-        var prepareResult = true
+        /** null=可用；非 null=不可用原因（新签名 String?） */
+        var prepareResult: String? = null
         var prepareCalled = false
         var stopCalled = false
         var shutdownCalled = false
@@ -43,7 +44,7 @@ class TtsPlayerTest {
         var onDoneCb: (() -> Unit)? = null
         var onErrorCb: ((String) -> Unit)? = null
 
-        override suspend fun prepare(): Boolean {
+        override suspend fun prepare(): String? {
             prepareCalled = true
             return prepareResult
         }
@@ -92,13 +93,13 @@ class TtsPlayerTest {
     @Test
     fun prepareFalse_showsErrorWithoutSpeaking(): Unit = runBlocking {
         val engine = FakeEngine()
-        engine.prepareResult = false
+        engine.prepareResult = "系统朗读引擎初始化失败（-7），请到系统设置检查「文字转语音（TTS）」"
         val player = TtsPlayer(engine, scope)
 
         player.toggle("内容")
         val s = awaitState(player) { it is TtsState.Error } as TtsState.Error
 
-        assertTrue(s.message.contains("中文语音"))
+        assertEquals(engine.prepareResult, s.message)
         assertEquals(null, engine.onSentenceCb)
     }
 
@@ -177,5 +178,46 @@ class TtsPlayerTest {
         assertEquals(splitSentences(joined).size, counts.sum())
         // 最后一段（无标点）作为当前句时映射回段 2
         assertEquals(2, sentenceToParaIndex(counts, counts.sum() - 1))
+    }
+
+    // ---------- 7. TTS 双模式回落：本地模型不可用 → 自动回落系统语音 + notice ----------
+
+    @Test
+    fun localUnavailable_fallsBackToSystemWithNotice(): Unit = runBlocking {
+        val local = FakeEngine()
+        val system = FakeEngine()
+        local.prepareResult = "离线朗读模型还没下载，可到设置里下载（约 215MB）"
+        val player = TtsPlayer(system, scope, local)
+        player.mode = TtsEngineMode.LOCAL
+
+        player.toggle("内容。")
+        val s = awaitState(player) { it is TtsState.Speaking }
+
+        assertTrue(local.prepareCalled)
+        assertTrue(system.prepareCalled)
+        assertTrue(player.notice.value?.contains("离线朗读暂不可用") == true)
+        assertTrue(player.notice.value?.contains("先用系统语音") == true)
+        assertEquals(TtsState.Speaking(0, 1), s)
+        // 回落后发声的是系统引擎：它收到 onDone 回 Idle
+        system.onDoneCb?.invoke()
+        assertEquals(TtsState.Idle, player.state.value)
+    }
+
+    // ---------- 8. 双模式都不可用 → 报系统引擎的错误，不入队发声 ----------
+
+    @Test
+    fun bothUnavailable_showsSystemError(): Unit = runBlocking {
+        val local = FakeEngine()
+        val system = FakeEngine()
+        local.prepareResult = "离线朗读模型还没下载"
+        system.prepareResult = "本机没有可用的系统朗读引擎"
+        val player = TtsPlayer(system, scope, local)
+        player.mode = TtsEngineMode.LOCAL
+
+        player.toggle("内容")
+        val s = awaitState(player) { it is TtsState.Error } as TtsState.Error
+
+        assertEquals("本机没有可用的系统朗读引擎", s.message)
+        assertFalse(local.stopCalled)
     }
 }

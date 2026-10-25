@@ -227,6 +227,17 @@ class SettingsRepository(
         db.settingDao().upsert(SettingEntity(KEY_TTS_RATE, rate.toString()))
     }
 
+    // ---- 朗读引擎（TTS 双模式）：system=手机自带 / local=本地离线模型；坏值回退 system ----
+
+    suspend fun ttsEngineMode(): String =
+        db.settingDao().get(KEY_TTS_ENGINE)?.value
+            ?.takeIf { it == TTS_ENGINE_SYSTEM || it == TTS_ENGINE_LOCAL } ?: TTS_ENGINE_SYSTEM
+
+    suspend fun saveTtsEngineMode(mode: String) {
+        if (mode != TTS_ENGINE_SYSTEM && mode != TTS_ENGINE_LOCAL) return
+        db.settingDao().upsert(SettingEntity(KEY_TTS_ENGINE, mode))
+    }
+
     // ---- 复习到期提醒（功能补齐轮）：默认开，"false" 显式关闭；StudyApp 按此注册每日查询 ----
 
     suspend fun reviewReminderEnabled(): Boolean =
@@ -454,6 +465,9 @@ class SettingsRepository(
         const val TTS_RATE_MIN = 0.5f
         const val TTS_RATE_MAX = 2.0f
         const val DEFAULT_TTS_RATE = 1.0f
+        const val KEY_TTS_ENGINE = "tts_engine"
+        const val TTS_ENGINE_SYSTEM = "system"
+        const val TTS_ENGINE_LOCAL = "local"
         // 复习到期提醒（每日本地通知）
         const val KEY_REVIEW_REMINDER = "review_reminder"
         val DETAIL_LEVELS = listOf("简略", "标准", "深入")

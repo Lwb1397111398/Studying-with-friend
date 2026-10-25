@@ -35,6 +35,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -61,8 +62,11 @@ import com.studyfriend.app.data.study.SummaryRunState
 import com.studyfriend.app.data.study.buildExportMd
 import com.studyfriend.app.data.study.decodeCheckQuestions
 import com.studyfriend.app.data.tts.AndroidTtsEngine
+import com.studyfriend.app.data.tts.SherpaTtsEngine
+import com.studyfriend.app.data.tts.TtsEngineMode
 import com.studyfriend.app.data.tts.TtsPlayer
 import com.studyfriend.app.data.tts.TtsState
+import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.mindmap.TreeText
 import com.studyfriend.app.ui.components.MapController
 import com.studyfriend.app.ui.components.MdText
@@ -423,16 +427,27 @@ private fun SelfCheckCard(index: Int, question: CheckQuestion) {
     }
 }
 
-/** 记忆 Tab：记忆思路 + 串联，顶部 TTS 朗读（计划 M5 §3.4 记忆思路朗读） */
+/** 记忆 Tab：记忆思路 + 串联，顶部 TTS 朗读（计划 M5 §3.4 记忆思路朗读；TTS 双模式同正文听书） */
 @Composable
 private fun MemoryPane(asset: ChapterAssetEntity, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val tts = remember { TtsPlayer(AndroidTtsEngine(context), scope) }
+    val app = context.applicationContext as StudyApp
+    val tts = remember { TtsPlayer(AndroidTtsEngine(app), scope, SherpaTtsEngine(app)) }
+    LaunchedEffect(Unit) {
+        tts.mode = if (app.settingsRepo.ttsEngineMode() == SettingsRepository.TTS_ENGINE_LOCAL) {
+            TtsEngineMode.LOCAL
+        } else {
+            TtsEngineMode.SYSTEM
+        }
+    }
     DisposableEffect(Unit) { onDispose { tts.shutdown() } }
     // 引擎回调来自服务线程：快照写统一落主线程（同 runState 纪律）
     val ttsState by produceState<TtsState>(TtsState.Idle) {
         tts.state.collect { withContext(Dispatchers.Main) { value = it } }
+    }
+    val ttsNotice by produceState<String?>(null) {
+        tts.notice.collect { withContext(Dispatchers.Main) { value = it } }
     }
 
     Column(
@@ -448,6 +463,12 @@ private fun MemoryPane(asset: ChapterAssetEntity, modifier: Modifier = Modifier)
                 is TtsState.Speaking -> Text("已读 ${s.sentenceIdx}/${s.total} 句", style = MaterialTheme.typography.bodySmall)
                 is TtsState.Error -> Text(s.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 else -> {}
+            }
+        }
+        // 回落提示（离线模型没下载，这次先用系统语音）：朗读中低调显示
+        if (ttsState is TtsState.Speaking || ttsState is TtsState.Preparing) {
+            ttsNotice?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         MdText(asset.memoryMd)

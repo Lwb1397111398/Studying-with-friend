@@ -18,6 +18,11 @@
 
 -keep class ai.onnxruntime.** { *; }
 
+# sherpa-onnx（离线朗读，TTS 双模式）：JNI 按类名/方法名动态注册（含 TtsChunkCallback 的
+# Function1 签名反查），R8 混淆会破坏绑定，全部 keep
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-dontwarn com.k2fsa.sherpa.onnx.**
+
 # pdfbox-android 的 JPEG2000 解码依赖（com.gemalto.jp2）是可选包，未随库分发：
 # 遇 JPX 书页时该 filter 自行报错（与未开 R8 前行为一致），声明缺类无妨
 -dontwarn com.gemalto.jp2.**

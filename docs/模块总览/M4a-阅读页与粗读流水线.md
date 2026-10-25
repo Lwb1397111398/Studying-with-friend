@@ -11,7 +11,7 @@
 | 全书搜索（v7） | `SearchScreen.kt`：输入防抖 300ms → `paragraphDao.searchInBook(bookId, escapeLikePattern(q), limit=200)`（LIKE 含匹配 + %/_/\ 转义 ESCAPE '\'，join chapters 按章序段序排列）；结果行 = 章名 + 命中片段（首个命中位前后各 24 字，片段内全部命中词 primaryContainer 染色，snippet 内部函数）；点结果 → `Routes.read(chapterId, paraId=paraId)` 跳阅读页（scrollParaId 锚滚动，优先级最高）；入口在章目录页顶栏 |
 | 阅读位置记忆（v7） | 进章即 `bookDao.markReading`（books.lastReadChapterId/lastReadAt——书架继续读+排序）；滚动停止（snapshotFlow isScrollInProgress filter !it）经 itemKey "p{id}" 反查可视首段的段 idx → `chapterDao.updateLastReadPara` 写库（appScope 退页不取消）；重进恢复优先级：搜索 paraId > 节锚 highlight > lastReadParaIdx（scrollToItem 静默失败可接受）；图行/要点卡不是位置锚自动跳过 |
 | 阅读页 | 顶栏章标题+返回+**目录按钮（v7）**+上/下章+**Aa 字号按钮**；标题下小字「书名 · 已读 x/y 章」（getProgressFlow 首个消费方，标记读完即时刷新）；**P7 观感**：段落无分隔线，段间留白 12dp；正文字号 **14-30sp 无级（v7，旧四档 16/18/20/22 天然兼容）+行距 1.4-2.2 倍（默认 1.7）**，FontSizeSheet 双 Slider 即拖即预览、关弹层统一存库（settings 表 KV `read_font_size`/`read_line_height`，「恢复默认」= 18/1.7）；本章要点卡默认收起「要点」chip；段落流按 aiAction 渲染（EXPLAIN/GROUP 徽标+why、SKIP 半透明、NONE 正常）；role=TOC/FOOTNOTE/FRONT/BACK 次级样式（ReadStyles.isSecondaryRole）；**P5 highlight 定位** + **v7 scrollParaId 搜索锚**（优先级最高）+ **v7 位置记忆恢复**；**v7 屏幕常亮**（DisposableEffect FLAG_KEEP_SCREEN_ON，离页清除）；**P4-D 示意图混排**（buildReadRows/FigureRow/预览，详见下） |
-| 正文听书（v7） | 工具行「朗读」chip（本章 BODY 段非空才显示）→ 拼接本章 BODY 段文本（\n 连接）喂 TtsPlayer（引擎/状态机/分句全部复用 M5 记忆思路朗读基础设施，AndroidTtsEngine 新增 @Volatile var rate 语速——设置页 0.5~2.0 倍 Slider）；**句→段映射**：每段 splitSentences 计数做前缀和（sentenceToParaIndex 纯函数+单测），Speaking(sentenceIdx) 经映射定位当前段 → ParaRow 淡染底色（primary 8% alpha）+ 滚出视口才自动 animateScrollToItem（用户手动翻走不打扰）；朗读中 chip 变「停止朗读」；**换章即停**（拼接文本是旧章的）、离页 DisposableEffect shutdown；错误行（无中文语音/合成失败）显示在工具行下 |
+| 正文听书（v7，TTS 双模式） | 工具行「朗读」chip（本章 BODY 段非空才显示）→ 拼接本章 BODY 段文本（\n 连接）喂 TtsPlayer（**2026-10-25 起双引擎：手机自带系统 TTS / 本地离线模型 sherpa kokoro，按设置选、离线不可用自动回落系统并在 notice 行说明——引擎/下载细节见语音朗读模块总览**）；**句→段映射**：每段 splitSentences 计数做前缀和（sentenceToParaIndex 纯函数+单测），Speaking(sentenceIdx) 经映射定位当前段 → ParaRow 淡染底色（primary 8% alpha）+ 滚出视口才自动 animateScrollToItem（用户手动翻走不打扰）；朗读中 chip 变「停止朗读」；**换章即停**（拼接文本是旧章的）、离页 DisposableEffect shutdown；错误行（分级诊断文案）与回落 notice 显示在工具行下 |
 | 目录+书签抽屉（v7） | 顶栏目录按钮 → ReadTocSheet（ModalBottomSheet，window 级弹层挂 Column 内使书签操作函数同作用域）：上半=全书章列表（byBookFlow level=1，当前章高亮，点击跳章）；下半=书签区（「加书签」= 取当前可视首段（itemKey 反查）作锚落 bookmarks 表（preview 取段前 40 字）；书签列表 = 章名+段摘+删除（byBookWithChapterFlow 自动刷新）；点书签 → 查 byChapterAndIdx 拿 paraId，同章本地 scrollToItem、跨章 `Routes.read(chapterId, paraId)` 导航） |
 | 沉浸模式（v7） | 单击正文切换顶栏/工具行 AnimatedVisibility 显隐；rememberSaveable 记忆状态；BackHandler 沉浸时返回键先退出沉浸。**单击事件必须经 ParaRow→SelectableText 的 onTap 参数透传**（SelectableText 的 detectTapGestures 挂上即消费 tap，外层 LazyColumn 再挂 detectTapGestures 收不到；图行 FigureRow clickable 消费点图预览不触发） |
 | 随手问 QuickQa（P7+v7 历史） | QuickQaSheet（ModalBottomSheet）打开即自动发问，流式打字机（100ms 节流）；**v7 问答历史落库**：Ctx 补 bookId/chapterId（不进 user 消息），回答完成写 qa_history（appScope 关弹层不取消 + trim 每书 50 条）；引用块右侧「历史」入口 → 二级 ModalBottomSheet（本书最近 50 条：章名+时间+问题+答案，MdText 渲染）；仍不走 AiGate、问答 AI 调用次数零变化（历史只是展示，不做缓存） |
@@ -45,8 +45,11 @@ ui/nav/AppNav.kt                BOOK/READ/SEARCH 路由（与 M0 共享）
 data/study/RoughReadPlanner.kt  粗读流水线 run() 入口
 data/study/RoughReadRunner.kt   粗读全局单例状态机
 data/study/QuickQa.kt           随手问消息组装
-data/tts/TtsPlayer.kt           朗读控制状态机（正文听书）
-data/tts/AndroidTtsEngine.kt    系统 TTS 封装
+data/tts/TtsPlayer.kt           朗读控制状态机（正文听书；详见语音朗读模块总览）
+data/tts/AndroidTtsEngine.kt    系统 TTS 封装（详见语音朗读模块总览）
+data/tts/SherpaTtsEngine.kt     离线 TTS 引擎（详见语音朗读模块总览）
+data/tts/TtsModelManager.kt     离线模型下载管理（详见语音朗读模块总览）
+data/tts/TtsChunkCallback.java  sherpa JNI 回调（详见语音朗读模块总览）
 ```
 
 完整文件清单（含测试与纯函数）见下节「关键文件」。
@@ -77,6 +80,9 @@ ui/screens/ChapterListScreen.kt 章目录页（P5 章节树 + v7 顶栏搜索入
 data/study/QuickQa.kt           P7 随手问消息组装：Turn/Ctx（v7 补 bookId/chapterId 落库定位字段）、ASK_MEANING/ASK_PARA、userMessage()、messages()
 data/tts/TtsPlayer.kt           朗读控制状态机 + splitSentences 分句 + v7 sentenceToParaIndex 句→段映射（正文听书跟随定位）
 data/tts/AndroidTtsEngine.kt    系统 TTS 封装 + v7 @Volatile var rate 语速（设置页 0.5~2.0 倍，prepare 时生效）
+data/tts/SherpaTtsEngine.kt     离线 TTS 引擎（kokoro/AudioTrack/App 级单例，2026-10-25）
+data/tts/TtsModelManager.kt     离线模型下载管理（hf-mirror 断点续传，2026-10-25）
+data/tts/TtsChunkCallback.java  sherpa JNI 回调（必须 Java 实现，2026-10-25）
 data/db/Daos.kt                 v7 搜索/书签/历史/位置记忆 DAO（详见 M1）
 ui/nav/AppNav.kt                BOOK/READ（highlight+paraId 可选参数）/SEARCH 路由
 test/.../DataV7Test.kt             v7 8 例（书签/历史 trim/搜索通配转义/进度投影/markReading 排序/settingWatch）
@@ -143,6 +149,7 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 
 ## 最后更新
 
+- 2026-10-25 **TTS 双模式轮**（老板点名「同一台手机听的思维系统语音 OK、学伴报未识别到语音模型」→ 根因修复+扩双引擎，详见语音朗读模块总览）：①根因修复——Manifest 补 `<queries>` TTS_SERVICE（targetSdk 30+ 包可见性，缺它 TextToSpeech 绑不上引擎）+ setLanguage 放宽（国产引擎返回 MISSING_DATA 不再一票否决）+ 初始化 6 秒超时；②本地离线引擎 SherpaTtsEngine（sherpa-onnx kokoro 205MB，经验学自听的思维：官方完整 aar + pickFirst 解同名 ort 冲突——剔除共享微软 1.22.0 方案实测失败（versioned symbol），JNI 回调必须 Java）；③TtsModelManager 模型下载（hf-mirror 直连 + .part 断点续传 + 200 自愈 + **小文件 8 路并发**（串行实测 13s/个要 40 分钟），M7 同款思路）；④TtsPlayer 双模式分发 + 自动回落 + notice；⑤设置页「朗读引擎」选择与模型下载管理。模拟器实测：系统模式分级文案正确（AOSP 无引擎报「本机没有可用的系统朗读引擎」）、模型下载全量完成（205.3MB 就绪判定过）、**离线朗读完整跑通**（模型加载→逐句合成→AudioTrack 出声→进度推进→自动滚动跟随）。
 - 2026-10-25 **划词扩选轮**（老板点名「长按只能高亮一个字、选框一句一段实现不了」）：①`SelectionBounds.phraseAt` 汉字词组取词（连续汉字一段成词，22 例单测，wordAt/expandToSentence 不动）；②长按默认扩整句（所见即所选），查词场景拖首把手收缩；③两端 24dp 拖拽把手 + 五按钮浮条（问含义/扩句/扩段/复制/✕，扩句/扩段替代旧"问整段"）；④拖拽手势收口在 SelectableText 外层 Box 手写事件泵。**三个模拟器实测抓到的坑**：A. Popup 点外消失默认会把拖把手的 down 判成 outside → onDismiss 清选区（拖动 48ms 内 selection 变 null，snapshotFlow 监听定位到 CLEAR onDismiss）→ `PopupProperties(dismissOnClickOutside=false)` 显式关；B. 把手子 Box 节点收不到 Main pass 后续事件（down 只到首个 pointerInput）→ 拖动泵挂外层 Box；C. Main pass 父后于子，纯点按 up 未消费被 Text 的 detectTapGestures 判成 tap 误切沉浸 → 泵改 Initial pass（父先于子消费）。卸载临时调试（snapshotFlow 监听/OUTER/INNER 日志/userScrollEnabled=false）后全链路复测：长按整句高亮+双把手+浮条、拖尾把手实时缩短、拖首把手收缩开头、扩句扩回、问含义弹 QuickQaSheet 带引用块、滚动清选区、✕ 关闭、点把手不切沉浸、拖动中浮条隐藏+把手变色——9 项全过。
 - 2026-10-25 **模拟器实测收口**：12 项全过（JingBianAVD 真数据迁移）——搜索「243」5 命中+点结果 paraId 锚跳段、位置记忆闭环（滚停存 idx→BACK 不变→重进精确恢复，sqlite 实证 236）、沉浸单击修复后双向切换过、字号 20→29sp 实时预览、深色主题即时生效、目录抽屉+加书签（章名+40 字预览）+继续读横幅+最近在读排序。听书发声模拟器验不了（缺中文语音包，错误兜底行正确显示），留真机。
 - 2026-10-25 **功能补齐轮**（老板点名「字体调整/全文搜索等缺失功能」→ 盘点后选 A+B+C+D 四组全做）：①阅读位置记忆（进章 markReading + 滚停写 lastReadParaIdx + 重进恢复，优先级 搜索paraId>highlight>lastReadParaIdx）；②全书搜索 SearchScreen（防抖 300ms、escapeLikePattern 转义、命中片段染色、点结果 paraId 锚跳转，入口章目录页顶栏）；③字号 14-30 无级+行距 1.4-2.2 双 Slider（关弹层统一存库，旧四档值天然兼容）；④阅读页顶栏进度小字（getProgressFlow 首个消费方）+ 书架进度条/继续读横幅（见 M0/书架部分归 M0 总览）；⑤正文听书（BODY 段拼接喂 TtsPlayer、sentenceToParaIndex 句→段映射跟随高亮+滚出屏自动滚、换章即停、语速设置）；⑥目录+书签抽屉 ReadTocSheet（章列表跳章+加书签/删书签/跳段——同章本地滚、跨章带 paraId 导航）；⑦沉浸模式（单击正文切顶栏/工具行 AnimatedVisibility、BackHandler）；⑧屏幕常亮（DisposableEffect FLAG_KEEP_SCREEN_ON）；⑨随手问历史落库 qa_history（每书 50 条 trim+二级历史弹层，AI 调用零变化）。**踩坑**：①Kotlin inline lambda 内只有 fun 声明泄露到外层作用域（val 不行）——ReadTocSheet 挂载挪进 Column 内与书签操作函数同作用域；②StudyApp.onCreate 无条件调 WorkManager 崩 21 个 Robolectric UI 冒烟（WorkManager is not initialized）——注册必须 runCatching；③ESCAPE '\' 在 Kotlin 三引号字符串里写单反斜杠即可（`\\` 是两字符会报错）；④SelectableText 的 detectTapGestures 挂上即消费 tap（哪怕只写 onLongPress），沉浸单击在正文上永远到不了外层 LazyColumn——模拟器实测抓到，修法=ParaRow/SelectableText 加 onTap 参数透传，外层 pointerInput 仅兜底段间空隙。

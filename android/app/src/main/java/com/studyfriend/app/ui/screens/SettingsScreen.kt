@@ -17,15 +17,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.studyfriend.app.data.SettingsRepository
+import com.studyfriend.app.data.tts.TtsModelManager
 
 /**
  * 设置页（瘦身版）：模型类配置收进「模型」页，这里只剩模型入口卡片（显示当前
@@ -128,6 +132,25 @@ fun SettingsScreen(
 
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
+            // 朗读引擎（TTS 双模式）：手机自带 / 本地离线模型（sherpa kokoro，模型在下方下载管理）。
+            // 「听的思维」同机实测：系统引擎要先声明 queries 才绑得上（本次修复的根因）
+            Text("朗读引擎", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    SettingsRepository.TTS_ENGINE_SYSTEM to "手机自带",
+                    SettingsRepository.TTS_ENGINE_LOCAL to "离线模型",
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = vm.ttsEngine == mode,
+                        onClick = { vm.chooseTtsEngine(mode) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+            TtsModelSection(vm)
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
             // 复习到期提醒（功能补齐轮）：每日本地通知；Android 13+ 打开时请求通知权限
             val permissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission(),
@@ -213,3 +236,79 @@ fun SettingsScreen(
         }
     }
 }
+
+/** 离线朗读模型下载管理区（TTS 双模式之「离线模型」）：状态/进度/下载/删除。
+ *  下载是 App 级任务（TtsModelManager 自持 scope），离开设置页继续、回页看进度。 */
+@Composable
+private fun TtsModelSection(vm: SettingsViewModel) {
+    val dl by TtsModelManager.state.collectAsState()
+    var confirmDelete by remember { mutableStateOf(false) }
+    // 非下载中状态变化后刷新就绪状态（下载完成/删除/失败都走这里）
+    LaunchedEffect(dl) {
+        if (dl !is TtsModelManager.DownloadState.Running) vm.refreshTtsModel()
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        when (val s = dl) {
+            is TtsModelManager.DownloadState.Running -> {
+                val pct = if (s.total > 0) (s.done * 100 / s.total).toInt() else 0
+                Text(
+                    "正在下载离线朗读模型：${mb(s.done)} / ${mb(s.total)} MB（$pct%，中断后可续传）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                LinearProgressIndicator(
+                    progress = { if (s.total > 0) (s.done.toFloat() / s.total).coerceIn(0f, 1f) else 0f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            is TtsModelManager.DownloadState.Failed -> {
+                Text(
+                    "下载失败：${s.message}（已下内容保留，点下载从断点继续）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                OutlinedButton(onClick = { vm.startModelDownload() }) { Text("继续下载") }
+            }
+
+            else -> {
+                if (vm.ttsModelReady) {
+                    Text(
+                        "离线朗读模型已就绪（${mb(vm.ttsModelBytes)} MB）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(onClick = { confirmDelete = true }) { Text("删除模型") }
+                } else {
+                    Text(
+                        "离线朗读模型未下载（全套约 215MB，国内镜像直连，支持断点续传）" +
+                            if (vm.ttsModelBytes > 0) "，已下 ${mb(vm.ttsModelBytes)} MB" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(onClick = { vm.startModelDownload() }) { Text("下载模型") }
+                }
+            }
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("删除离线朗读模型？") },
+            text = { Text("会释放约 ${mb(vm.ttsModelBytes)} MB 空间；下次想用需要重新下载（支持断点续传）。朗读引擎可随时切回「手机自带」。") },
+            confirmButton = {
+                Button(onClick = {
+                    confirmDelete = false
+                    vm.deleteTtsModel()
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { confirmDelete = false }) { Text("取消") }
+            },
+        )
+    }
+}
+
+private fun mb(bytes: Long): String = "%.1f".format(bytes / 1048576.0)

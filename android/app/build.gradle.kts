@@ -61,6 +61,13 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    packaging {
+        jniLibs {
+            // sherpa-onnx aar 与 microsoft onnxruntime-android 都带 libonnxruntime.so：
+            // 保留先声明的 sherpa 版（其 JNI so 与该版本配套；共享微软版实测失败，见依赖处注释）
+            pickFirsts += "**/libonnxruntime.so"
+        }
+    }
     buildFeatures {
         compose = true
         // 应用自更新（M7）：设置页读 BuildConfig.VERSION_CODE/NAME 做版本比较
@@ -95,6 +102,12 @@ ksp {
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)
+    // sherpa-onnx 离线朗读引擎（TTS 双模式之「本地模型」）。官方完整 aar 自带 libonnxruntime.so，
+    // 与下方 microsoft onnxruntime-android 的同名 so 冲突 → packaging pickFirst 保留先声明的
+    // sherpa 版（其 JNI so 与自带 ort 配套；实测共享微软 1.22.0 失败——其 ort 符号带
+    // @@VERS_1.22.0 版本标签，sherpa JNI 的裸符号引用在 bionic linker 解析不到）。
+    // OCR（微软 Java API 跑 sherpa 的 ort native）兼容性以 OCR 功能实测为准
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("sherpa-onnx-*.aar"))))
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
