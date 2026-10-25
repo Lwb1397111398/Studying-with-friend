@@ -63,9 +63,13 @@ class NotePlanner(
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
         val cfg = settings.load()
         // 讲解详略三档（总计划 §1 目标 7）：标准档即 prompt 原文，简略/深入在 system 末尾追加指令
+        val detail = settings.detailLevel()
+        // 档位与模型都参与缓存判定：切档/换讲解模型后旧卡失效重生成，设置才真正生效
+        val noteVer = noteVersion(detail)
+        val noteModelActual = cfg.noteModel.ifBlank { cfg.model }
         val systemPrompt = buildString {
             append(PromptLoader.load(context, PROMPT_NOTE))
-            when (settings.detailLevel()) {
+            when (detail) {
                 "简略" -> append(
                     "\n\n本次讲解详略：简略。friendly 只写 150~280 字，围绕最核心的一个点讲透，类比从简；check_questions 最多 1 条。",
                 )
@@ -104,7 +108,9 @@ class NotePlanner(
                         val paraIds = ParaIdsCodec.encode(unit.members.map { it.id })
                         val existing = notesByParaIds[paraIds]
                         if (!force && existing != null &&
-                            existing.promptVersion == NOTE_VERSION && existing.friendly.isNotBlank()
+                            existing.promptVersion == noteVer &&
+                            existing.model == noteModelActual &&
+                            existing.friendly.isNotBlank()
                         ) {
                             onProgress(doneCount.incrementAndGet(), units.size)
                             continue
@@ -112,7 +118,7 @@ class NotePlanner(
                         try {
                             // 生成成功后才删旧插新：失败/中断时旧卡保留不丢（最终 QA P2-2）；
                             // 删+插包事务，两 lane 并发写库时防"删了旧的新没插进"
-                            val note = runUnitWithRetry(unit, chapter, paragraphs, systemPrompt, cfg, key)
+                            val note = runUnitWithRetry(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual)
                             db.withTransaction {
                                 db.paraNoteDao().deleteByParaIds(paraIds)
                                 db.paraNoteDao().insert(note)
@@ -153,11 +159,13 @@ class NotePlanner(
         systemPrompt: String,
         cfg: SettingsSnapshot,
         key: String,
+        noteVer: String,
+        noteModelActual: String,
     ): ParaNoteEntity {
         var lastError: Exception? = null
         repeat(ATTEMPTS) { attempt ->
             try {
-                return runUnitOnce(unit, chapter, paragraphs, systemPrompt, cfg, key)
+                return runUnitOnce(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AiException) {
@@ -180,6 +188,8 @@ class NotePlanner(
         systemPrompt: String,
         cfg: SettingsSnapshot,
         key: String,
+        noteVer: String,
+        noteModelActual: String,
     ): ParaNoteEntity {
         val anchor = unit.anchor
         val texts = unit.textsForPrompt()
@@ -206,7 +216,7 @@ class NotePlanner(
                 ChatRequest(
                     baseUrl = cfg.baseUrl, apiKey = key,
                     // 讲解模型（按用途选模型）：讲解逐段调用用量最大，可单独配低成本模型；空 = 主力
-                    model = cfg.noteModel.ifBlank { cfg.model },
+                    model = noteModelActual,
                     temperature = 0.5,
                     // 推理型模型的思考 token 计入 max_tokens：讲解卡主体长，预算须给足
                     maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,
@@ -227,8 +237,8 @@ class NotePlanner(
             keyPointsJson = json.encodeToString(ListSerializer(String.serializer()), n.keyPoints),
             memoryHook = n.memoryHook.ifBlank { null },
             questionsJson = json.encodeToString(ListSerializer(CheckQuestion.serializer()), n.checkQuestions),
-            model = cfg.noteModel.ifBlank { cfg.model },
-            promptVersion = NOTE_VERSION,
+            model = noteModelActual,
+            promptVersion = noteVer,
             createdAt = System.currentTimeMillis(),
         )
     }
@@ -237,6 +247,14 @@ class NotePlanner(
         const val PROMPT_NOTE = "explain_note"
         const val NOTE_VERSION = "explain-note-v2"
         const val ATTEMPTS = 3
+
+        /** 档位拼进版本号：标准 = 原版（老卡不失效），简略/深入 = 带后缀版本，切档后旧卡自然重生成 */
+        fun noteVersion(detailLevel: String): String =
+            if (detailLevel == "标准") NOTE_VERSION else "$NOTE_VERSION-$detailLevel"
+
+        /** 是否当前版本的讲解卡（含档位后缀变体）——渲染/统计/总结输入侧过滤统一走这里 */
+        fun isCurrentNote(version: String): Boolean =
+            version == NOTE_VERSION || version.startsWith("$NOTE_VERSION-")
 
         /** 单元并发数：2 路——端点 rpm/tpm 紧（见 PlannerBackoff），2 路在吞吐与限流间取平衡 */
         const val CONCURRENCY = 2

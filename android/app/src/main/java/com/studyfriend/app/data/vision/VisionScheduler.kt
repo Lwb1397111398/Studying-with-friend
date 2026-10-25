@@ -38,10 +38,14 @@ object VisionScheduler {
     /**
      * 进程死亡/设备重启后的续跑：WorkManager 任务本身持久化，一般会自动恢复；
      * 这里补扫"队列有 PENDING 但没有活跃任务"的书再挂一次（KEEP：不打断在跑的）。
-     * App 启动时调用。
+     * App 启动时调用。批B：未配置视觉的书跳过——页挂 PENDING 等配置保存后
+     * reenqueueAllPending 补齐，不再冷启动空转退避。
      */
     suspend fun restorePending(db: StudyDatabase, context: Context) {
+        val app = context.applicationContext as com.studyfriend.app.StudyApp
+        val visionReady = app.settingsRepo.buildVisionTranscribers().isNotEmpty()
         for (bookId in db.visionQueueDao().booksWithPending()) {
+            if (!visionReady) break // 未配置视觉：全部跳过（booksWithPending 的行都无人可消费）
             WorkManager.getInstance(context).enqueueUniqueWork(
                 workName(bookId),
                 ExistingWorkPolicy.KEEP,
@@ -68,6 +72,22 @@ object VisionScheduler {
                 buildRequest(bookId),
             )
         }
+    }
+
+    /**
+     * 批B：按书重试/唤醒视觉增强——书架长按入口。重置该书 FAILED 页（不动其他书）
+     * 并立即调度队列（无 PENDING 时 Worker success 早退）；视觉未配置时 Worker
+     * 自身走退避等待（不烧 attempts），配置保存后自动续跑。
+     */
+    suspend fun retryFailedByBook(db: StudyDatabase, context: Context, bookId: Long): Int {
+        val reset = db.visionQueueDao().resetFailedByBook(bookId, System.currentTimeMillis())
+        if (reset > 0) Log.i(TAG, "retry book $bookId: reset $reset FAILED page(s) → PENDING")
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            workName(bookId),
+            ExistingWorkPolicy.REPLACE,
+            buildRequest(bookId),
+        )
+        return reset
     }
 
     private fun buildRequest(bookId: Long) = OneTimeWorkRequestBuilder<VisionWorker>()

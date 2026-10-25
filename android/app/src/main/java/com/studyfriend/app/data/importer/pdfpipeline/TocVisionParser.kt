@@ -286,6 +286,25 @@ class TocVisionParser(
     private fun segMarkerFile(uriHash: String, segPages: List<Int>) =
         File(cacheDir, "toc_fail_v${FORMAT_VERSION}_${uriHash}_s${segPages.joinToString("-")}.marker")
 
+    /**
+     * 批B：清掉该书全部失败熔断 marker（所有版本号、所有区段）——目录确认页
+     * 「重试目录识别」用。用户点重试 = 明确的再烧一次意图；成功缓存（toc_v*.json）
+     * 不动，重试只补失败区段。删失败仅记日志。
+     */
+    fun clearFailureMarkers(uriHash: String) {
+        try {
+            cacheDir.mkdirs()
+            val prefix = "_${uriHash}_"
+            cacheDir.listFiles { f ->
+                f.name.startsWith("toc_fail_") && f.name.contains(prefix) && f.name.endsWith(".marker")
+            }?.forEach { m ->
+                if (!m.delete()) Log.w(TAG, "marker delete failed: ${m.name}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "clearFailureMarkers failed: ${e.message}")
+        }
+    }
+
 
     /** 清理崩溃残留的 .tmp 孤儿（writeText 与 rename 之间进程死亡）：mtime 超 10 分钟即删 */
     private fun cleanOrphanTmp() {

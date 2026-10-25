@@ -216,14 +216,9 @@ class BookRepository(
     fun chaptersFlow(bookId: Long) = db.chapterDao().byBookFlow(bookId)
     suspend fun chapters(bookId: Long) = db.chapterDao().byBook(bookId)
 
-    /**
-     * 已入库书重跑目录校准（P3b-2 方案 Z 预留骨架，re-import 补救路径）：本期不实现，
-     * 接口先行稳定——P5 立项时按方案 Z 覆盖率数据决定接入方式，无需重新设计签名。
-     * 调用恒返回 NotImplementedError failure；P5 实现语义=事务内重切该书章节并置
-     * chapters.calibrated=1，不触碰其他书（E2E 判据「re-import 不触碰库中其他书」）。
-     */
-    suspend fun calibrateExistingBook(bookId: Long): Result<Unit> =
-        Result.failure(NotImplementedError("calibrateExistingBook 本期仅预留骨架（P3b-2 方案 Z），P5 接入实现"))
+    // 批B：已入库书事后目录校准已转正——实现移至
+    // data/importer/pdfpipeline/CalibrateExisting.kt（需要 renderer/parser，仓内组装），
+    // 本仓保留纯 DB 职责；校准产物经 replaceBookContent 重建（figures 重挂内置）。
 
     /**
      * 目录重切：事务内删旧章重插，段落/讲解/资产等子表靠 CASCADE 清空。

@@ -67,12 +67,20 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
         if (uri != null) vm.loadFile(uri)
     }
 
-    // busy 期间屏幕常亮：扫描书识别可达几十分钟，黑屏后进程被系统冻结/杀掉，
-    // 导入只能从头重来（老板 2026-10-11 实测痛点）；离开导入页或导入结束自动解除
-    val view = androidx.compose.ui.platform.LocalView.current
-    androidx.compose.runtime.DisposableEffect(busy) {
-        if (busy) view.keepScreenOn = true
-        onDispose { view.keepScreenOn = false }
+    // 批B：导入页可见性上报——OCR 期间用户可离开（识别在应用级 VM 继续跑），
+    // VM 据此在「识别完成且人不在」时发召回通知。屏幕常亮职责上移 AppNav
+    // （离开导入页后识别仍在跑，常亮须跟到哪都有效）
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> vm.uiVisible = false
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> vm.uiVisible = true
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
 
     // 单列居中，平板上不无限拉宽（计划 §4：最大 720dp）
@@ -159,21 +167,31 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
             // 沿用顶部不定进度条、不渲染取消按钮；仅提取段（含复制段）取消即时可达检查点
             if (phase != null || progress != null) {
                 val p = progress
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (p != null) {
-                        LinearProgressIndicator(
-                            progress = { p.first.toFloat() / p.second },
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text("提取 PDF ${p.first}/${p.second} 页", style = MaterialTheme.typography.bodySmall)
-                    } else {
-                        CircularProgressIndicator(Modifier.height(16.dp))
-                        Text(phase ?: "", style = MaterialTheme.typography.bodySmall)
+                Column {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (p != null) {
+                            LinearProgressIndicator(
+                                progress = { p.first.toFloat() / p.second },
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text("提取 PDF ${p.first}/${p.second} 页", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            CircularProgressIndicator(Modifier.height(16.dp))
+                            Text(phase ?: "", style = MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(onClick = { vm.cancelImport() }) { Text("取消") }
                     }
-                    TextButton(onClick = { vm.cancelImport() }) { Text("取消") }
+                    // 批B：识别期间可以离开——VM 是应用级，回书架/逛别处识别继续，完成有通知
+                    if (phase?.contains("本地文字识别") == true || phase?.contains("识别书的开头结构") == true) {
+                        Text(
+                            "识别要几十分钟：可以先去书架逛逛，识别会继续，完成后通知你（请保持应用在前台）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
                 }
             }
 

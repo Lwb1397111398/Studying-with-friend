@@ -63,6 +63,7 @@ import com.studyfriend.app.data.db.BookEntity
 import com.studyfriend.app.data.db.BookProgress
 import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.VisionProgress
+import com.studyfriend.app.data.vision.VisionScheduler
 import kotlinx.coroutines.launch
 
 /** 封面色板（上→下渐变）：低饱和书房色，与米白纸感主题协调；按 book.id 稳定取色，同一本书永远同色 */
@@ -139,12 +140,46 @@ fun ShelfScreen(
         }
     }
 
-    // v7 长按书卡三选：重命名 / 删除 / 取消
+    // v7 长按书卡：重命名 / 删除 / 视觉增强重试（批B） / 取消
     menuFor?.let { book ->
+        val vstat = visionByBook[book.id]
+        val failedPages = vstat?.failed ?: 0
+        val pendingPages = (vstat?.total ?: 0) - (vstat?.done ?: 0) - failedPages
+        val ctx = LocalContext.current
         AlertDialog(
             onDismissRequest = { menuFor = null },
             title = { Text("《${book.title}》") },
-            text = { Text("书架共 ${books?.size ?: 0} 本。要做什么？") },
+            text = {
+                Column {
+                    Text("书架共 ${books?.size ?: 0} 本。要做什么？")
+                    if (failedPages > 0) {
+                        Text(
+                            "视觉增强 ${vstat!!.done}/${vstat.total}，${failedPages} 页失败",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    } else if (pendingPages > 0) {
+                        Text(
+                            "待视觉补识别 ${pendingPages} 页（配置视觉模型后自动后台补齐）",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (failedPages > 0 || pendingPages > 0) {
+                        TextButton(onClick = {
+                            menuFor = null
+                            scope.launch {
+                                if (app.settingsRepo.buildVisionTranscriber() == null) {
+                                    android.widget.Toast.makeText(
+                                        ctx, "未配置视觉模型：设置 → 模型页配置后自动补齐", android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                } else {
+                                    VisionScheduler.retryFailedByBook(app.database, app, book.id)
+                                }
+                            }
+                        }) { Text(if (failedPages > 0) "重试视觉增强（${failedPages} 页失败）" else "开始视觉补识别") }
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
                     pendingRename = book

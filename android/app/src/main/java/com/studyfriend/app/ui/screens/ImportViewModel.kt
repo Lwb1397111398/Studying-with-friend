@@ -1,9 +1,14 @@
 package com.studyfriend.app.ui.screens
 
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import android.util.Log
 import androidx.compose.runtime.getValue
@@ -182,6 +187,13 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     /** P8 目录探针注记（确认页 parseNote 可见性：未发现目录页/视觉未配置/识别失败） */
     private var tocProbeNote: String? = null
 
+    /** 批B：目录识别失败可重试（真失败才 true；未发现目录页/视觉未配置重试无意义） */
+    var tocRetryable by mutableStateOf(false)
+        private set
+
+    /** 批B：最近一次 PDF/OCR 提取产物——目录重试要拿它重跑探针（extract 太贵不重提） */
+    private var lastPdfResult: PdfExtractResult? = null
+
     /** P8 tocLike 最小页（前置探针圈页上限）；无 tocLike 时为 null */
     private var tocFirstPage: Int? = null
 
@@ -207,6 +219,38 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
      *  与 editedTitles 同步清空（章列表重建处旧下标不可信）；确认导入时才过滤落库 */
     var deleted by mutableStateOf(setOf<Int>())
         private set
+
+    /** 批B：导入页是否可见（ImportScreen ON_PAUSE/ON_RESUME 维护）——OCR 期间用户
+     *  可离开导入页让识别后台继续，完成后据此决定要不要发召回通知 */
+    var uiVisible by mutableStateOf(true)
+
+    /** 批B：导入准备完成召回通知（离开导入页时才发）；渠道/图标与视觉转写通知同风格 */
+    private fun notifyImportReady() {
+        val ctx = getApplication<Application>()
+        runCatching {
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(
+                    NotificationChannel(IMPORT_CHANNEL, "导入进度", NotificationManager.IMPORTANCE_DEFAULT),
+                )
+            }
+            val intent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: return
+            val pi = PendingIntent.getActivity(
+                ctx, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            nm.notify(
+                IMPORT_NOTIF_ID,
+                androidx.core.app.NotificationCompat.Builder(ctx, IMPORT_CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_menu_edit)
+                    .setContentTitle("《${bookTitle.ifBlank { "新书" } }》准备完成")
+                    .setContentText("识别完成，点击回到导入流程确认目录")
+                    .setAutoCancel(true)
+                    .setContentIntent(pi)
+                    .build(),
+            )
+        }.onFailure { Log.w("ImportVm", "import notify failed: ${it.message}") }
+    }
 
     fun chapterTitleAt(index: Int): String =
         editedTitles[index] ?: chapters.getOrNull(index)?.title.orEmpty()
@@ -314,6 +358,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                         if (result.scanned && ocrReady) {
                             // 本地 OCR 主路径：两遍法识别 → 兜底页交视觉队列；视觉不整书转写
                             val ocrResult = runOcrPath(app, uri)
+                            lastPdfResult = ocrResult // 批B：目录重试复用，不重新提取
                             pendingFigures = emptyList() // ocrMode 下 figures 已空，防御性清
                             figureStats = null
                             figureNoteDetail = null
@@ -332,6 +377,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                                 result.figureStats, result.landscapeRatio, result.doubleColumnSuspicion,
                             )
                             applyVision(result, uri, vision)
+                            lastPdfResult = result // 批B：目录重试复用，不重新提取
                             runTocProbe(result, uri)
                             // P3a 字号证据链：PDF 路径打〔标题〕前缀，parse 侧按 isPdf 同步认标
                             content = result.assembleText(styleAware = true)
@@ -379,6 +425,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     bookTitle = KitBookParser.preferredTitle(kitMeta?.title, name)
                 }
                 parse()
+                // 批B：大书 OCR/提取期间用户可离开导入页（识别在 viewModelScope 后台继续）；
+                // 完成时人不在导入页 → 通知召回（通知权限被拒时静默，回来照常看到结果）
+                if (chapters.isNotEmpty() && !uiVisible) notifyImportReady()
             } catch (e: DecodeException) {
                 failRead(e.message)
             } catch (e: CancelledImportException) {
@@ -452,11 +501,9 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         val result = PdfLoader.finalizeOcr(outcome)
         ocrImported = true
         val vision = settings.buildVisionTranscriber()
-        pendingVisionItems = if (vision != null) {
-            outcome.fallbackPages.map { it.pageNo to 0 }
-        } else {
-            null
-        }
+        // 批B：兜底页无论视觉是否配置都暂存——确认导入时照常落 vision_queue（PENDING），
+        // 未配置视觉则不启动 Worker（配置保存后 reenqueueAllPending 自动补齐消化）
+        pendingVisionItems = outcome.fallbackPages.map { it.pageNo to 0 }
         failedVisionItems = null
         val notes = buildList {
             if (outcome.fallbackPages.isNotEmpty()) {
@@ -464,8 +511,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     if (vision != null) {
                         "本地识别完成；${outcome.fallbackPages.size} 页（图示或画质差）导入后自动视觉增强"
                     } else {
-                        "本地识别完成；${outcome.fallbackPages.size} 页未能识别（图示或画质差），" +
-                            "配置视觉增强后可后台补齐"
+                        "本地识别完成；${outcome.fallbackPages.size} 页（图示或画质差）已挂起，" +
+                            "配置视觉增强后会自动后台补齐"
                     },
                 )
             }
@@ -644,6 +691,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         // 连续导入时先清掉上一本的目录：无 tocLike/视觉未配置/异常三条早退路径都不得残留旧数据
         tocState = TocProbeState.Idle
         probeSegments = null
+        tocRetryable = false
         clearFrontProbeState()
         try {
             val tocSegments = TocPageGrouper.group(result.pages.filter { it.tocLike }.map { it.pageNum })
@@ -672,6 +720,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     Log.i("P3b", "toc probe: no entries (failed, budget exhausted or cached failure)")
                     tocState = TocProbeState.Failed
                     tocProbeNote = "目录识别失败，章节按标题识别"
+                    tocRetryable = true // 批B：真失败可重试（清熔断 marker 再烧一次）
                 } else {
                     tocState = TocProbeState.Done(entries)
                 }
@@ -681,6 +730,36 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             Log.w("P3b", "toc probe failed", e)
             tocState = TocProbeState.Failed
+        }
+    }
+
+    /**
+     * 批B：目录识别失败重试——清该书失败熔断 marker 后重跑探针 + 重新解析组章。
+     * extract 产物复用（lastPdfResult），不重新提取；视觉未配置时 runTocProbe 会
+     * 给出引导文案，marker 也不新增（没 parser 可清）。
+     */
+    fun retryTocProbe() {
+        val result = lastPdfResult ?: return
+        val uri = lastUri ?: return
+        if (busy) return
+        viewModelScope.launch {
+            busy = true
+            error = null
+            try {
+                File(getApplication<Application>().cacheDir, "vision_cache/toc").let { dir ->
+                    settings.buildTocVisionParser(dir) { _ -> "" }?.let { p ->
+                        p.clearFailureMarkers(VisionCache.uriHash(uri.toString()))
+                    }
+                }
+                runTocProbe(result, uri)
+                parse()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = "重试失败：${e.message ?: e::class.simpleName}"
+            } finally {
+                busy = false
+            }
         }
     }
 
@@ -812,7 +891,11 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                                 )
                             },
                         )
-                        VisionScheduler.enqueue(getApplication(), newBookId)
+                        // 批B：未配置视觉时只入库不调度——页挂 PENDING 等「设置保存视觉配置
+                        // → reenqueueAllPending」或下次长按重试；Worker 起来也是退避空转
+                        if (settings.buildVisionTranscriber() != null) {
+                            VisionScheduler.enqueue(getApplication(), newBookId)
+                        }
                     }
                 imported = true
                 Log.i("P5Nav", "① confirm 成功 → imported=true + 事件入队")
@@ -849,6 +932,8 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         visionStatsNote = null
         pendingVisionItems = null
         failedVisionItems = null
+        lastPdfResult = null
+        tocRetryable = false
         clearFigures()
         chapters = emptyList()
         imported = false
@@ -1134,5 +1219,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
         val out = openChapter + blockChapters + tailChapters
         val names = (openChapter + blockChapters).joinToString("、") { it.title }
         return out to "开头部分已按内容分块：${names.take(40)}"
+    }
+
+    companion object {
+        private const val IMPORT_CHANNEL = "import_progress"
+        private const val IMPORT_NOTIF_ID = 0x1AB1
     }
 }

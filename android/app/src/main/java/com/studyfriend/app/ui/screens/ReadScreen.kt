@@ -142,7 +142,8 @@ fun ReadScreen(
     }
 
     // 体验增量轮：阅读时长统计——页面可见期间计时，离开阅读页/切后台把可视时长按
-    // 分钟入账（四舍五入，不足 1 分钟的零头丢弃；ON_PAUSE 已入账置哨兵防双计）。
+    // 分钟入账。批A改为零头结转：余数挂 app.readingPendingMs 留到下次合计（floor 取整
+    // 不透支），频繁切 App 的碎片会话不再丢失；ON_PAUSE 已入账置哨兵防双计。
     // 写库走 appScope：离开页面协程不取消
     var readingSinceMs by remember { mutableStateOf(System.currentTimeMillis()) }
     val readingLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -151,7 +152,8 @@ fun ReadScreen(
             val bid = bookIdForMark ?: return
             val since = readingSinceMs
             if (since < 0) return
-            val minutes = Math.round((System.currentTimeMillis() - since) / 60000.0).toInt()
+            val (minutes, carryMs) = readingFlushMath(app.readingPendingMs, System.currentTimeMillis() - since)
+            app.readingPendingMs = carryMs
             readingSinceMs = -1L
             if (minutes > 0) {
                 app.appScope.launch {
@@ -383,7 +385,7 @@ fun ReadScreen(
                 units.map { ParaIdsCodec.encode(it.members.map { m -> m.id }) }.toSet()
             }
             val noteValidCount = notes.count {
-                it.paraIds in unitParaIds && it.promptVersion == NotePlanner.NOTE_VERSION && it.friendly.isNotBlank()
+                it.paraIds in unitParaIds && NotePlanner.isCurrentNote(it.promptVersion) && it.friendly.isNotBlank()
             }
             // 讲解进行中（本章）：讲解卡占位用；委托属性不能 smart cast，用 as? 判
             val noteRunningThis = (noteState as? NoteRunState.Running)?.chapterId == chapterId
@@ -650,7 +652,7 @@ fun ReadScreen(
                             val unit = anchorById[row.p.id]
                             if (unit != null) {
                                 val note = notesByParaIds[ParaIdsCodec.encode(unit.members.map { it.id })]
-                                    ?.takeIf { it.promptVersion == NotePlanner.NOTE_VERSION && it.friendly.isNotBlank() }
+                                    ?.takeIf { NotePlanner.isCurrentNote(it.promptVersion) && it.friendly.isNotBlank() }
                                 NoteCard(
                                     note = note,
                                     generating = note == null && noteRunningThis,
@@ -827,3 +829,10 @@ internal fun buildQaTarget(
     ),
     defaultQuestion = question,
 )
+
+/** 阅读入账结转数学（批A）：(历史零头 + 本次时长) → (入账分钟数, 新零头)。floor 取整不透支 */
+internal fun readingFlushMath(pendingMs: Long, elapsedMs: Long): Pair<Int, Long> {
+    val total = pendingMs + elapsedMs
+    require(total >= 0) { "计时时长为负" }
+    return ((total / 60000L).toInt()) to (total % 60000L)
+}

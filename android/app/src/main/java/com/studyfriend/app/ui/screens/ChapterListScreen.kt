@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -50,6 +51,7 @@ import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.study.RoughRunState
 import com.studyfriend.app.data.study.SummaryPlanner
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -97,6 +99,12 @@ fun ChapterListScreen(
     // 覆盖重读会清掉全章标注并重烧 API，与阅读页同口径加二次确认（最终 QA P1）
     var confirmForceFor by remember { mutableStateOf<Long?>(null) }
 
+    // 批B：事后目录校准——按目录重新切章（CalibrateExisting；不重跑提取/OCR）
+    var showCalibrate by remember { mutableStateOf(false) }
+    var calibBusy by remember { mutableStateOf(false) }
+    var calibResult by remember { mutableStateOf<String?>(null) }
+    val calibScope = rememberCoroutineScope()
+
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text(bookTitle.ifBlank { "章节" }) },
@@ -106,6 +114,10 @@ fun ChapterListScreen(
                 }
             },
             actions = {
+                TextButton(
+                    onClick = { showCalibrate = true },
+                    enabled = !calibBusy,
+                ) { Text(if (calibBusy) "校准中…" else "校准目录") }
                 // v7 全书搜索入口
                 IconButton(onClick = onOpenSearch) {
                     Icon(Icons.Filled.Search, contentDescription = "全书搜索")
@@ -183,6 +195,40 @@ fun ChapterListScreen(
                     }) { Text("覆盖重读") }
                 },
                 dismissButton = { TextButton(onClick = { confirmForceFor = null }) { Text("取消") } },
+            )
+        }
+
+        // 批B：事后目录校准确认弹窗
+        if (showCalibrate) {
+            AlertDialog(
+                onDismissRequest = { showCalibrate = false },
+                title = { Text("按目录重新切章？") },
+                text = {
+                    Text(
+                        "搭子会识别书里的目录页并重新划分章节（需要联网和视觉模型，不重新识别全书）。" +
+                            "阅读进度按章名保留；已生成讲解/总结/复习的书会被拒绝，以防学习记录丢失。",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showCalibrate = false
+                        calibBusy = true
+                        calibScope.launch {
+                            val r = com.studyfriend.app.data.importer.pdfpipeline.CalibrateExisting.run(app, bookId)
+                            calibBusy = false
+                            calibResult = r.fold({ it }, { it.message ?: "校准失败（未知原因）" })
+                        }
+                    }) { Text("开始校准") }
+                },
+                dismissButton = { TextButton(onClick = { showCalibrate = false }) { Text("取消") } },
+            )
+        }
+        calibResult?.let { msg ->
+            AlertDialog(
+                onDismissRequest = { calibResult = null },
+                title = { Text("目录校准") },
+                text = { Text(msg) },
+                confirmButton = { TextButton(onClick = { calibResult = null }) { Text("知道了") } },
             )
         }
     }

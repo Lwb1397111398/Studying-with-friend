@@ -106,6 +106,14 @@ fun TocConfirmScreen(vm: ImportViewModel, onDone: () -> Unit) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 )
             }
+            // 批B：目录识别失败（真失败）给一键重试——清 30 天熔断 marker 再烧一次
+            if (vm.tocRetryable) {
+                TextButton(
+                    onClick = { vm.retryTocProbe() },
+                    enabled = !busy,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                ) { Text("重试目录识别") }
+            }
             // P4（r8-P2-4）：图片提取技术明细——主文案在 parseNote，点开看滤除分布/告警明细
             val figureDetail = vm.figureNoteDetail
             if (figureDetail != null) {

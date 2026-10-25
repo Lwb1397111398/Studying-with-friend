@@ -340,4 +340,43 @@ class NotePlannerTest {
         assertTrue(notes[0].promptVersion == NotePlanner.NOTE_VERSION)
         db.close()
     }
+
+    // ---------- 11. 切详略档后旧卡失效重生成（档位拼进版本号） ----------
+
+    @Test
+    fun batch_detailChangeInvalidatesCache() = runBlocking {
+        val db = db()
+        val fake1 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
+        val ch = seed(db, listOf(Triple(0, "EXPLAIN", null)))
+        planner(db, fake1).run(ch)
+
+        settings(db).saveDetailLevel("深入")
+        val fake2 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
+        val outcome = planner(db, fake2).run(ch)
+
+        assertEquals("切档后旧卡失效，重新生成", 1, fake2.noteCalls)
+        assertEquals(1, outcome.generated)
+        val notes = db.paraNoteDao().byChapterOnce(ch)
+        assertEquals(NotePlanner.noteVersion("深入"), notes[0].promptVersion)
+        db.close()
+    }
+
+    // ---------- 12. 换讲解模型后旧卡失效重生成（缓存判定比较 model） ----------
+
+    @Test
+    fun batch_modelChangeInvalidatesCache() = runBlocking {
+        val db = db()
+        val fake1 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
+        val ch = seed(db, listOf(Triple(0, "EXPLAIN", null)))
+        planner(db, fake1).run(ch)
+
+        settings(db).saveNoteModel("other-model")
+        val fake2 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
+        val outcome = planner(db, fake2).run(ch)
+
+        assertEquals("换模型后旧卡失效，重新生成", 1, fake2.noteCalls)
+        val notes = db.paraNoteDao().byChapterOnce(ch)
+        assertEquals("other-model", notes[0].model)
+        db.close()
+    }
 }

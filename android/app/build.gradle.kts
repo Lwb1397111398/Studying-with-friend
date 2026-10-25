@@ -48,6 +48,9 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("app")
+            // 批A瘦身：release 只打 arm64（老板平板/主流安卓设备都是 arm64），136MB→约70MB，
+            // 自更新全量下载直接省一半流量。debug 保持全 ABI——x86_64 模拟器仍可装调试包
+            ndk { abiFilters += "arm64-v8a" }
         }
         debug {
             // debug 也锁同一把钥匙：换电脑/CI 构建的调试包签名不变，仍可互相覆盖安装

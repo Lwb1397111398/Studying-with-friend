@@ -54,7 +54,9 @@ import com.studyfriend.app.ui.components.MapController
 import com.studyfriend.app.ui.components.MdText
 import com.studyfriend.app.ui.components.MindMapPanel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 
 /**
  * 全书总览页（M6 计划 §3.2）：三 Tab（总览 / 总导图 / 主线）只读渲染 overviewJson；
@@ -66,6 +68,7 @@ fun BookOverviewScreen(
     bookId: Long,
     onBack: () -> Unit,
     onOpenSettings: () -> Unit = {},
+    onOpenChapter: (Long) -> Unit = {},
 ) {
     val app = LocalContext.current.applicationContext as StudyApp
     val db = app.database
@@ -154,7 +157,7 @@ fun BookOverviewScreen(
                     }
                     when (tab) {
                         0 -> MdText(payload.overviewMd, Modifier.fillMaxSize().verticalScroll(rememberScrollState()))
-                        1 -> OverviewMindmapPane(payload.treeText, bookTitle, Modifier.fillMaxSize())
+                        1 -> OverviewMindmapPane(payload.treeText, bookTitle, bookId, onOpenChapter, Modifier.fillMaxSize())
                         else -> MdText(payload.mainlineMd, Modifier.fillMaxSize().verticalScroll(rememberScrollState()))
                     }
                 }
@@ -263,8 +266,16 @@ private fun OverviewGeneratePane(
 
 /** 总导图 Tab：书级 TAB 树只读渲染 + 导出 PNG（与章末导图同模式） */
 @Composable
-private fun OverviewMindmapPane(treeText: String, bookTitle: String, modifier: Modifier = Modifier) {
+private fun OverviewMindmapPane(
+    treeText: String,
+    bookTitle: String,
+    bookId: Long,
+    onOpenChapter: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
+    val app = context.applicationContext as com.studyfriend.app.StudyApp
+    val clickScope = rememberCoroutineScope()
     var controller by remember { mutableStateOf<MapController?>(null) }
     var pendingPng by remember { mutableStateOf<ByteArray?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -304,6 +315,19 @@ private fun OverviewMindmapPane(treeText: String, bookTitle: String, modifier: M
                         mainHandler.post {
                             pendingPng = bytes
                             exportLauncher.launch("$safeName-总导图.png")
+                        }
+                    }
+                },
+                onNodeClick = { topic ->
+                    // 查本书章标题匹配（level=1 章行；去空白后等值），命中跳阅读页；
+                    // 知识点节点匹配不上静默（与章末导图同语义）
+                    clickScope.launch(Dispatchers.IO) {
+                        val norm = { t: String -> t.replace(Regex("\\s+"), "") }
+                        val target = app.database.chapterDao().byBook(bookId).firstOrNull {
+                            it.level == 1 && norm(it.title) == norm(topic)
+                        }
+                        if (target != null) {
+                            withContext(Dispatchers.Main) { onOpenChapter(target.id) }
                         }
                     }
                 },

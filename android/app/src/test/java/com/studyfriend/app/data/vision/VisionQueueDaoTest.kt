@@ -79,11 +79,12 @@ class VisionQueueDaoTest {
             )
             // 按书查（页序）
             assertEquals(listOf(5, 9, 12), db.visionQueueDao().byBook(bookId).map { it.pageNo })
-            // 进度投影：DONE=1 / 总 3
+            // 进度投影：DONE=1 / 总 3 / FAILED=1（批B重试入口数据源）
             val progress = db.visionQueueDao().progressByBookFlow().first().single()
             assertEquals(bookId, progress.bookId)
             assertEquals(1, progress.done)
             assertEquals(3, progress.total)
+            assertEquals(1, progress.failed)
             // PENDING 书清单：FAILED/DONE 不算
             assertEquals(listOf(bookId), db.visionQueueDao().booksWithPending())
             // CASCADE：删书带走队列（书架删书不留孤儿任务）
@@ -104,6 +105,36 @@ class VisionQueueDaoTest {
             // 任一段落被粗读标注 → 不可重建
             val marked = seedBook(db, withMarkedPara = true)
             assertTrue(db.visionQueueDao().hasAnyAiConsumption(marked))
+        } finally {
+            db.close()
+        }
+    }
+
+    /** 批B：按书重置 FAILED 定格页——只动目标书，其他书的 FAILED 保持终态 */
+    @Test
+    fun resetFailedByBook_onlyTouchesTargetBook() = runBlocking {
+        val db = db()
+        try {
+            val a = seedBook(db)
+            val b = seedBook(db)
+            db.visionQueueDao().insertAll(
+                listOf(
+                    item(a, 3, status = DbValues.VQ_FAILED, attempts = 3),
+                    item(a, 4, status = DbValues.VQ_DONE),
+                    item(b, 5, status = DbValues.VQ_FAILED, attempts = 3),
+                ),
+            )
+
+            val reset = db.visionQueueDao().resetFailedByBook(a, System.currentTimeMillis())
+
+            assertEquals(1, reset)
+            val rowsA = db.visionQueueDao().byBook(a)
+            assertEquals(DbValues.VQ_PENDING, rowsA.first { it.pageNo == 3 }.status)
+            assertEquals(0, rowsA.first { it.pageNo == 3 }.attempts)
+            // B 书的 FAILED 不被误伤
+            assertEquals(DbValues.VQ_FAILED, db.visionQueueDao().byBook(b).single().status)
+            // A 书回到有 PENDING 的清单，B 不在
+            assertEquals(listOf(a), db.visionQueueDao().booksWithPending())
         } finally {
             db.close()
         }

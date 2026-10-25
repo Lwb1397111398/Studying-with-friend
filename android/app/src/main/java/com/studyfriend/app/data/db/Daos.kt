@@ -407,11 +407,15 @@ interface VisionQueueDao {
     @Query("UPDATE vision_queue SET status = 'PENDING', attempts = 0, updatedAt = :now WHERE status = 'FAILED'")
     suspend fun resetFailedToPending(now: Long): Int
 
+    /** 批B：按书重置 FAILED 定格页——书架长按「重试视觉增强失败页」用，不动其他书 */
+    @Query("UPDATE vision_queue SET status = 'PENDING', attempts = 0, updatedAt = :now WHERE bookId = :bookId AND status = 'FAILED'")
+    suspend fun resetFailedByBook(bookId: Long, now: Long): Int
+
     @Query("UPDATE vision_queue SET status = :status, attempts = :attempts, updatedAt = :now WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String, attempts: Int, now: Long)
 
-    /** 书架徽标：每本书的视觉增强进度（完成页数/总页数） */
-    @Query("SELECT bookId, SUM(status = 'DONE') AS done, COUNT(*) AS total FROM vision_queue GROUP BY bookId")
+    /** 书架徽标：每本书的视觉增强进度（完成页数/总页数 + 失败页数，批B重试入口用） */
+    @Query("SELECT bookId, SUM(status = 'DONE') AS done, COUNT(*) AS total, SUM(status = 'FAILED') AS failed FROM vision_queue GROUP BY bookId")
     fun progressByBookFlow(): Flow<List<VisionProgress>>
 
     /** 守卫查询：该书是否有任何 AI 消费（标注/笔记/资产/排期任一存在即不可重建） */
@@ -429,11 +433,12 @@ interface VisionQueueDao {
     suspend fun donePageNosByBook(bookId: Long): List<Int>
 }
 
-/** 书架徽标投影：视觉增强进度（OPT-F） */
+/** 书架徽标投影：视觉增强进度（OPT-F）；failed = 定格失败页数（批B重试入口显示条件） */
 data class VisionProgress(
     val bookId: Long,
     val done: Int,
     val total: Int,
+    val failed: Int,
 )
 
 @Dao

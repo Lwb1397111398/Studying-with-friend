@@ -115,11 +115,11 @@ class ImportRepositoryTest {
     }
 
     @Test
-    fun p3b2_calibrateExistingBook_skeletonReturnsNotImplemented() = runBlocking {
-        val repo = BookRepository(db())
-        // 方案 Z 预留骨架：P5 接口先行稳定，调用恒失败 NotImplementedError（不触碰库）
-        val r = repo.calibrateExistingBook(1L)
+    fun p3b2_calibrateExisting_speaksHumanOnMissingBook() = runBlocking {
+        // 批B：骨架已转正（CalibrateExisting.run），此处锁人话失败语义——书不存在
+        val app = ApplicationProvider.getApplicationContext<com.studyfriend.app.StudyApp>()
+        val r = com.studyfriend.app.data.importer.pdfpipeline.CalibrateExisting.run(app, 999L)
         assertTrue(r.isFailure)
-        assertTrue(r.exceptionOrNull() is NotImplementedError)
+        assertTrue(r.exceptionOrNull()?.message?.contains("书不存在") == true)
     }
 }

@@ -76,7 +76,7 @@ class SummaryPlanner(
 
         // 讲解卡按锚段归位：note 只挂锚段条目（M5 §2.1）
         val notes = db.paraNoteDao().byChapterOnce(chapterId)
-            .filter { it.promptVersion == NotePlanner.NOTE_VERSION && it.friendly.isNotBlank() }
+            .filter { NotePlanner.isCurrentNote(it.promptVersion) && it.friendly.isNotBlank() }
         val noteByAnchorIdx = HashMap<Int, ParaNoteEntity>()
         for (unit in enumerateUnits(paragraphs)) {
             val paraIds = ParaIdsCodec.encode(unit.members.map { it.id })

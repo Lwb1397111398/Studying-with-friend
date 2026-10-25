@@ -11,6 +11,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -85,6 +86,14 @@ fun AppNav() {
 
     // Activity 级共享：Import 与 TocConfirm 两屏用同一份解析状态
     val importVm: ImportViewModel = viewModel()
+
+    // 批B：屏幕常亮从 ImportScreen 上移到应用级——OCR 期间用户可离开导入页让识别
+    // 继续跑（App 在前台任意页面都算），黑屏进程被冻结就会中断；busy 结束自动解除
+    val keepOnView = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(importVm.busy) {
+        if (importVm.busy) keepOnView.keepScreenOn = true
+        onDispose { keepOnView.keepScreenOn = false }
+    }
     // 应用自更新（M7）：Activity 级单例，弹窗挂全局任何页面都能弹；进 App 静默检查一次
     val updateVm: UpdateViewModel = viewModel()
     LaunchedEffect(Unit) { updateVm.autoCheckIfNeeded() }
@@ -234,6 +243,7 @@ fun AppNav() {
                     bookId = bookId,
                     onBack = { navController.popBackStack() },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    onOpenChapter = { chapterId -> navController.navigate(Routes.read(chapterId)) },
                 )
             }
         }

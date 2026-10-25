@@ -27,6 +27,13 @@ class StudyApp : Application() {
     /** 全局 AI 互斥：粗读与讲解共用一把锁，任何时刻只跑一个 AI 任务（M4b §2.5） */
     val aiGate: AiGate = AiGate()
 
+    /**
+     * 阅读计时零头结转（批A：碎片会话不再丢失）：不足 1 分钟的余数挂在 app 级，
+     * 下次阅读合计入账——频繁切 App 的 40~50 秒碎片会话也能攒成整分钟。
+     * 跨书切换时余数可能记到后一本书头上，误差 ≤1 分钟，总量守恒。
+     */
+    @Volatile var readingPendingMs: Long = 0L
+
     /** 应用级密钥仓单例（OPT-A）：keystore 优先、软件密钥兜底；设置页与双 Runner 共享 */
     val secretStore: SecretStore by lazy { ResilientSecretStore(applicationContext) }
 
