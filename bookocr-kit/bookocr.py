@@ -961,8 +961,9 @@ def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
     eff_want = [p for p in want if p not in fig_heavy_pages]
     if eff_want and len(eff_want) < len(want):
         # 剔除图版页后重算页均字数（按页标记切分；此路仅在真有大图页时走）
-        parts = re.split(r"^\s*〔页\s*(\d+)\s*〕\s*$", text, flags=re.M)
-        page_chars = {int(parts[i]): len(re.sub(r"\s", "", parts[i + 1])) for i in range(0, len(parts) - 1, 2)}
+        # split 带捕获组时页号落在奇数位（偶数位是标记前的正文），从 1 起跳，取 0 会把空串当页号
+        parts = PAGE_MARK.split(text)
+        page_chars = {int(parts[i]): len(re.sub(r"\s", "", parts[i + 1])) for i in range(1, len(parts) - 1, 2)}
         chars_eff = sum(page_chars.get(p, 0) for p in eff_want)
         per_page = chars_eff / len(eff_want)
         out(f"[i] 图版页自动豁免 {len(want) - len(eff_want)} 页（{sorted(fig_heavy_pages)[:8]}），按剩余 {len(eff_want)} 页计页均")

@@ -373,8 +373,10 @@ def main() -> None:
         b["thin_pages"] = []  # 模拟 patch 派卡完成（patch 发卡即清账防重派）
     (JOB3 / "manifest.json").write_text(
         json.dumps(mp3, ensure_ascii=False, indent=1), encoding="utf-8")
-    o = run("pack _selftest_pull2 --no-pdf --auto-chapters")
-    check("切章完成" in o and "txt →" in o, "pack --auto-chapters 一条龙：自动切章后打包")
+    o = run("pack _selftest_pull2 --no-pdf --auto-chapters", expect_fail=True)
+    check("还没补语义" in o, "pack 拦截：pull 占位图未补语义（先 figure-desc 再 pack）")
+    o = run("pack _selftest_pull2 --no-pdf --auto-chapters --force")
+    check("切章完成" in o and "txt →" in o, "pack --auto-chapters 一条龙：自动切章后打包（--force 放行占位图）")
     body2 = (JOB3 / "output" / "_selftest_pull2.txt").read_text(encoding="utf-8-sig")
     mm2 = re.search(r"〔KIT-书 开始〕\r?\n(.*?)\r?\n〔KIT-书 结束〕", body2, re.S)
     check(mm2 is not None, "pull 书 txt 也带头部元数据块")

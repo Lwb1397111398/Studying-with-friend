@@ -50,7 +50,7 @@
 - `bookocr-kit/config.json` — 全局设置（route/pages_per_batch/dpi/aivision_workers/chapter_review/output；入库）
 - `bookocr-kit/simcheck.py` — 成品 vs 自带文字层逐页相似度抽检（只出数字）
 - `bookocr-kit/README.md` — 新电脑三步安装 + 两种模式人话说明
-- `bookocr-kit/selftest.py` — 回归自测（合成 12 页假书全链路，**79 项断言**，含 pull 占位行插段间/figure-desc dry-run/pack 拦图版页/zip 三件内容，换电脑即可跑）
+- `bookocr-kit/selftest.py` — 回归自测（合成 12 页假书全链路，**80 项断言**，含 pull 占位行插段间/figure-desc dry-run/pack 拦图版页/pack 拦占位图/zip 三件内容，换电脑即可跑）
 - `bookocr-kit/requirements.txt` — PyMuPDF + reportlab
 
 ## 对外接口 / 被谁调用
@@ -79,13 +79,15 @@
 - 真书前几页若是密集目录，PDF 变体的章节树可能碎（BookParser 对（页码）式目录行的既有行为，txt 主产出同样内容由目录校准消化）；实机验证用的是探针书，真书效果以第一本实战为准。
 - aivision 对个别页可能**稳定超时**（《民法物权》p529 实测：3 次、并发 5/5/2 都 TimeoutError，且重试会把失败页越滚越多）——不要硬刷（白烧额度），按凭据纪律停手改走兜底：`pull` 重拔该批写占位 + `check --force` 放行，或子代理单转该页。
 - 视觉路线失败页重试：aivision 批内有失败页=整批标 failed 不落文件（all-or-nothing），避免半批半批的残缺产物混进台账。
+- **`PAGE_MARK` 带捕获组，切分只能用 `split` 的奇数位取页号**：`re.split(PAGE_MARK, text)` 返回「前文, 页号, 正文, 页号, 正文……」，偶数位是正文、奇数位才是页号；批C 的 check 图版页豁免分支从下标 0 起步取 `int(parts[0])`，遇 `int('')` 直接 ValueError 让整批 pull 崩（2026-10-26 修，见最后更新）。凡按页标记切正文，一律用已编译的 `PAGE_MARK.split()` + `range(1, len(parts)-1, 2)`，不要再手抄一份正则。
+- 批C 的 pack 占位图拦截对 **pull 路线**生效：台账里 `desc == PULL_FIG_DESC`（「原书嵌入插图…」占位）的图非空即拦，`--force` 才放行。所以 pull 书要出成品有两条路——跑 `figure-desc`（需视觉 API）或 `pack --force` 带占位打包；`--dry-run` 只裁图不写语义，拦不住。
 - **figure-desc 伪图**：影印页装饰线/表格线会被 PDF 登记成嵌入图块（极扁横条），视觉 API 对其报 413——已按「高<48px 或高宽比<0.06」自动标记跳过；若仍有个别 413 顽固页，减半 dpi 重试一次后放弃该图（记占位 desc），不阻塞整批。
 - **老 pull 批（占位行缺失/无语义）**：pack 图位分配对「图多于图行」的页自动补页尾兜底；《民法物权》混合工程（视觉批 b001-b006+老 pull 批）实测 96/96 图全落位。老 pull 批建议跑一遍 `figure-desc` 补语义再 pack。
 - Git Bash 下 adb push 中文/绝对路径：目标路径要用 `//sdcard/...` 双斜杠防 MSYS 路径转换；SAF「文件」应用对新 push 的文件可能要等 MediaStore 扫描（或从抽屉进内部存储路径）才可见。
 
 ## 验证记录（2026-10-11）
 
-- selftest.py **79 项断言全绿**（2026-10-24 扩；含 pull 图占位行插段间/缝合守卫/段间空行、check rect 交叉校正、figure-desc dry-run、pack 拦 thin_pages、zip 三件内容校验、注释区〔脚注〕前缀+空行分隔、半角冒号归一化、txt/zip 版本串统一）。
+- selftest.py **80 项断言全绿**（2026-10-26 复跑 `ALL PASS`、退出码 0；含 pull 图占位行插段间/缝合守卫/段间空行、check rect 交叉校正、figure-desc dry-run、pack 拦 thin_pages、pack 拦 pull 占位图、zip 三件内容校验、注释区〔脚注〕前缀+空行分隔、半角冒号归一化、txt/zip 版本串统一）。
 - **真书《民法物权》577 页图链路全通（2026-10-24，MEASURED）**：`figure-desc` 真跑 96/96 图语义补齐（26 table/64 diagram/6 photo，商汤 sensenova-6.8-flash-lite，2 张 413 伪图=装饰线自动标记）；`check` rect 交叉校正吸收 b003 目测偏移图；`pack` 三产出（txt 538059 字含章界块+124 章、插图版 PDF 14.6MB、**zip 图包 9.9MB 含 96 张真图 PNG**，正文 96 条图行全部带语义图题+描述，格式 `〔图：{title}〕{desc}`）；模拟器 SAF 导入 zip → 确认页「bookocr 成品书：章界已由电脑侧确认，**96 张插图原位导入**」+ 32 章 6276 段预填 → 完成导入 → Room 复核 **figures 表 96 行、96 行 ordAfterPara≥0 全锚定**（bookId=14）→ 阅读页附录章（15 段+8 图）真图渲染（原书图版照片 + 图题小字，截图为证）。
 - App 单测 821 绿 0 失败 1 skipped（基线 802+19：KitZipReaderTest 5 + KitFigureMatcherTest 3 + KitBookParserTest 11）。
 - 真书《损害赔偿》60 页样本：b001+b002 真实子代理转写 7981 字，CIP 页/序言逐字准确、跨页断句无缝续接；pack 双产出成功。
@@ -94,6 +96,7 @@
 - aivision 直连视觉 API 实测（2026-10-11）：10 页/批 23 秒（并发 5）、b007/b008 成品 vs 文字层相似度 0.985/0.986（子代理路线 0.989，持平）；p529 稳定超时改走 pull 兜底（见已知坑）。
 
 ## 最后更新
+- 2026-10-26 **批C 遗留两处修复（做转移包前复跑 selftest 揪出，79→80 断言全绿）**：①`check` 图版页自动豁免分支崩——`re.split(PAGE_MARK, text)` 因正则带捕获组，返回值里页号落在**奇数位**、正文在偶数位，原代码 `range(0, len(parts)-1, 2)` 第一步就 `int('')` 抛 ValueError，pull 遇含大图页（归一化面积 >0.3）的批整批崩（`bookocr.py:963`，改用已编译的 `PAGE_MARK.split()` + `range(1, len(parts)-1, 2)`）。②selftest 没跟上批C 的 pack 占位图拦截——`_selftest_pull2` 清掉 thin_pages 后直接 pack，被「有 2 张图还没补语义」拦下报 FileNotFoundError；补一条拦截断言（`还没补语义` 必须出现），打包那步改 `pack --auto-chapters --force`（自测不联网，不能真跑 figure-desc 补语义）。③事实记录：批C 那次提交（a1714a7）自带红基线——本机实测 5 条 FAIL + 两处 traceback，且本总览未回写；本次一并补齐。**影响面（推断，未实测）**：崩的那条分支只在「pull 路线 + 批内有大图页 + check 不带 --force」时进入，《民法物权》在批C 之前就已 pack 完，所以还没有真书踩过，下一本 pull 的书会踩。
 - 2026-10-24 **KIT 链路两侧联审四缝隙修复**：①pack 注释区每条脚注独立成段 + 〔脚注〕前缀（App 端剥标落 FOOTNOTE 次级小字 + 粗读/总结 AI 全跳过；原连续无空行被 App softMerge 粘成 BODY 大段混进 AI 输入；插图版 PDF 注释区不受影响）；②pack 图占位行归一化全角冒号（App 端旧版只认全角，双保险）；③txt 元数据 v 统一 "bookocr-kit 1.2"（原 1.1 与 zip 1.2 不一致）；④**协议纪律写死**：kit=1 是协议版本位，扩展只加可选字段勿 bump（旧 App 收 kit:2 zip 整包拒）。App 端配套：书名预填 preferredTitle（kit 元数据优先、zip 尾巴防护）、FIGURE_PREFIXES 兼容半角、确认页 KIT 书隐藏「识别规则」（详见 M2 总览）。selftest 76→79 断言全绿。
 - 2026-10-24 **KIT 图包 zip + figure-desc + 图位精确化（本轮大改，「图片识别做的不好」投诉闭环）**：①新增 `figure-desc` 命令——pull 图语义批量补齐（裁图+视觉 API 逐图问答写回 title/desc/kind/file/w/h，幂等、--dry-run、伪图装饰线自动判定）；②`pull` 图占位行按图块 y 坐标 bisect 插进段间正确位置（不再一律页尾）+ 缝合守卫（图行两侧不跨页拼段）+ 批文件段间空行（修 App 端页内多段并一段）；③`check` rect 交叉校正——视觉目测坐标与 PDF 嵌入图块坐标 IoU≥0.3 时用 PDF 精确坐标替换（记 rect_src="pdf"）；④`pack` 三产出加 **zip 图包**（kit.json 章表+figures 清单 / book.txt / figures/*.png 真图三件套，KPI 图位分配：页内第 k 条图行吃第 k 张图、pull 占位行重写成正式格式、余图页尾兜底）+ thin_pages 挂账拦截 + 段间空行；⑤config.output 默认加 "zip"；⑥selftest 59→76 断言全绿。App 端配套 `KitZipReader`/`KitFigureMatcher`/ImportViewModel zip 分支（详见 M2 总览）。真书 96/96 图 E2E 全通（见验证记录）。
 - 2026-10-24 **KIT 成品书直入协议（配合 App 端 M2 直入通道）**：①新增 `chapters` 切章对账命令——程序切章（章号族+前/后置词族，目录页独立成章）→ 目录条目 difflib 对账（偏移众数换算印刷页码）→ 三类疑点（toc_miss/gap/thin）出裁决任务卡 → 纯文本子代理裁决 `--apply` 吸收（ADD/DROP/IGNORE 持久台账）；无疑点自动跳过裁决。②`pack` 写 KIT 元数据块（章表 {t,p,lv,r,a}）进 txt 头部 + **保留〔页N〕页标记行**（App 端剥标记记 pageNo）；pack 门槛加「已切章」，`--auto-chapters`/`--no-chapters` 可选。③新增 `config.json`（route/pages_per_batch/dpi/aivision_workers/chapter_review/output 五键，init 快照进 manifest）。④SKILL.md/README 改 agent 无关版（ZCode/Qoder/反重力均可执行）。⑤selftest 扩到 59 项断言全绿（chapters 切章/对账/裁决、元数据块回读、config 兜底、页标记保留）。App 端配套：`KitBookParser` 直入 + role=FIGURE 图卡 + E2E 模拟器全链路验证（详见 M2 总览）。
