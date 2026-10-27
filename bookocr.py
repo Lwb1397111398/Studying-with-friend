@@ -1395,8 +1395,11 @@ def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = 
     needs_vision = any(bd["mixed"] for bd in bands)
     # 索引/年表页：双栏 + 密集页码，OCR 层会按文本框把两栏交错拼成一大段
     # （「… 122, 1(J7,错误374 …」）。视觉模型能按栏还原，逐条对齐。
+    # 判据用「短行 + ≥3 个独立数字」而不是数字字符数：正文句子里的「第10页」「第1201条」
+    # 也含 3 个以上数字字符，却不会交错；索引行是短词条 + 一串页码，多个独立数字才是真信号。
     if len(body) >= 10:
-        num_rows = sum(1 for r in body if len(re.findall(r"\d", r["text"])) >= 3)
+        num_rows = sum(1 for r in body
+                       if len(r["text"]) <= 45 and len(re.findall(r"\d+", r["text"])) >= 3)
         needs_vision = needs_vision or num_rows >= len(body) * 0.5
     # 整页繁体字形：扫描件 OCR 层在部分页返回繁体（「枚利」「惡則」「美系」），
     # 简体正文里出现 ≥3 个繁体专用字几乎必然是识别层坏了，整页交视觉重识别。
