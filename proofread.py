@@ -400,6 +400,7 @@ def _ai_parse(text: str, paras: list[str]) -> tuple[list[tuple[str, str]], list[
     if len(edits_raw) > 8 or len(merges_raw) > 3:
         raise _Retry("parse", "JSON 结构异常（条目超标）")
     flag = flag_raw == "needs_vision"
+    merged: list[tuple[str, str]] = []
     seen: set[str] = set()
     for e in edits_raw:
         if not isinstance(e, dict):
