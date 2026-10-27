@@ -9,6 +9,7 @@ bookocr-kit 自测：合成一本 12 页假书，把 init→prep→next→check�
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -445,8 +446,7 @@ def main() -> None:
         "〔图：第3页示意〕",                               # 结构行须原样保留
         "",
     ]
-    (JOBP / "batches" / "b001.txt").write_text("
-".join(parts), encoding="utf-8")
+    (JOBP / "batches" / "b001.txt").write_text("\n".join(parts), encoding="utf-8")
     (JOBP / "batches" / "b001_notes.txt").write_text("", encoding="utf-8")
     (JOBP / "batches" / "b001_figures.json").write_text("[]", encoding="utf-8")
 

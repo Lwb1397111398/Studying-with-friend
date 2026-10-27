@@ -147,7 +147,7 @@ def _fix_lpats(s: str) -> tuple[str, list[dict]]:
 def _fix_latin_parens(s: str) -> tuple[str, list[dict]]:
     """（IO万元）→（10万元）：中文括号内紧跟的 I+数字 里的 I 是 1 的误识。"""
     fixes: list[dict] = []
-    m = re.search(r"（I([0-9]+)", s)
+    m = re.search(r"（I([0-9O]+)", s)
     if m:
         old = "（I" + m.group(1)
         new = "（1" + m.group(1)
