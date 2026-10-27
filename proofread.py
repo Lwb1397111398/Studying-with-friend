@@ -136,7 +136,8 @@ def _fix_lpats(s: str) -> tuple[str, list[dict]]:
     fixes: list[dict] = []
     if not re.search(r"[(（]l[)）]", s):
         return s, fixes
-    if re.search(r"[(（]\s*[2-9一二三四五六七八九十][)）]", s) or re.search(r"[2-9][.、．]", s):
+    # 同段的其他列举记号可能带空格（扫描版「（2 ）」常见），触发条件要容忍
+    if re.search(r"[(（]\s*[2-9一二三四五六七八九十]\s*[)）]", s) or re.search(r"[2-9][.、．]", s):
         for old, new in (("（l）", "（1）"), ("(l)", "(1)"), ("（l)", "（1）"), ("(l）", "(1)")):
             if old in s:
                 s = s.replace(old, new)
