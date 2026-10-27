@@ -2,30 +2,37 @@
  "acks": {
   "切章与打包模块总览.md": {
    "bookocr.py": {
-    "sha1": "4a3642241e421831fb470d3cd2b41b9211106db6",
-    "note": "本次仅改索引页 needs_vision 判据（文字层拔取），未触及本模块职能",
-    "acked_at": "2026-10-27 13:07:56"
+    "sha1": "b62b812deb834f9eb48150645a0d59db502b3a73",
+    "note": "bookocr.py 改动仅为新增 proofread 子命令桥接（独立 parser 块+转发函数），不影响本模块职能",
+    "acked_at": "2026-10-27 23:07:29"
    }
   },
   "工程与状态模块总览.md": {
    "bookocr.py": {
-    "sha1": "4a3642241e421831fb470d3cd2b41b9211106db6",
-    "note": "本次仅改索引页 needs_vision 判据（文字层拔取），未触及本模块职能",
-    "acked_at": "2026-10-27 13:07:57"
+    "sha1": "b62b812deb834f9eb48150645a0d59db502b3a73",
+    "note": "bookocr.py 改动仅为新增 proofread 子命令桥接（独立 parser 块+转发函数），不影响本模块职能",
+    "acked_at": "2026-10-27 23:07:29"
    }
   },
   "视觉识别模块总览.md": {
    "bookocr.py": {
-    "sha1": "4a3642241e421831fb470d3cd2b41b9211106db6",
-    "note": "本次仅改索引页 needs_vision 判据（文字层拔取），未触及本模块职能",
-    "acked_at": "2026-10-27 13:07:57"
+    "sha1": "b62b812deb834f9eb48150645a0d59db502b3a73",
+    "note": "bookocr.py 改动仅为新增 proofread 子命令桥接（独立 parser 块+转发函数），不影响本模块职能",
+    "acked_at": "2026-10-27 23:07:30"
    }
   },
   "质检与修复模块总览.md": {
    "bookocr.py": {
-    "sha1": "4a3642241e421831fb470d3cd2b41b9211106db6",
-    "note": "本次仅改索引页 needs_vision 判据（文字层拔取），未触及本模块职能",
-    "acked_at": "2026-10-27 13:07:57"
+    "sha1": "b62b812deb834f9eb48150645a0d59db502b3a73",
+    "note": "bookocr.py 改动仅为新增 proofread 子命令桥接（独立 parser 块+转发函数），不影响本模块职能",
+    "acked_at": "2026-10-27 23:07:30"
+   }
+  },
+  "文字层拔取模块总览.md": {
+   "bookocr.py": {
+    "sha1": "b62b812deb834f9eb48150645a0d59db502b3a73",
+    "note": "bookocr.py 改动仅为新增 proofread 子命令桥接（独立 parser 块+转发函数），不影响本模块职能",
+    "acked_at": "2026-10-27 23:07:29"
    }
   }
  }
