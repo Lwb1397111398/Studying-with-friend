@@ -148,11 +148,11 @@ def _fix_lpats(s: str) -> tuple[str, list[dict]]:
 def _fix_latin_parens(s: str) -> tuple[str, list[dict]]:
     """（IO万元）→（10万元）：中文括号内紧跟数字位的 I/O 是 1/0 的误识。"""
     fixes: list[dict] = []
-    m = re.search(r"（I([0-9O]{1,6})", s)
+    m = re.search(r"[(（]\s*I([0-9O]{1,6})", s)
     if m:
         digits = m.group(1)
-        old = "（I" + digits
-        new = "（1" + digits.replace("O", "0")
+        old = m.group(0)
+        new = old[0] + "1" + digits.replace("O", "0")
         s = s.replace(old, new)
         fixes.append({"old": old, "new": new, "rule": "latin_upper"})
     return s, fixes
@@ -301,6 +301,7 @@ def _load_profiles() -> list[dict]:
 
 
 def _pick_profile() -> dict | None:
+    _load_profiles()  # 惰性兜底：未显式加载过的调用方（如探测脚本）也能拿到档案
     with _PROFILE_LOCK:
         now = time.time()
         for p in _PROFILES or []:
@@ -776,8 +777,6 @@ def cmd_proofread(a: argparse.Namespace, m: dict | None = None) -> None:
     out(f"[ok] 校对完成：模式={mode} / {len(bids)} 批 / {total_fixes} 修复"
         + (f" / 视觉复核页 {sorted(set(flagged_pages))}" if flagged_pages else ""))
     out(f"[ok] 报告 → {rp}")
-    if flagged_pages and not rules_only_flag is False and not getattr(a, "rules_only", False):
-        pass
     if flagged_pages:
         out("下一步：视需 python bookocr.py reocr --needs-vision --exact 处理标记页")
     out("下一步：qa 终检 → chapters --no-review → pack")

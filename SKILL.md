@@ -74,7 +74,12 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
    python bookocr-kit/bookocr.py figure-desc <书名> [--dry-run]
    ```
    按坐标裁小图 → 视觉 API 逐图补图题/描述/类型（photo/table/diagram），pack 时正文占位行与图包清单用的就是补好的语义。先 `--dry-run` 看裁图对不对再真跑。有图的书**必跑**，否则老板在 App 里看到的图全是「第N页插图」。
-6. **切章（全书转完必跑——产出手机 App 直入的章界，替代 App 端猜测）**：
+6. **智能校对（pull 路线的书强烈建议，在 reocr 之后、chapters 之前）**：
+   ```
+   python bookocr-kit/bookocr.py proofread <书名> [--no-ai] [--dry-run] [--workers 3]
+   ```
+   两层：规则层（零成本确定性规则）清脚注序号残留、`(l)`→`(1)`、`（IO`→`（10`、形近白名单错字、垃圾碎片段、整页繁体段；AI 层（文本 API 逐页通读，temperature 0.1，默认开）修形近错字、粘连碎句，输出受控 JSON（find 必须页内唯一、禁触结构标记、edits≤8/merges≤3），无法修的整页打 `needs_vision` 交回 `reocr --needs-vision --exact`。每次运行自动备份 `batches/` 到 `proofread/backup-<ts>/`，落 `changes.json` + `proofread_report.md` 审计。铁律：**必须在 reocr 之后跑**（reocr 整批覆盖会冲掉校对微调），chapters/pack 之前。
+7. **切章（全书转完必跑——产出手机 App 直入的章界，替代 App 端猜测）**：
    ```
    python bookocr-kit/bookocr.py chapters <书名>
    ```
@@ -85,12 +90,12 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
      python bookocr-kit/bookocr.py chapters <书名> --apply <工程>/chapters_review.txt
      ```
      反跑到无疑点为止。个别裁决不了的疑点记台账不阻塞，最终汇报列出。不想派裁决就 `chapters <书名> --no-review`（疑点只记台账，pack 不拦）。
-7. **全批 done 且切章后打包**：
+8. **全批 done 且切章后打包**：
    ```
    python bookocr-kit/bookocr.py pack <书名>
    ```
    产出 `jobs/<书名>/output/` 下三件：`书名.txt`（头部带章界元数据块——App 识别到即按电脑侧章表直入）、`书名_插图版.pdf`（没装 reportlab 则跳过）、`书名_Kit图包.zip`（**推荐手机导入用这个**：kit.json 章表+图清单 + book.txt + 裁好的真图，App 一个文件直入、阅读页图文混排）。忘跑 chapters 会被拦（或 `pack --auto-chapters` 一条龙）；图版页没 patch 也会被拦（先 `patch`，确要占位打包加 `--force`）。
-8. **汇报**（人话，给老板）：总页数、总字数、图张数（含 figure-desc 补语义情况）、**章数与疑点裁决情况**、产出文件完整路径、一句「微信传 zip 图包到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章、插图原位显示」。附 token 粗账（pull 批零消耗；figure-desc 走识图 API、每图一次小图调用；aivision 批 10 页约 23 秒；子代理批约 50 万 token/10 页）。
+9. **汇报**（人话，给老板）：总页数、总字数、图张数（含 figure-desc 补语义情况）、**章数与疑点裁决情况**、产出文件完整路径、一句「微信传 zip 图包到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章、插图原位显示」。附 token 粗账（pull 批零消耗；figure-desc 走识图 API、每图一次小图调用；aivision 批 10 页约 23 秒；子代理批约 50 万 token/10 页）。
 
 ## 断点续转（会话中断/换会话/换 agent）
 

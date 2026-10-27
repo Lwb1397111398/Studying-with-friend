@@ -49,7 +49,7 @@
 
 | 文件 | 干什么 |
 | --- | --- |
-| `bookocr.py` | 识别台程序（十三个子命令：init 建工程 / prep 渲染 / pull 文字层拔取 / aivision 视觉 API / **qa 逐页质检** / **reocr 按页视觉重识别** / patch 图版页补描述 / next 发任务 / check 质检 / retry / **chapters 切章对账** / status / pack 打包） |
+| `bookocr.py` | 识别台程序（十四个子命令：init 建工程 / prep 渲染 / pull 文字层拔取 / aivision 视觉 API / **qa 逐页质检** / **reocr 按页视觉重识别** / patch 图版页补描述 / next 发任务 / check 质检 / retry / **proofread 智能校对** / **chapters 切章对账** / status / pack 打包） |
 | `SKILL.md` | agent 的操作手册（agent 无关：触发词、省 token 铁律、流程、故障处理） |
 | `spec.md` | 转写规范（子代理干活前必读：怎么转字、图表怎么处理、三个输出文件） |
 | `config.json` | 全局设置（上表；无密钥，随 kit 走） |
