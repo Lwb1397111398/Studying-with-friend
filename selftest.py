@@ -422,11 +422,78 @@ def main() -> None:
     check(m4.get("chapter_review_pending") is False, "IGNORE 后疑点清零、可 pack")
     check(m4["chapter_rulings"].get("p9:第四章 缺章") == "ADD|第四章 缺章", "裁决持久入台账（重跑不丢）")
 
+    print("== proofread 规则层 + AI Stub ==")
+    run(f'init _selftest_pf --src "{src}" --batch 12')
+    JOBP = KIT / "jobs" / "_selftest_pf"
+    run("prep _selftest_pf")
+    # 直接种写批文件（不走 pull，聚焦校对层逻辑）
+    junk = "勹无因管理仁覃言＄芦"
+    parts = [
+        "〔页1〕",
+        "第1页测试一。债之关系。专",                      # note_tail 段尾残留
+        "知己知彼，百战不殆；知已知彼，为谋之大忌。",      # zhiji 成语白名单
+        "甲的观点是淮确的。",                             # huai 错字
+        "",
+        "〔页2〕",
+        "（l）先看定义；（2）再看构成要件；（3）最后看效果。",  # l_paren（同段有 (2)(3)）
+        "费用共计（IO万元），分五期支付。",                 # latin_upper
+        "第2页测试一。他说此观点是女子的，实则应为好的。",   # 语义级错字留给 AI 层（规则层不动）
+        "",
+        "〔页3〕",
+        "勹示意线｛坐标轴｝",                            # junk：短、含垃圾符号、无读点
+        "＼｜卩",                                        # junk：纯垃圾符号
+        "〔图：第3页示意〕",                               # 结构行须原样保留
+        "",
+    ]
+    (JOBP / "batches" / "b001.txt").write_text("
+".join(parts), encoding="utf-8")
+    (JOBP / "batches" / "b001_notes.txt").write_text("", encoding="utf-8")
+    (JOBP / "batches" / "b001_figures.json").write_text("[]", encoding="utf-8")
+
+    # ---- 规则层（--rules-only）----
+    run("check _selftest_pf b001 --force")              # 台账先置 done，否则 proofread 选不出该批
+    o = run("proofread _selftest_pf --batch b001 --rules-only --no-backup")
+    txt = (JOBP / "batches" / "b001.txt").read_text(encoding="utf-8")
+    check("债之关系。" in txt and "债之关系。专" not in txt, "note_tail：段尾「专」被删")
+    check("知己知彼" in txt, "zhiji：知已知彼 → 知己知彼")
+    check("淮确" not in txt and "准确" in txt, "huai：淮确 → 准确")
+    check("（1）" in txt and "（l）" not in txt, "l_paren：（l）→（1）")
+    check("（10万元）" in txt and "（IO万元）" not in txt, "latin_upper：（IO万元）→（10万元）")
+    p3 = txt.split("〔页3〕")[1]
+    check("勹示意线" not in p3 and "＼｜卩" not in p3, "junk：垃圾碎片段被删除")
+    check("〔图：第3页示意〕" in p3, "结构行〔图：…〕原样保留")
+    m_pf = json.loads((JOBP / "manifest.json").read_text(encoding="utf-8"))
+    check("fix" in o or "修复" in o, "规则层运行成功")
+    check((JOBP / "proofread" / "changes.json").exists(), "changes.json 落盘")
+    ch = json.loads((JOBP / "proofread" / "changes.json").read_text(encoding="utf-8"))
+    rules = {f.get("rule") for v in ch.values() for f in v}
+    check("note_tail" in rules and "zhiji" in rules and "huai" in rules
+          and "l_paren" in rules and "latin_upper" in rules and "junk_line" in rules,
+          "六条规则全部命中")
+    check("第2页测试一" in txt and "女子的" in txt, "规则层不做语义级改写（留给 AI 层）")
+
+    # ---- AI Stub 链路 ----
+    stub = JOBP / "stub.json"
+    stub.write_text(json.dumps({
+        "edits": [{"find": "女子的", "replace": "好的"}],
+        "merges": []
+    }, ensure_ascii=False), encoding="utf-8")
+    env = dict(os.environ, PROOFREAD_AI_STUB=str(stub))
+    r = subprocess.run([PY, str(KIT / "proofread.py"), "_selftest_pf", "--batch", "b001",
+                        "--no-backup"], capture_output=True, text=True,
+                       encoding="utf-8", cwd=str(KIT), env=env)
+    txt = (JOBP / "batches" / "b001.txt").read_text(encoding="utf-8")
+    check("好的" in txt and "女子的" not in txt, "AI 层：语义级错字被修复")
+    check(r.returncode == 0, "AI Stub 全链路跑通")
+    rep = (JOBP / "proofread" / "proofread_report.md").read_text(encoding="utf-8")
+    check("AI" in rep or "ai" in rep, "报告含 AI 层记录")
+
     print("== 清理 ==")
     shutil.rmtree(JOB, ignore_errors=True)
     shutil.rmtree(JOB2, ignore_errors=True)
     shutil.rmtree(JOB3, ignore_errors=True)
     shutil.rmtree(JOB4, ignore_errors=True)
+    shutil.rmtree(JOBP, ignore_errors=True)
     src.unlink(missing_ok=True)
     if FAILS:
         print(f"SELFTEST FAIL：{len(FAILS)} 项未过")

@@ -2684,6 +2684,12 @@ def _style_of(para: str, h1, h2, body):
 
 # ---------------------------------------------------------------- main
 
+def _cmd_proofread_bridge(a: argparse.Namespace) -> None:
+    """proofread 子命令：转发到独立模块 proofread.py（命令行入口统一在 bookocr.py）。"""
+    import proofread
+    proofread.cmd_proofread(a)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="扫描版 PDF 识别台（agent 驱动）")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2770,10 +2776,6 @@ def main() -> None:
     p.add_argument("--no-review", action="store_true", help="不生成裁决任务卡（疑点只记台账，pack 不拦）")
     p.set_defaults(fn=cmd_chapters)
 
-    p = sub.add_parser("status")
-    p.add_argument("job")
-    p.set_defaults(fn=cmd_status)
-
     p = sub.add_parser("pack")
     p.add_argument("job")
     p.add_argument("--no-pdf", action="store_true")
@@ -2781,6 +2783,22 @@ def main() -> None:
     p.add_argument("--auto-chapters", action="store_true", help="还没切章时自动先跑一次 chapters")
     p.add_argument("--no-chapters", action="store_true", help="txt 不带章界元数据块（旧格式）")
     p.set_defaults(fn=cmd_pack)
+
+    p = sub.add_parser("status")
+    p.add_argument("job")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("proofread")
+    p.add_argument("job")
+    p.add_argument("--pages", default=None, help="只校对指定页，如 31,100-120")
+    p.add_argument("--batch", default=None, help="只校对指定批，如 b011")
+    p.add_argument("--all", action="store_true", help="全书所有 done 批")
+    p.add_argument("--rules-only", action="store_true", help="只跑规则层，不调文本 API")
+    p.add_argument("--no-ai", action="store_true", help="禁用 AI 层（与 --rules-only 等效）")
+    p.add_argument("--dry-run", action="store_true", help="只出报告和标记，不写回批文件")
+    p.add_argument("--workers", type=int, default=3, help="AI 层并发（默认 3，过高会 429）")
+    p.add_argument("--no-backup", action="store_true", help="不备份原批")
+    p.set_defaults(fn=_cmd_proofread_bridge)
 
     a = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
