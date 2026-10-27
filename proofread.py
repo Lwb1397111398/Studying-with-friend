@@ -145,12 +145,13 @@ def _fix_lpats(s: str) -> tuple[str, list[dict]]:
 
 
 def _fix_latin_parens(s: str) -> tuple[str, list[dict]]:
-    """（IO万元）→（10万元）：中文括号内紧跟的 I+数字 里的 I 是 1 的误识。"""
+    """（IO万元）→（10万元）：中文括号内紧跟数字位的 I/O 是 1/0 的误识。"""
     fixes: list[dict] = []
-    m = re.search(r"（I([0-9O]+)", s)
+    m = re.search(r"（I([0-9O]{1,6})", s)
     if m:
-        old = "（I" + m.group(1)
-        new = "（1" + m.group(1)
+        digits = m.group(1)
+        old = "（I" + digits
+        new = "（1" + digits.replace("O", "0")
         s = s.replace(old, new)
         fixes.append({"old": old, "new": new, "rule": "latin_upper"})
     return s, fixes
@@ -399,22 +400,15 @@ def _ai_parse(text: str, paras: list[str]) -> tuple[list[tuple[str, str]], list[
     if len(edits_raw) > 8 or len(merges_raw) > 3:
         raise _Retry("parse", "JSON 结构异常（条目超标）")
     flag = flag_raw == "needs_vision"
-
-    merged: list[tuple[str, str]] = []
     seen: set[str] = set()
     for e in edits_raw:
         if not isinstance(e, dict):
             continue
         old, new = e.get("find"), e.get("replace")
-        if not isinstance(old, str) or not isinstance(new, str):
-            continue
-        if not old or old.strip() == new.strip() and False:
-            continue
         if not old or not isinstance(new, str):
             continue
-        # 禁止触碰结构标记 / 链接 / 编号前缀 / 括号括号
-        bad = _FORBIDDEN
-        if any(k in old for k in bad) or any(k in new for k in bad):
+        # 禁止触碰结构标记 / 换行 / 编号前缀
+        if any(k in old for k in _FORBIDDEN) or any(k in new for k in _FORBIDDEN):
             continue
         if "\n" in old or "\n" in new or "【" in old or "【" in new or "〕" in old or "〕" in new:
             continue
