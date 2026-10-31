@@ -65,3 +65,23 @@ class RoughReadChunksTest {
         assertEquals(RoughReadChunks.MAX_BLOCK_CHARS + 1000, blocks[1].chars)
     }
 }
+
+/** 批D：分类采样纯函数——长段头尾抽样，短段全发 */
+class RoughReadSampleTest {
+
+    @Test
+    fun `短段全发不截断`() {
+        assertEquals("短文本", RoughReadPlanner.sampleForClassify("短文本"))
+        assertEquals(200, RoughReadPlanner.sampleForClassify("甲".repeat(200)).length)
+    }
+
+    @Test
+    fun `长段取头150加尾50`() {
+        val long = "头".repeat(300) + "尾".repeat(300)
+        val sampled = RoughReadPlanner.sampleForClassify(long)
+        assertEquals(RoughReadPlanner.SAMPLE_HEAD + 1 + RoughReadPlanner.SAMPLE_TAIL, sampled.length)
+        assertTrue(sampled.startsWith("头".repeat(RoughReadPlanner.SAMPLE_HEAD)))
+        assertTrue(sampled.endsWith("尾".repeat(RoughReadPlanner.SAMPLE_TAIL)))
+        assertTrue(sampled.contains("…"))
+    }
+}

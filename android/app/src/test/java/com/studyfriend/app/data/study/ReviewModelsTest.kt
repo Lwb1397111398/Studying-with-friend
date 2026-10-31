@@ -30,10 +30,11 @@ class ReviewModelsTest {
     }
 
     @Test
-    fun fuzzy_reschedulesSameInterval() {
+    fun fuzzy_dropsOneInterval() {
+        // 批D：模糊→降一档（原「同档重排」等于不惩罚）
         val a = advanceReview(2, ReviewVerdict.FUZZY, now)
-        assertEquals(2, a.intervalIdx)
-        assertEquals(now + 7 * day, a.dueAt)
+        assertEquals(1, a.intervalIdx)
+        assertEquals(now + 3 * day, a.dueAt)
         assertFalse(a.done)
     }
 
@@ -46,11 +47,11 @@ class ReviewModelsTest {
     }
 
     @Test
-    fun outOfRangeIdx_isCoercedInReturn() {
-        // 历史脏数据 idx=5：返回值不得持久化越界档位（M6 评审 P2-4）
+    fun outOfRangeIdx_isCoercedBeforeAdvance() {
+        // 历史脏数据 idx=5：coerce 到 4 后模糊降一档 → 3（批D语义）
         val a = advanceReview(5, ReviewVerdict.FUZZY, now)
-        assertEquals(4, a.intervalIdx)
-        assertEquals(now + 30 * day, a.dueAt)
+        assertEquals(3, a.intervalIdx)
+        assertEquals(now + 14 * day, a.dueAt)
     }
 
     // ---------- aggregateVerdict（计划 §2.2） ----------

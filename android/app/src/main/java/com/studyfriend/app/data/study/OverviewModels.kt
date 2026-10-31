@@ -96,7 +96,7 @@ private fun buildOverviewJson(
     val spec = OVERVIEW_TIERS.getOrElse(tier) { 150 to 75 }
     val usable = chapters.filter {
         assetByChapterId[it.id]?.let { a ->
-            a.promptVersion == SummaryPlanner.SUMMARY_VERSION && a.summaryMd.isNotBlank()
+            SummaryPlanner.isCurrentSummary(a.promptVersion) && a.summaryMd.isNotBlank()
         } == true
     }
     val kept = usable.take(OVERVIEW_CHAPTER_LIMIT)

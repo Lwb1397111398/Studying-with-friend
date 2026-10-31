@@ -17,7 +17,8 @@ data class ReviewAdvance(val intervalIdx: Int, val dueAt: Long, val done: Boolea
 
 /**
  * 按自评推进排期：记得→下一档；封顶档记得→完成（done=true 保持 30 天档）；
- * 模糊→同档重排；忘了→归 0。入口先 coerce，历史脏数据（越界 idx）不持久化越界值。
+ * 模糊→降一档（批D：原「同档重排」等于不惩罚，「记得不牢」就该拉回更近的间隔）；
+ * 忘了→归 0。入口先 coerce，历史脏数据（越界 idx）不持久化越界值。
  */
 fun advanceReview(intervalIdx: Int, verdict: ReviewVerdict, nowMs: Long): ReviewAdvance {
     val idx = intervalIdx.coerceIn(0, INTERVAL_DAYS.lastIndex)
@@ -28,7 +29,10 @@ fun advanceReview(intervalIdx: Int, verdict: ReviewVerdict, nowMs: Long): Review
             } else {
                 ReviewAdvance(idx + 1, nowMs + INTERVAL_DAYS[idx + 1] * DAY_MS, false)
             }
-        ReviewVerdict.FUZZY -> ReviewAdvance(idx, nowMs + INTERVAL_DAYS[idx] * DAY_MS, false)
+        ReviewVerdict.FUZZY -> {
+            val next = (idx - 1).coerceAtLeast(0)
+            ReviewAdvance(next, nowMs + INTERVAL_DAYS[next] * DAY_MS, false)
+        }
         ReviewVerdict.FORGOT -> ReviewAdvance(0, nowMs + INTERVAL_DAYS[0] * DAY_MS, false)
     }
 }

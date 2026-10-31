@@ -276,3 +276,27 @@ class VisionRebuilderTest {
         assertEquals(2, db.visionQueueDao().byBook(bookId).size)
     }
 }
+
+/** 批E2：目录并段条目重切——视觉转写把多个条目并进一段时按条目边界切开 */
+class TocGlueSplitTest {
+
+    @Test
+    fun `页码收尾加中文序号边界切开`() {
+        val out = VisionRebuilder.splitGluedTocEntries("一、案例•(188)二思考模式……(189)")
+        assertEquals(listOf("一、案例•(188)", "二思考模式……(189)"), out)
+    }
+
+    @Test
+    fun `三段连锁切分`() {
+        val out = VisionRebuilder.splitGluedTocEntries("一、案例(188)二、思考(189)三、证明(190)")
+        assertEquals(3, out.size)
+        assertEquals("三、证明(190)", out[2])
+    }
+
+    @Test
+    fun `无边界原样返回`() {
+        val one = "一、案例•(188)"
+        assertEquals(listOf(one), VisionRebuilder.splitGluedTocEntries(one))
+        assertEquals(listOf(""), VisionRebuilder.splitGluedTocEntries(""))
+    }
+}

@@ -297,12 +297,26 @@ data class WrongAttempt(
     val verdict: String,
     val feedback: String?,
     val createdAt: Long,
+    /** 批D：SUMMARY=章末自测（题干在章资产 quizJson）；NOTE=讲解自问（题干在 para_notes.questionsJson） */
+    val source: String = "SUMMARY",
 )
 
 @Dao
 interface QuizAttemptDao {
     @Query("SELECT * FROM quiz_attempts WHERE chapterId = :chapterId ORDER BY createdAt")
     suspend fun byChapter(chapterId: Long): List<QuizAttemptEntity>
+
+    /** 批D学情：该章错题（每题最新作答仍非 CORRECT 的），总结输入带学情用 */
+    @Query(
+        """SELECT * FROM quiz_attempts qa
+        WHERE qa.chapterId = :chapterId AND qa.verdict != 'CORRECT' AND qa.id = (
+            SELECT q2.id FROM quiz_attempts q2
+            WHERE q2.chapterId = qa.chapterId AND q2.qIndex = qa.qIndex
+            ORDER BY q2.createdAt DESC, q2.id DESC LIMIT 1
+        )
+        ORDER BY qa.createdAt DESC LIMIT :limit""",
+    )
+    suspend fun wrongLatestByChapter(chapterId: Long, limit: Int): List<QuizAttemptEntity>
 
     @Query("SELECT * FROM quiz_attempts WHERE chapterId = :chapterId ORDER BY createdAt")
     fun byChapterFlow(chapterId: Long): Flow<List<QuizAttemptEntity>>
@@ -322,7 +336,7 @@ interface QuizAttemptDao {
         """SELECT qa.id AS id, c.bookId AS bookId, qa.chapterId AS chapterId,
                c.title AS chapterTitle, b.title AS bookTitle, qa.qIndex AS qIndex,
                qa.answer AS answer, qa.verdict AS verdict, qa.feedback AS feedback,
-               qa.createdAt AS createdAt
+               qa.createdAt AS createdAt, qa.source AS source
         FROM quiz_attempts qa JOIN chapters c ON c.id = qa.chapterId
         JOIN books b ON b.id = c.bookId
         WHERE qa.id = (
@@ -503,6 +517,12 @@ interface QaHistoryDao {
     )
     suspend fun latestByBook(bookId: Long): List<QaHistoryEntity>
 
+    /** 批D学情：该章最近 N 条随手问（question 只，喂总结输入） */
+    @Query(
+        "SELECT * FROM qa_history WHERE chapterId = :chapterId ORDER BY createdAt DESC, id DESC LIMIT :limit",
+    )
+    suspend fun latestByChapter(chapterId: Long, limit: Int): List<QaHistoryEntity>
+
     /** 淘汰超出保留窗的旧行：append 后调用，keep=50 */
     @Query(
         """DELETE FROM qa_history WHERE bookId = :bookId AND id NOT IN (
@@ -532,6 +552,10 @@ interface ParaMemoDao {
     /** 阅读页段落标记源：按段序排，UI 按 paraId 匹配段落行显示标记 */
     @Query("SELECT * FROM para_memos WHERE chapterId = :chapterId ORDER BY paraIdx, id")
     fun byChapterFlow(chapterId: Long): Flow<List<ParaMemoEntity>>
+
+    /** 批D学情：讲解生成一次读取（非流式），按段序排 */
+    @Query("SELECT * FROM para_memos WHERE chapterId = :chapterId ORDER BY paraIdx, id")
+    suspend fun byChapterOnce(chapterId: Long): List<ParaMemoEntity>
 
     /** 抽屉批注列表：全书批注带章名（最新在前，跳转走 paraId 段锚） */
     @Query(

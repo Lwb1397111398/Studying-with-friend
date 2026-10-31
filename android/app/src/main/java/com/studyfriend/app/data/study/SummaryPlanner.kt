@@ -84,12 +84,21 @@ class SummaryPlanner(
         }
         val terms = KeyTermsCodec.decode(chapter.keyTermsJson).map { it.term }
 
+        // 批D学情：错题（最新 5，含作答）+ 随手问（最新 5）+ 读者批注（最新 5）——总结讲
+        // 「这一章」时知道读者哪里卡过。全空 = 无学情，版本号不变零重生成
+        val wrong = db.quizAttemptDao().wrongLatestByChapter(chapterId, LEARNER_WRONG_MAX)
+        val qas = db.qaHistoryDao().latestByChapter(chapterId, LEARNER_QA_MAX)
+        val memos = db.paraMemoDao().byChapterOnce(chapterId).takeLast(LEARNER_MEMO_MAX)
+        val learner = buildLearnerContext(wrong, qas, memos)
+
         var retried = false
         var lastRaw: String? = null
         var bundle: SummaryBundle? = null
         for (attempt in 1..PARSE_ATTEMPTS) {
             coroutineContext.ensureActive()
-            val userJson = buildSummaryUserJson(chapter.title, chapter.gist, terms, paragraphs, noteByAnchorIdx) +
+            val userJson = buildSummaryUserJson(
+                chapter.title, chapter.gist, terms, paragraphs, noteByAnchorIdx, learner,
+            ) +
                 if (attempt > 1) "\n\n上次输出不符合五标签格式，请严格按标签格式重新输出全部五段" else ""
             // 累计 partial 直通 UI（重试时归零重算），Streaming 视图据此增量渲染；
             // 按 STREAM_FLUSH_MS 节流发射，成功/失败态紧随其后无需尾部补刷
@@ -133,7 +142,7 @@ class SummaryPlanner(
                     chainMd = result.chainMd,
                     quizJson = QuizCodec.encode(result.questions),
                     model = cfg.model,
-                    promptVersion = SUMMARY_VERSION,
+                    promptVersion = summaryVersion(learner != null),
                     createdAt = System.currentTimeMillis(),
                 ),
             )
@@ -170,6 +179,20 @@ class SummaryPlanner(
         const val SUMMARY_VERSION = "summary-pack-v1"
         const val PARSE_ATTEMPTS = 2
         const val FIRST_DUE_MS = 24 * 60 * 60 * 1000L
+
+        /** 批D：学情进输入的条数上限（错题/问答/批注各自独立封顶） */
+        const val LEARNER_WRONG_MAX = 5
+        const val LEARNER_QA_MAX = 5
+        const val LEARNER_MEMO_MAX = 5
         private const val TAG = "SummaryPlanner"
+
+        /** 批D学情：该章有错题/批注/问答记录时版本带 -s1 后缀（学情进输入），无学情书版本不变零重生成 */
+        fun summaryVersion(hasLearnerContext: Boolean): String =
+            if (hasLearnerContext) "$SUMMARY_VERSION-s1" else SUMMARY_VERSION
+
+        /** 是否当前版本的总结资产（含学情后缀变体）——总览/门控/展示侧过滤统一走这里 */
+        fun isCurrentSummary(version: String?): Boolean =
+            version != null &&
+                (version == SUMMARY_VERSION || version.startsWith("$SUMMARY_VERSION-"))
     }
 }

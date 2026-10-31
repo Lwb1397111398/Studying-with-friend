@@ -119,3 +119,52 @@ class OcrEngineTest {
         assertTrue("y 桶升序", boxes[1][1] / 24 <= boxes[2][1] / 24)
     }
 }
+
+/** 批E1：同行水平重叠框合并——大标题被 det 切成两个交叠框时并成一个再 rec，修叠字章题 */
+class OcrDetPostMergeTest {
+
+    @Test
+    fun `同行交叠框取并集`() {
+        // 「第二章」被切成两段：左框 x[10,60]、右框 x[40,120]，y 同行，x 交叠 20px ≥ 30%*50
+        val boxes = listOf(
+            intArrayOf(10, 100, 60, 130),
+            intArrayOf(40, 102, 120, 128),
+        )
+        val out = OcrDetPost.mergeSameLineOverlaps(boxes)
+        assertEquals(1, out.size)
+        assertEquals(10, out[0][0])
+        assertEquals(100, out[0][1])
+        assertEquals(120, out[0][2])
+        assertEquals(130, out[0][3])
+    }
+
+    @Test
+    fun `不同行不合并`() {
+        val boxes = listOf(
+            intArrayOf(10, 100, 60, 130),
+            intArrayOf(10, 140, 60, 170), // 下一行，y 不重叠
+        )
+        assertEquals(2, OcrDetPost.mergeSameLineOverlaps(boxes).size)
+    }
+
+    @Test
+    fun `同行但x交叠不足三成不合并`() {
+        val boxes = listOf(
+            intArrayOf(10, 100, 60, 130),
+            intArrayOf(56, 102, 120, 128), // 交叠 4px，min 宽 50 → 8% < 30%
+        )
+        assertEquals(2, OcrDetPost.mergeSameLineOverlaps(boxes).size)
+    }
+
+    @Test
+    fun `三框连锁合并`() {
+        val boxes = listOf(
+            intArrayOf(10, 100, 60, 130),
+            intArrayOf(40, 102, 120, 128),
+            intArrayOf(90, 101, 180, 129), // 与合并后框 x 交叠 30px ≥ 30%*min(110,90)
+        )
+        val out = OcrDetPost.mergeSameLineOverlaps(boxes)
+        assertEquals(1, out.size)
+        assertEquals(180, out[0][2])
+    }
+}

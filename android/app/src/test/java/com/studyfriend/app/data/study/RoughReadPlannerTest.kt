@@ -150,10 +150,12 @@ class RoughReadPlannerTest {
         assertEquals("GROUP", paras[3].aiAction)
         assertEquals(2L, paras[3].groupId)
 
-        // 输入每段截 200 字；占位符全部替换
+        // 输入每段头 150 + 尾 50 采样（批D）；占位符全部替换
         val userMsg = fake.requests[0].messages.last { it.role == "user" }.content
-        // 段文本 = "正文N " 前缀 + 300 个"甲"；take(200) 后前缀占 4 字，最长甲串 196
-        assertTrue("应含截断后的甲串", userMsg.contains("甲".repeat(150)))
+        // 段文本 = "正文N " 前缀 + 300 个"甲"；采样头 150 含前缀 4 字 → 头部最长连续甲串 146，尾部 50
+        assertTrue("应含头部采样串", userMsg.contains("甲".repeat(146)))
+        assertTrue("应含尾部采样串", userMsg.contains("甲".repeat(50)))
+        assertTrue("中段应以省略号衔接", userMsg.contains("…"))
         assertTrue("原文 300 字不应完整出现", !userMsg.contains("甲".repeat(210)))
         // user 消息必须是合法 JSON（锁定 jsonEsc 引号语义，防 "text":正文 回归）
         Json.parseToJsonElement(userMsg)

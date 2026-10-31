@@ -2,8 +2,11 @@ package com.studyfriend.app.data.study
 
 import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.db.ChapterAssetEntity
+import com.studyfriend.app.data.db.ParaMemoEntity
 import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
+import com.studyfriend.app.data.db.QaHistoryEntity
+import com.studyfriend.app.data.db.QuizAttemptEntity
 import com.studyfriend.app.mindmap.TreeText
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
@@ -100,6 +103,8 @@ private val TIERS = listOf(
  * 组装总结包 user JSON。noteByAnchorIdx 以讲解卡锚段 idx 为键（调用方经
  * enumerateUnits + ParaIdsCodec 归位），保证 note 只挂在锚段条目上。
  * 确定性降级：档 0 起逐档重建，≤预算即用；档 4 为终档（评审 P2-3）。
+ * learner（批D学情）：null = 不加字段（零变化）；非空 = JSON 顶层加 "learner" 字段
+ * （拼好的学情文本，在预算判断前拼入——学情 ≤ 数百字，不参与降级档计算）。
  */
 fun buildSummaryUserJson(
     title: String,
@@ -107,12 +112,45 @@ fun buildSummaryUserJson(
     terms: List<String>,
     paragraphs: List<ParagraphEntity>,
     noteByAnchorIdx: Map<Int, ParaNoteEntity>,
+    learner: String? = null,
 ): String {
     repeat(TIERS.size) { tier ->
-        val s = buildUserJson(title, gist, terms, paragraphs, noteByAnchorIdx, tier)
+        val s = buildUserJson(title, gist, terms, paragraphs, noteByAnchorIdx, tier, learner)
         if (s.length <= INPUT_BUDGET) return s
     }
-    return buildUserJson(title, gist, terms, paragraphs, noteByAnchorIdx, TIERS.size)
+    return buildUserJson(title, gist, terms, paragraphs, noteByAnchorIdx, TIERS.size, learner)
+}
+
+/**
+ * 批D学情拼装：错题（题干+作答）/随手问/读者批注 → 一段可读文本；三类全空返回 null。
+ * 来源条数已由调用方各自封顶（SummaryPlanner.LEARNER_*_MAX），此处只做截断。
+ */
+fun buildLearnerContext(
+    wrong: List<QuizAttemptEntity>,
+    qas: List<QaHistoryEntity>,
+    memos: List<ParaMemoEntity>,
+): String? {
+    val parts = mutableListOf<String>()
+    if (wrong.isNotEmpty()) {
+        parts.add(
+            "做错的题：" + wrong.joinToString("；") { w ->
+                "「${w.answer.take(40)}」（判：${
+                    when (w.verdict) {
+                        "WRONG" -> "答错"
+                        "PARTIAL" -> "部分对"
+                        else -> w.verdict
+                    }
+    }）"
+            },
+        )
+    }
+    if (qas.isNotEmpty()) {
+        parts.add("问过的问题：" + qas.joinToString("；") { it.question.take(50) })
+    }
+    if (memos.isNotEmpty()) {
+        parts.add("读者批注：" + memos.joinToString("；") { it.text.take(60) })
+    }
+    return parts.joinToString("\n").ifEmpty { null }
 }
 
 private fun buildUserJson(
@@ -122,6 +160,7 @@ private fun buildUserJson(
     paragraphs: List<ParagraphEntity>,
     noteByAnchorIdx: Map<Int, ParaNoteEntity>,
     tier: Int,
+    learner: String? = null,
 ): String {
     val spec = TIERS.getOrElse(tier) { Triple(80, null, 0) }
     var kept = 0
@@ -160,6 +199,7 @@ private fun buildUserJson(
         append("{\"title\":").append(jsonEsc(title))
         append(",\"gist\":").append(jsonEsc(gist.orEmpty()))
         append(",\"terms\":").append(jsonEsc(terms.joinToString("、")))
+        learner?.let { append(",\"learner\":").append(jsonEsc(it)) }
         append(",\"paragraphs\":[").append(entries.joinToString(",")).append("]}")
     }
 }

@@ -280,7 +280,7 @@ class RoughReadPlanner(
         block.paragraphs.forEachIndexed { i, p ->
             if (i > 0) append(",")
             append("{\"id\":").append(p.idx)
-            append(",\"text\":").append(jsonEsc(p.text.take(200)))
+            append(",\"text\":").append(jsonEsc(sampleForClassify(p.text)))
             append("}")
         }
         append("]}")
@@ -389,5 +389,15 @@ class RoughReadPlanner(
         // ATTEMPTS=3 × chatJson 内部 JSON 解析失败重试 1 次 = 最坏 6 请求/块（额度放大上限，计划 §7）
         const val ATTEMPTS = 3 // 首次 + 2 次重试
         val UNRETRYABLE = setOf(401, 403, 404)
+
+        // 批D：分类用段落采样——长段取头 150 + 尾 50。教材核心结论常在段落中后部，
+        // 单取前 200 字会把长段误判 skip，讲解覆盖从源头受损；≤200 字全发不失真
+        const val SAMPLE_HEAD = 150
+        const val SAMPLE_TAIL = 50
+
+        internal fun sampleForClassify(text: String): String {
+            if (text.length <= SAMPLE_HEAD + SAMPLE_TAIL) return text
+            return text.take(SAMPLE_HEAD) + "…" + text.takeLast(SAMPLE_TAIL)
+        }
     }
 }

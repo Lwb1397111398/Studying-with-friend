@@ -83,8 +83,14 @@ object VisionRebuilder {
             }
             val tocPage = inferTocLike(t.body)
             val paras = buildList {
-                t.body.forEach {
-                    add(NewPara(it, if (tocPage) DbValues.ROLE_TOC else DbValues.ROLE_BODY, page))
+                t.body.forEach { seg ->
+                    // 批E2：目录页的视觉转写常把多个条目并成一段（「一、案例•(188)二思考模式…(189)」），
+                    // 行级重组救不了——段内按「页码收尾→下一条目序号开头」边界重切成独立条目行
+                    if (tocPage) {
+                        splitGluedTocEntries(seg).forEach { add(NewPara(it, DbValues.ROLE_TOC, page)) }
+                    } else {
+                        add(NewPara(seg, DbValues.ROLE_BODY, page))
+                    }
                 }
                 if (t.footnotes.isNotEmpty()) {
                     add(NewPara(joinTexts(t.footnotes), DbValues.ROLE_FOOTNOTE, page))
@@ -173,6 +179,24 @@ object VisionRebuilder {
      */
     internal fun inferTocLike(texts: List<String>): Boolean =
         texts.count { RE_TOC_ENTRY.containsMatchIn(it.trim()) } >= TOC_INFER_MIN
+
+    /**
+     * 批E2：目录并段条目重切（纯函数供 JVM 单测）——只切「前文以页码收尾（) ） ② 数字）
+     * + 下一条目序号开头」的边界：中文序号（一/二/…/（一）/1.）或圆圈号。页码收尾锚定
+     * 保证只在条目结束处切，正文里「(188)二人」类组合只在 ROLE_TOC 段内处理，误切
+     * 影响限目录展示（TOC 段 AI 全跳、不动章界）。切不动原样返回单元素。
+     */
+    internal val RE_TOC_GLUE_BOUNDARY =
+        Regex("(?<=[)）0-9②③④⑤⑥⑦⑧⑨⑩])\\s*(?=(?:[（(]?[一二三四五六七八九十]{1,3}[）)]?[、.．：:]?[^0-9一二三四五六七八九十])|[0-9]{1,3}[、.．])")
+
+    internal fun splitGluedTocEntries(text: String): List<String> {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return listOf(text)
+        val parts = RE_TOC_GLUE_BOUNDARY.split(trimmed)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        return if (parts.size <= 1) listOf(text) else parts
+    }
 
     /**
      * 覆盖守卫（纯函数供 JVM 单测）：重建产物字符量 ≥ 预期 80% 才允许替换。

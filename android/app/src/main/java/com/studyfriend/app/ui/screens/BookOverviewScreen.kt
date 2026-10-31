@@ -88,7 +88,7 @@ fun BookOverviewScreen(
     val chapters by db.chapterDao().byBookFlow(bookId)
         .collectAsStateWithLifecycle(initialValue = emptyList())
     val summarizedCount = chapters.count {
-        it.assetPromptVersion == SummaryPlanner.SUMMARY_VERSION && it.assetSummaryPresent
+        SummaryPlanner.isCurrentSummary(it.assetPromptVersion) && it.assetSummaryPresent
     }
 
     // overviewJson 进页快照（loaded 区分"加载中/确认无"，加载中不闪 CTA）；Succeeded 后 reload++ 重读

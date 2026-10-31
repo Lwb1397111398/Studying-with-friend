@@ -29,6 +29,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -39,18 +40,25 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.BookRepository
+import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.DueItem
 import com.studyfriend.app.data.db.QuizAttemptEntity
 import com.studyfriend.app.data.db.computeStreak
 import com.studyfriend.app.data.study.DAY_MS
+import com.studyfriend.app.data.study.CheckQuestion
+import com.studyfriend.app.data.study.KeyTermsCodec
 import com.studyfriend.app.data.study.QuizCodec
 import com.studyfriend.app.data.study.QuizQuestion
 import com.studyfriend.app.data.study.ReviewAdvance
 import com.studyfriend.app.data.study.ReviewVerdict
 import com.studyfriend.app.data.study.TermBookGroup
+import com.studyfriend.app.data.study.TermChapter
 import com.studyfriend.app.data.study.advanceReview
+import com.studyfriend.app.data.study.decodeCheckQuestions
 import com.studyfriend.app.data.study.aggregateVerdict
+import com.studyfriend.app.data.study.DedupedTerm
 import com.studyfriend.app.data.study.buildTermGroups
+import com.studyfriend.app.data.study.dedupeBookTerms
 import com.studyfriend.app.data.study.latestWrongAttempts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -171,6 +179,15 @@ private fun StatCell(label: String, value: String) {
 private data class ReviewSession(val due: DueItem, val questions: List<QuizQuestion>)
 
 private suspend fun buildSession(repo: BookRepository, due: DueItem): ReviewSession {
+    // 批D：术语翻转卡——单题（问题=术语，答案=首现章的大白话解释），复用章评估流推进
+    if (due.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) {
+        val plain = repo.chapter(due.item.chapterId)?.keyTermsJson
+            ?.let { KeyTermsCodec.decode(it).firstOrNull { t -> t.term == due.item.title }?.plain }
+        return ReviewSession(
+            due,
+            listOf(QuizQuestion(q = due.item.title, a = plain ?: "（该术语的解释已随章重读更新）")),
+        )
+    }
     val asset = repo.asset(due.item.chapterId)
     return ReviewSession(due, QuizCodec.decode(asset?.quizJson))
 }
@@ -183,9 +200,11 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
     val now = remember { System.currentTimeMillis() }
     val due by repo.dueListWithBookFlow(now)
         .collectAsStateWithLifecycle(initialValue = emptyList())
-    // M5 契约防御（计划 §2.4）：同章多行（如重命名后再排期）只展示一条
-    val visible = remember(due) { due.distinctBy { it.item.bookId to it.item.chapterId } }
-
+    // M5 契约防御（计划 §2.4）：同章多行（如重命名后再排期）只展示一条。
+    // 批D：术语行不参与去重——同一首现章可挂多个术语，按 item.id 逐行展示
+    val visible = remember(due) {
+        due.distinctBy { if (it.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) "term_${it.item.id}" else it.item.bookId to it.item.chapterId }
+    }
     if (visible.isEmpty()) {
         EmptyState(title = "今天没有要复习的", subtitle = "读完一章后，这里会帮你安排复习")
         return
@@ -195,7 +214,11 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
             val overdueDays = ((now - d.item.dueAt) / DAY_MS).toInt()
             ListItem(
                 headlineContent = { Text(d.item.title, fontWeight = FontWeight.Medium) },
-                supportingContent = { Text(d.bookTitle) },
+                supportingContent = {
+                    Text(
+                        if (d.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) "术语卡 · ${d.bookTitle}" else d.bookTitle,
+                    )
+                },
                 trailingContent = {
                     Text(
                         if (overdueDays <= 0) "今天到期" else "逾期 $overdueDays 天",
@@ -308,25 +331,50 @@ private suspend fun loadWrongRows(repo: BookRepository): List<WrongRow> {
     val wrong = latestWrongAttempts(repo.wrongLatest())
     if (wrong.isEmpty()) return emptyList()
     val assetCache = HashMap<Long, List<QuizQuestion>>()
+    // 批D：讲解自问（source=NOTE）的题干从该章讲解卡 questionsJson 回查（qIndex-基线=卡内序号）
+    val noteQCache = HashMap<Long, List<CheckQuestion>>()
     return wrong.map { w ->
-        val qs = assetCache.getOrPut(w.chapterId) {
-            QuizCodec.decode(repo.asset(w.chapterId)?.quizJson)
+        if (w.source == "NOTE") {
+            val qs = noteQCache.getOrPut(w.chapterId) {
+                repoNotesOnce(repo, w.chapterId)
+            }
+            val q = qs.getOrNull(w.qIndex - DbValues.NOTE_Q_BASE)
+            WrongRow(
+                bookTitle = w.bookTitle,
+                chapterTitle = w.chapterTitle,
+                chapterId = w.chapterId,
+                qIndex = w.qIndex,
+                question = q?.q?.takeIf { it.isNotBlank() } ?: "讲解自问（原讲解已更新）",
+                correctAnswer = q?.a ?: "",
+                explain = "",
+                myAnswer = w.answer,
+                feedback = w.feedback,
+                missing = q == null,
+            )
+        } else {
+            val qs = assetCache.getOrPut(w.chapterId) {
+                QuizCodec.decode(repo.asset(w.chapterId)?.quizJson)
+            }
+            val q = qs.getOrNull(w.qIndex)
+            WrongRow(
+                bookTitle = w.bookTitle,
+                chapterTitle = w.chapterTitle,
+                chapterId = w.chapterId,
+                qIndex = w.qIndex,
+                question = q?.q?.takeIf { it.isNotBlank() } ?: "第 ${w.qIndex + 1} 题",
+                correctAnswer = q?.a ?: "",
+                explain = q?.explain ?: "",
+                myAnswer = w.answer,
+                feedback = w.feedback,
+                missing = q == null,
+            )
         }
-        val q = qs.getOrNull(w.qIndex)
-        WrongRow(
-            bookTitle = w.bookTitle,
-            chapterTitle = w.chapterTitle,
-            chapterId = w.chapterId,
-            qIndex = w.qIndex,
-            question = q?.q?.takeIf { it.isNotBlank() } ?: "第 ${w.qIndex + 1} 题",
-            correctAnswer = q?.a ?: "",
-            explain = q?.explain ?: "",
-            myAnswer = w.answer,
-            feedback = w.feedback,
-            missing = q == null,
-        )
     }
 }
+
+/** 批D：讲解自问题干回查——该章全部讲解卡的 check_questions 顺序展平（与生成页同序） */
+private suspend fun repoNotesOnce(repo: BookRepository, chapterId: Long): List<CheckQuestion> =
+    repo.notesOnce(chapterId).flatMap { decodeCheckQuestions(it.questionsJson) }
 
 @Composable
 private fun WrongBookPane(repo: BookRepository, onRetest: (List<WrongRow>) -> Unit) {
@@ -486,12 +534,19 @@ private fun WrongSessionPane(
 @Composable
 private fun TermsPane(repo: BookRepository) {
     // 一次性加载：术语无实时性要求，进页快照
-    val groups by produceState<List<TermBookGroup>?>(initialValue = null) {
-        value = buildTermGroups(repo.chaptersWithTerms())
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    data class TermsData(
+        val rows: List<com.studyfriend.app.data.db.ChapterTermsRow>,
+        val groups: List<TermBookGroup>,
+    )
+    val data by produceState<TermsData?>(initialValue = null) {
+        val rows = repo.chaptersWithTerms()
+        value = TermsData(rows, buildTermGroups(rows))
     }
     when {
-        groups == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-        groups!!.isEmpty() -> EmptyState(
+        data == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        data!!.groups.isEmpty() -> EmptyState(
             title = "还没有术语卡",
             subtitle = "读完章节、完成粗读后，每章的关键术语和大白话解释会汇集到这里",
         )
@@ -499,14 +554,44 @@ private fun TermsPane(repo: BookRepository) {
             // 手风琴：一次展开一章，翻看不迷路
             var expandedChapter by rememberSaveable { mutableStateOf<String?>(null) }
             LazyColumn(Modifier.fillMaxSize()) {
-                groups!!.forEach { g ->
+                data!!.groups.forEach { g ->
                     item(key = "book_${g.bookTitle}") {
-                        Text(
-                            g.bookTitle,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 4.dp),
-                        )
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 20.dp, top = 14.dp, bottom = 4.dp, end = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                g.bookTitle,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            // 批D：全书术语（跨章去重）一键进复习排期——翻转卡走今日复习流
+                            val bookRows = data!!.rows.filter { it.bookId == g.bookId }
+                            val deduped = dedupeBookTerms(
+                                bookRows.map { TermChapter(it.chapterTitle, KeyTermsCodec.decode(it.keyTermsJson)) },
+                                bookRows.map { it.chapterId },
+                            )
+                            if (deduped.isNotEmpty()) {
+                                TextButton(onClick = {
+                                    val now = System.currentTimeMillis()
+                                    scope.launch {
+                                        repo.scheduleReviews(
+                                            deduped.map { d ->
+                                                com.studyfriend.app.data.db.ReviewItemEntity(
+                                                    bookId = g.bookId, chapterId = d.chapterId,
+                                                    title = d.term, intervalIdx = 0, dueAt = now,
+                                                    itemType = com.studyfriend.app.data.db.DbValues.ITEM_TERM,
+                                                )
+                                            },
+                                        )
+                                        android.widget.Toast.makeText(
+                                            context, "已加入 ${deduped.size} 个术语（重复的自动跳过）",
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                }) { Text("加入复习（${deduped.size} 词）") }
+                            }
+                        }
                     }
                     g.chapters.forEach { ch ->
                         // 章唯一键：书名+章名（章节 id 不在分组结构里，重名章用文本区分已够用）

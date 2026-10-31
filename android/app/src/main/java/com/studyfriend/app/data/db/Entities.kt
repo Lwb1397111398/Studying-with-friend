@@ -245,6 +245,8 @@ data class QuizAttemptEntity(
     val verdict: String, // CORRECT / WRONG / PARTIAL
     val feedback: String?,
     val createdAt: Long,
+    /** 批D：作答来源——SUMMARY=章末自测（存量默认）；NOTE=讲解卡自问（qIndex=noteId*10+题序） */
+    val source: String = "SUMMARY",
 )
 
 /** 间隔复习排期项；unique(bookId,chapterId,title) 防章末包重生成时重复排期 */
@@ -278,6 +280,8 @@ data class ReviewItemEntity(
     val intervalIdx: Int, // 0..4 对应 1/3/7/14/30 天
     val dueAt: Long,
     val done: Boolean = false,
+    /** 批D：排期项类型——CHAPTER=章末包（存量默认）；TERM=术语翻转卡（title=术语，问法由 UI 定） */
+    val itemType: String = "CHAPTER",
 )
 
 /**

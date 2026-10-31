@@ -169,7 +169,8 @@ class SummaryPlannerTest {
 
         val asset = db.chapterAssetDao().byChapter(ch)!!
         assertTrue(asset.summaryMd.contains("三档"))
-        assertEquals(SummaryPlanner.SUMMARY_VERSION, asset.promptVersion)
+        // 批D：本用例 seed 了错题作答（学情）→ 版本带 -s1 后缀（学情进输入）
+        assertEquals(SummaryPlanner.summaryVersion(hasLearnerContext = true), asset.promptVersion)
         assertEquals("重生成清空本章作答（题目身份随版本失效）", 0, db.quizAttemptDao().byChapter(ch).size)
         assertEquals("IGNORE 防重复排期", 1, db.reviewItemDao().pendingByBook(1L).size)
     }

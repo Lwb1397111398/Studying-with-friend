@@ -40,6 +40,17 @@ object DbValues {
     const val VERDICT_WRONG = "WRONG"
     const val VERDICT_PARTIAL = "PARTIAL"
 
+    // quiz_attempts.source（批D）：章末自测 / 讲解卡自问
+    const val ATTEMPT_SUMMARY = "SUMMARY"
+    const val ATTEMPT_NOTE = "NOTE"
+
+    /** 讲解自问作答的 qIndex 基线：章末自测题 ≤5 条，10000 起空间隔离（生成页与错题本两侧共用） */
+    const val NOTE_Q_BASE = 10000
+
+    // review_items.itemType（批D）：章末包 / 术语翻转卡
+    const val ITEM_CHAPTER = "CHAPTER"
+    const val ITEM_TERM = "TERM"
+
     /** 复习间隔天数表，intervalIdx 0..4 对应 */
     val REVIEW_INTERVAL_DAYS = intArrayOf(1, 3, 7, 14, 30)
 }

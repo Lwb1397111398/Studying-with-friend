@@ -9,6 +9,7 @@ import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.ai.PromptLoader
 import com.studyfriend.app.data.db.ChapterEntity
+import com.studyfriend.app.data.db.ParaMemoEntity
 import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.db.StudyDatabase
@@ -64,8 +65,11 @@ class NotePlanner(
         val cfg = settings.load()
         // 讲解详略三档（总计划 §1 目标 7）：标准档即 prompt 原文，简略/深入在 system 末尾追加指令
         val detail = settings.detailLevel()
+        // 批D学情：该章读者批注进讲解输入（按单元成员段匹配）；有批注才升学情版本——
+        // 无批注书版本号不变，已有讲解零重讲
+        val memos = db.paraMemoDao().byChapterOnce(chapterId)
+        val noteVer = noteVersion(detail, memos.isNotEmpty())
         // 档位与模型都参与缓存判定：切档/换讲解模型后旧卡失效重生成，设置才真正生效
-        val noteVer = noteVersion(detail)
         val noteModelActual = cfg.noteModel.ifBlank { cfg.model }
         val systemPrompt = buildString {
             append(PromptLoader.load(context, PROMPT_NOTE))
@@ -118,7 +122,7 @@ class NotePlanner(
                         try {
                             // 生成成功后才删旧插新：失败/中断时旧卡保留不丢（最终 QA P2-2）；
                             // 删+插包事务，两 lane 并发写库时防"删了旧的新没插进"
-                            val note = runUnitWithRetry(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual)
+                            val note = runUnitWithRetry(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual, memos)
                             db.withTransaction {
                                 db.paraNoteDao().deleteByParaIds(paraIds)
                                 db.paraNoteDao().insert(note)
@@ -161,11 +165,12 @@ class NotePlanner(
         key: String,
         noteVer: String,
         noteModelActual: String,
+        memos: List<ParaMemoEntity>,
     ): ParaNoteEntity {
         var lastError: Exception? = null
         repeat(ATTEMPTS) { attempt ->
             try {
-                return runUnitOnce(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual)
+                return runUnitOnce(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual, memos)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AiException) {
@@ -190,16 +195,29 @@ class NotePlanner(
         key: String,
         noteVer: String,
         noteModelActual: String,
+        memos: List<ParaMemoEntity>,
     ): ParaNoteEntity {
         val anchor = unit.anchor
         val texts = unit.textsForPrompt()
         val prev = paragraphs.firstOrNull { it.idx == anchor.idx - 1 }
         val next = paragraphs.firstOrNull { it.idx == anchor.idx + 1 }
         val why = unit.members.mapNotNull { it.why?.trim() }.filter { it.isNotEmpty() }.joinToString("；")
+        // 批D学情：单元成员段命中的读者批注（≤10 条 × 60 字）——AI 讲「这一段」时知道
+        // 读者在哪卡过、自己写过什么
+        val unitMemos = memos.filter { m -> unit.members.any { it.id == m.paraId } }
+            .take(MEMO_INPUT_MAX)
         val userJson = buildString {
             append("{\"gist\":").append(jsonEsc(chapter.gist.orEmpty()))
             append(",\"terms\":").append(jsonEsc(KeyTermsCodec.decode(chapter.keyTermsJson).joinToString("、") { it.term }))
             append(",\"why\":").append(jsonEsc(why))
+            if (unitMemos.isNotEmpty()) {
+                append(",\"memos\":[")
+                unitMemos.forEachIndexed { i, m ->
+                    if (i > 0) append(',')
+                    append(jsonEsc(m.text.take(60)))
+                }
+                append("]")
+            }
             // prev/next 只给局部衔接线索：讲解单元按顺序铺满全章，相邻单元正文本身就含
             // 这段（边界段最多被发 3 遍），800 字版整章约 1/3 输入是重复 token，压到 200 字
             append(",\"context_prev\":").append(jsonEsc(prev?.text?.take(200) ?: ""))
@@ -248,15 +266,19 @@ class NotePlanner(
         const val NOTE_VERSION = "explain-note-v2"
         const val ATTEMPTS = 3
 
-        /** 档位拼进版本号：标准 = 原版（老卡不失效），简略/深入 = 带后缀版本，切档后旧卡自然重生成 */
-        fun noteVersion(detailLevel: String): String =
-            if (detailLevel == "标准") NOTE_VERSION else "$NOTE_VERSION-$detailLevel"
+        /** 批D：单个讲解单元最多带的读者批注条数（学情进输入） */
+        const val MEMO_INPUT_MAX = 10
+
+        /** 档位拼进版本号：标准 = 原版（老卡不失效），简略/深入 = 带后缀版本，切档后旧卡自然重生成。
+         *  批D学情：该章有读者批注时再追加 "-s1" 后缀（学情进输入），无批注书版本不变零重讲 */
+        fun noteVersion(detailLevel: String, hasLearnerContext: Boolean = false): String {
+            val base = if (detailLevel == "标准") NOTE_VERSION else "$NOTE_VERSION-$detailLevel"
+            return if (hasLearnerContext) "$base-s1" else base
+        }
 
         /** 是否当前版本的讲解卡（含档位后缀变体）——渲染/统计/总结输入侧过滤统一走这里 */
         fun isCurrentNote(version: String): Boolean =
-            version == NOTE_VERSION || version.startsWith("$NOTE_VERSION-")
-
-        /** 单元并发数：2 路——端点 rpm/tpm 紧（见 PlannerBackoff），2 路在吞吐与限流间取平衡 */
+            version == NOTE_VERSION || version.startsWith("$NOTE_VERSION-")        /** 单元并发数：2 路——端点 rpm/tpm 紧（见 PlannerBackoff），2 路在吞吐与限流间取平衡 */
         const val CONCURRENCY = 2
 
         val UNRETRYABLE = setOf(401, 403, 404)

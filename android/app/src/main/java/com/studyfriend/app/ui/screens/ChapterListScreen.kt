@@ -94,7 +94,7 @@ fun ChapterListScreen(
     // 全书总览入口门控（M6 计划 §3.3）：≥2 个已总结章才给入口（与 planner 前置同口径；
     // 只数章行，节行不参与门控）
     val summarizedCount = treeRows.count {
-        it.level == 1 && it.assetPromptVersion == SummaryPlanner.SUMMARY_VERSION && it.assetSummaryPresent
+        it.level == 1 && SummaryPlanner.isCurrentSummary(it.assetPromptVersion) && it.assetSummaryPresent
     }
     // 覆盖重读会清掉全章标注并重烧 API，与阅读页同口径加二次确认（最终 QA P1）
     var confirmForceFor by remember { mutableStateOf<Long?>(null) }

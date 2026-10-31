@@ -215,6 +215,8 @@ class BookRepository(
     // ---- 目录 ----
     fun chaptersFlow(bookId: Long) = db.chapterDao().byBookFlow(bookId)
     suspend fun chapters(bookId: Long) = db.chapterDao().byBook(bookId)
+    /** 批D：术语翻转卡取该章 keyTermsJson 用 */
+    suspend fun chapter(chapterId: Long) = db.chapterDao().byIdOnce(chapterId)
 
     // 批B：已入库书事后目录校准已转正——实现移至
     // data/importer/pdfpipeline/CalibrateExisting.kt（需要 renderer/parser，仓内组装），
@@ -260,6 +262,8 @@ class BookRepository(
 
     // ---- 讲解 ----
     fun notesFlow(chapterId: Long) = db.paraNoteDao().byChapterFlow(chapterId)
+    /** 批D：错题本讲解自问题干回查用（一次读取，非流式） */
+    suspend fun notesOnce(chapterId: Long) = db.paraNoteDao().byChapterOnce(chapterId)
     suspend fun addNote(note: ParaNoteEntity) = db.paraNoteDao().insert(note)
     suspend fun clearNotes(chapterId: Long) = db.paraNoteDao().deleteForChapter(chapterId)
 

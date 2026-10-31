@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.db.ChapterAssetEntity
+import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.QuizAttemptEntity
 import com.studyfriend.app.data.study.CheckQuestion
 import com.studyfriend.app.data.study.MissingKeyException
@@ -364,7 +365,21 @@ private fun QuizPane(asset: ChapterAssetEntity, chapterId: Long, onOpenSettings:
         }
         if (selfQuestions.isNotEmpty()) {
             MdText("## 讲解自问")
-            selfQuestions.forEachIndexed { i, sq -> SelfCheckCard(i, sq) }
+            selfQuestions.forEachIndexed { i, sq ->
+                SelfCheckCard(i, sq, onAnswer = { answer, verdict ->
+                    scope.launch {
+                        db.quizAttemptDao().insert(
+                            QuizAttemptEntity(
+                                chapterId = chapterId,
+                                qIndex = DbValues.NOTE_Q_BASE + i, // 与章末自测 qIndex 空间隔离
+                                answer = answer, verdict = verdict, feedback = null,
+                                createdAt = System.currentTimeMillis(),
+                                source = "NOTE",
+                            ),
+                        )
+                    }
+                })
+            }
         }
     }
 }
@@ -507,9 +522,14 @@ private fun QuizCard(
     }
 }
 
-/** 讲解自问卡：问题点击翻面显示答案，不落库（消费 M4b decodeCheckQuestions 存储） */
+/** 讲解自问卡：问题点击翻面显示答案 + 三按钮自评落错题本（批D：source=NOTE，
+ *  qIndex=10000+序号 与章末自测 qIndex<100 空间隔离；答错/模糊进复习闭环） */
 @Composable
-private fun SelfCheckCard(index: Int, question: CheckQuestion) {
+private fun SelfCheckCard(
+    index: Int,
+    question: CheckQuestion,
+    onAnswer: (answer: String, verdict: String) -> Unit = { _, _ -> },
+) {
     var revealed by rememberSaveable("selfcheck", index.toString()) { mutableStateOf(false) }
     Surface(shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -520,6 +540,11 @@ private fun SelfCheckCard(index: Int, question: CheckQuestion) {
             )
             if (revealed) {
                 Text("答：${question.a}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("答对" to "CORRECT", "模糊" to "PARTIAL", "答错" to "WRONG").forEach { (label, verdict) ->
+                        OutlinedButton(onClick = { onAnswer(question.q, verdict) }) { Text(label) }
+                    }
+                }
             }
         }
     }

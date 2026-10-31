@@ -181,7 +181,18 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
     }
 }
 
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // 批D：自问落错题本——quiz_attempts 加来源列（章末自测=SUMMARY 兼容存量；
+        // 讲解卡自问=NOTE），复习中心错题重练按来源取题干
+        db.execSQL("ALTER TABLE `quiz_attempts` ADD COLUMN `source` TEXT NOT NULL DEFAULT 'SUMMARY'")
+        // 批D：术语进复习——review_items 加排期项类型（CHAPTER 章 / TERM 术语卡），
+        // 术语卡翻转卡复用同一排期推进
+        db.execSQL("ALTER TABLE `review_items` ADD COLUMN `itemType` TEXT NOT NULL DEFAULT 'CHAPTER'")
+    }
+}
+
 val MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-    MIGRATION_7_8, MIGRATION_8_9,
+    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
 )

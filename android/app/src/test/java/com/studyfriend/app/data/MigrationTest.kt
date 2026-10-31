@@ -2,6 +2,7 @@ package com.studyfriend.app.data
 
 import androidx.room.testing.MigrationTestHelper
 import androidx.test.platform.app.InstrumentationRegistry
+import com.studyfriend.app.data.db.MIGRATION_8_9
 import com.studyfriend.app.data.db.MIGRATIONS
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -300,7 +301,7 @@ fun migrate8To9_readingStatsUsable() {
         )
     }
     // 跑 8→9 迁移 + schema 校验（reading_stats 建表与 Entity 对齐，失败即抛）
-    helper.runMigrationsAndValidate(dbName, 9, true, MIGRATIONS.last()).use { v9 ->
+    helper.runMigrationsAndValidate(dbName, 9, true, MIGRATION_8_9).use { v9 ->
         // 写读回验：同书同天递增（DAO 层的 addMinutes 走 INSERT OR IGNORE + UPDATE，
         // 这里手工 SQL 等价复刻——Robolectric legacy SQLite 不认 UPSERT 语法）
         v9.execSQL("INSERT INTO reading_stats (bookId, day, minutes) VALUES (1, '2026-10-25', 12)")
@@ -319,4 +320,47 @@ fun migrate8To9_readingStatsUsable() {
         // enforcement，级联删除不会触发（Room 打开真实库时才启用 FK）
     }
 }
+
+    /** 批D：9→10 加列迁移——quiz_attempts.source / review_items.itemType 存量行落默认值 */
+    @Test
+    fun migrate9To10_newColumnsUsable() {
+        val dbName = "migration-test-910.db"
+        helper.createDatabase(dbName, 9).use { v9 ->
+            v9.execSQL(
+                "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                    "overviewJson, createdAt, updatedAt) VALUES ('书', '', 'TXT', '', 'READY', 1, NULL, 1, 1)",
+            )
+            v9.execSQL(
+                "INSERT INTO chapters (bookId, idx, title, readState, gist, keyTermsJson, level, calibrated) " +
+                    "VALUES (1, 0, '第一章', 'NOT_READ', NULL, NULL, 1, 0)",
+            )
+            v9.execSQL(
+                "INSERT INTO quiz_attempts (chapterId, qIndex, answer, verdict, feedback, createdAt) " +
+                    "VALUES (1, 0, '我的作答', 'WRONG', NULL, 1)",
+            )
+            v9.execSQL(
+                "INSERT INTO review_items (bookId, chapterId, title, intervalIdx, dueAt, done) " +
+                    "VALUES (1, 1, '第一章', 0, 1, 0)",
+            )
+        }
+        helper.runMigrationsAndValidate(dbName, 10, true, MIGRATIONS.last()).use { v10 ->
+            // 存量行 source/itemType 自动落默认值，新行可显式写新值
+            v10.query("SELECT source FROM quiz_attempts").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals("SUMMARY", cur.getString(0))
+            }
+            v10.execSQL(
+                "INSERT INTO quiz_attempts (chapterId, qIndex, answer, verdict, feedback, createdAt, source) " +
+                    "VALUES (1, 10000, '自问', 'WRONG', NULL, 2, 'NOTE')",
+            )
+            v10.query("SELECT itemType FROM review_items").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals("CHAPTER", cur.getString(0))
+            }
+            v10.execSQL(
+                "INSERT INTO review_items (bookId, chapterId, title, intervalIdx, dueAt, done, itemType) " +
+                    "VALUES (1, 1, '善意取得', 0, 1, 0, 'TERM')",
+            )
+        }
+    }
 }

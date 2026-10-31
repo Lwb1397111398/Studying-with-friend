@@ -46,7 +46,7 @@ class OverviewPlanner(
         // 先用 byBookFlow 投影过滤候选（几百章大书也只对候选逐章查资产，≤20 次，计划 §2.5）
         val chapters = db.chapterDao().byBook(bookId)
         val candidateIds = db.chapterDao().byBookFlow(bookId).first()
-            .filter { it.assetPromptVersion == SummaryPlanner.SUMMARY_VERSION && it.assetSummaryPresent }
+            .filter { SummaryPlanner.isCurrentSummary(it.assetPromptVersion) && it.assetSummaryPresent }
             .map { it.id }
             .toSet()
         val assetByChapterId = HashMap<Long, ChapterAssetEntity>()

@@ -211,7 +211,42 @@ object OcrDetPost {
             }
         }
         boxes.sortWith(compareBy({ it[1] / 24 }, { it[0] }))
-        return boxes
+        return mergeSameLineOverlaps(boxes)
+    }
+
+    /**
+     * 批E1：同行水平重叠框合并——det 把大标题切成两个水平交叠的连通域（如「第二章」
+     * 断成两段且扩张后 x 区间交叠），各框独立 rec 会产出「第二章二章」式叠字章题，
+     * 直进章表和目录树。把同 y 桶内 x 重叠率超阈值的框取**并集**合成一个框再 rec：
+     * 一次 rec 读整行自然不叠字，也不丢任何字符（合并发生在识别之前，不是拼接去重）。
+     * y 桶口径与排序一致（y0/24）；x 重叠率 = 交叠宽 / 较小框宽。
+     */
+    internal fun mergeSameLineOverlaps(boxes: List<IntArray>): List<IntArray> {
+        val merged = ArrayList(boxes.map { it.copyOf() })
+        var changed = true
+        while (changed) {
+            changed = false
+            outer@ for (i in merged.indices) {
+                for (j in i + 1 until merged.size) {
+                    val a = merged[i]; val b = merged[j]
+                    val yOverlap = minOf(a[3], b[3]) - maxOf(a[1], b[1])
+                    val minH = minOf(a[3] - a[1], b[3] - b[1])
+                    if (minH <= 0 || yOverlap < minH / 2) continue // 不同行
+                    val xOverlap = minOf(a[2], b[2]) - maxOf(a[0], b[0])
+                    val minW = minOf(a[2] - a[0], b[2] - b[0])
+                    if (minW <= 0 || xOverlap * 10 < minW * 3) continue // 重叠 <30%
+                    merged[i] = intArrayOf(
+                        minOf(a[0], b[0]), minOf(a[1], b[1]),
+                        maxOf(a[2], b[2]), maxOf(a[3], b[3]),
+                    )
+                    merged.removeAt(j)
+                    changed = true
+                    break@outer // 合并后重扫（可能连锁三框）
+                }
+            }
+        }
+        merged.sortWith(compareBy({ it[1] / 24 }, { it[0] }))
+        return merged
     }
 }
 
