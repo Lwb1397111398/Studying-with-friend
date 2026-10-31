@@ -149,6 +149,8 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 
 ## 最后更新
 
+- 2026-10-31 **优化轮批A4+D1**：①**阅读统计碎片结转**——原「每次 ON_PAUSE 四舍五入、不足 1 分钟丢弃」改零头结转：`readingFlushMath(pendingMs, elapsedMs)` 纯函数返回 (入账分钟, 新零头)，合计=上次零头+本次，整分钟入账、余数存 `StudyApp.readingPendingMs`（@Volatile 应用级）留到下次，ON_PAUSE 哨兵防双计保留（ReadStatsCarryTest 4 例）；②**粗读 200 字瓶颈**——`RoughReadPlanner.sampleForClassify`：段 ≤200 字全发，超长取「前 150 + … + 尾 50」（首尾最能判定文体），块预算与调用量不变、单块请求体约 +25%（RoughReadSampleTest 2 例）。
+
 - 2026-10-26 **数据安全与体验增量轮**：①**阅读时长统计**（ReadScreen）：markReading 后加计时 DisposableEffect——页面可见期间计时，ON_PAUSE/离开页 flush 按「分钟」入账 reading_stats（四舍五入，不足 1 分钟丢弃，ON_PAUSE 置哨兵 -1 防双计，写库走 appScope 不随退页取消）；②**粗读排队**：RoughRunState 加 Queued 态（AiTaskRunner 骨架排队化，见 M3），ReadTools chip 显示「粗读排队中/讲解排队中」+ 状态行「排队等待中（搭子正忙别的 AI 任务）」可停止；③**429 退避递增**：RoughReadPlanner 两处 plannerBackoff 传 attempt，429 按重试次数 30→60→120s 封顶（backoffDelayMs 纯函数，PlannerBackoffTest 2 例）。
 
 

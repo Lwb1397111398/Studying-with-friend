@@ -83,6 +83,8 @@ test/.../M4bUiSmokeTest.kt      3 例（Compose 冒烟）
 
 ## 最后更新
 
+- 2026-10-31 **优化轮批A1/A2+D2/D3**：①**讲解缓存失效真 bug 修复**——缓存判定从只比 promptVersion 改三条件：`existing.promptVersion == noteVersion(详略档位, 有学情) && existing.model == 实际讲解模型 && friendly 非空`；`noteVersion(detailLevel, hasLearnerContext)` 拼档位/学情后缀、`isCurrentNote` 前缀匹配（切「深入」档、换更强模型下一章立刻生效）；②**学情进讲解输入**——该章 para_memos 按 paraId 匹配 ≤10 条×60 字（MEMO_INPUT_MAX）拼 `unitMemos` 进单元输入 userJson `"memos"`，explain_note.txt prompt 加「读者学情」段；**防烧钱**：版本号只在该章有学情时才带后缀，无学情书缓存全命中零重讲；③**讲解自问落错题本**——讲解卡自测（ChapterAssetsScreen SelfCheckCard）三按钮「答对/模糊/答错」落 quiz_attempts `source="NOTE"`、`qIndex=NOTE_Q_BASE+i`（Room v10 见 M1），进错题重练数据源。
+
 - 2026-10-26 **数据安全与体验增量轮：AiTaskRunner 排队化 + 429 退避递增**：①AiTaskRunner（四 Runner 共享骨架）抢锁从 tryBegin 立即拒绝改 gate.awaitBegin 排队——新抽象 queuedState(id)（四子类各加 Queued 变体）、10 分钟超时走 Failed「排队等待超时」、stop 挂起期间可取消（锁无半获得）；排队/失败/取消原因同步写 DiagLog（设置页可导出，见 M3）；NoteRunnerGateTest 前两例改排队接力语义+新增排队取消例。②NotePlanner 的 plannerBackoff 传 attempt：429 退避 30→60→120s 封顶（backoffDelayMs 纯函数）。
 
 
