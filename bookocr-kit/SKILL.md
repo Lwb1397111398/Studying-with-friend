@@ -25,7 +25,7 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `route` | `subagent` | 识别路线：`subagent`=AI 逐页看（子代理看图，老板默认）/ `aivision`=AI 逐页看（视觉 API 直连）/ `pull-first`=高效率模式（先拔文字层，拔不动的批再走视觉 API）/ `pull-only`=只拔文字层 |
+| `route` | `subagent` | 识别路线：`subagent`=AI 逐页看（子代理看图，老板默认）/ `aivision`=AI 逐页看（视觉 API 直连）/ `pull-first`=高效率模式（先拔文字层，拔不动的批再走视觉 API）/ `pull-only`=只拔文字层（跑完必须 `qa` 逐页体检，烂页用 `reocr --exact` 补） |
 | `pages_per_batch` | 10 | 每批页数 |
 | `dpi` | 200 | 页图渲染精度 |
 | `aivision_workers` | 5 | aivision 页级并发 |
@@ -59,12 +59,27 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
    python bookocr-kit/bookocr.py pull <书名>
    ```
    很多「扫描书」自带出版社 OCR 文字层，pull 分钟级拔完、零幻觉零额度；跨页段落自动缝合、插图按图块精确坐标在段间落占位行。pull 记录的图版页（thin_pages）用 `prep --pages` + `patch <书名>` 派视觉只补这几页的图描述，再 `check <批号> --force` 放行。
+   **重要：扫描件的 OCR 文字层不可盲信。** 实测同一本书里会混着两类页：① 出版社文字层（干净）；② 扫描 OCR 层（整页繁体字形、形近字错成片「权利→枚利」「于→千」、双栏索引被拼成一大段、图示被拆成乱字）。pull 已内置修复（视觉行聚类、旋转页坐标变换、千→于、引号配对、图示区占位、重复书眉剔除），但仍会有漏网页，所以 **pull 跑完必须做逐页体检**：
+   ```
+   python bookocr-kit/bookocr.py qa <书名>
+   ```
+   报告列出每页分数（图示乱码区 / 坏字 / 繁体字形 / 引号 / 断段），并直接给出建议命令。按报告用视觉 API 只重识别点名的页：
+   ```
+   python bookocr-kit/bookocr.py reocr <书名> --needs-vision --exact
+   python bookocr-kit/bookocr.py reocr <书名> --exact --pages 9,41,212,394
+   ```
+   `--exact` 只重识别点名页，同批其余页沿用本地 pull 结果；**不加 `--exact` 会把整批 10 页全部烧一遍**。单页约 8 秒、并发 3 路稳定（更高会 429）。重识别结果逐页落 `reocr/pNNNN.json`，中断重跑自动续。重跑完再 `qa` 一次，确认高分页已清掉；pack 会拦 `needs_vision` 未复核页。
    **pull 登记的图只有坐标没有语义（图题是「第N页插图」占位）**，转完跑一次：
    ```
    python bookocr-kit/bookocr.py figure-desc <书名> [--dry-run]
    ```
    按坐标裁小图 → 视觉 API 逐图补图题/描述/类型（photo/table/diagram），pack 时正文占位行与图包清单用的就是补好的语义。先 `--dry-run` 看裁图对不对再真跑。有图的书**必跑**，否则老板在 App 里看到的图全是「第N页插图」。
-6. **切章（全书转完必跑——产出手机 App 直入的章界，替代 App 端猜测）**：
+6. **智能校对（pull 路线的书强烈建议，在 reocr 之后、chapters 之前）**：
+   ```
+   python bookocr-kit/bookocr.py proofread <书名> [--no-ai] [--dry-run] [--workers 3]
+   ```
+   两层：规则层（零成本确定性规则）清脚注序号残留、`(l)`→`(1)`、`（IO`→`（10`、形近白名单错字、垃圾碎片段、整页繁体段；AI 层（文本 API 逐页通读，temperature 0.1，默认开）修形近错字、粘连碎句，输出受控 JSON（find 必须页内唯一、禁触结构标记、edits≤8/merges≤3），无法修的整页打 `needs_vision` 交回 `reocr --needs-vision --exact`。每次运行自动备份 `batches/` 到 `proofread/backup-<ts>/`，落 `changes.json` + `proofread_report.md` 审计。铁律：**必须在 reocr 之后跑**（reocr 整批覆盖会冲掉校对微调），chapters/pack 之前。
+7. **切章（全书转完必跑——产出手机 App 直入的章界，替代 App 端猜测）**：
    ```
    python bookocr-kit/bookocr.py chapters <书名>
    ```
@@ -75,12 +90,12 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
      python bookocr-kit/bookocr.py chapters <书名> --apply <工程>/chapters_review.txt
      ```
      反跑到无疑点为止。个别裁决不了的疑点记台账不阻塞，最终汇报列出。不想派裁决就 `chapters <书名> --no-review`（疑点只记台账，pack 不拦）。
-7. **全批 done 且切章后打包**：
+8. **全批 done 且切章后打包**：
    ```
    python bookocr-kit/bookocr.py pack <书名>
    ```
    产出 `jobs/<书名>/output/` 下三件：`书名.txt`（头部带章界元数据块——App 识别到即按电脑侧章表直入）、`书名_插图版.pdf`（没装 reportlab 则跳过）、`书名_Kit图包.zip`（**推荐手机导入用这个**：kit.json 章表+图清单 + book.txt + 裁好的真图，App 一个文件直入、阅读页图文混排）。忘跑 chapters 会被拦（或 `pack --auto-chapters` 一条龙）；图版页没 patch 也会被拦（先 `patch`，确要占位打包加 `--force`）。
-8. **汇报**（人话，给老板）：总页数、总字数、图张数（含 figure-desc 补语义情况）、**章数与疑点裁决情况**、产出文件完整路径、一句「微信传 zip 图包到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章、插图原位显示」。附 token 粗账（pull 批零消耗；figure-desc 走识图 API、每图一次小图调用；aivision 批 10 页约 23 秒；子代理批约 50 万 token/10 页）。
+9. **汇报**（人话，给老板）：总页数、总字数、图张数（含 figure-desc 补语义情况）、**章数与疑点裁决情况**、产出文件完整路径、一句「微信传 zip 图包到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章、插图原位显示」。附 token 粗账（pull 批零消耗；figure-desc 走识图 API、每图一次小图调用；aivision 批 10 页约 23 秒；子代理批约 50 万 token/10 页）。
 
 ## 断点续转（会话中断/换会话/换 agent）
 
@@ -98,6 +113,8 @@ python bookocr-kit/bookocr.py status <书名>
 | PDF 路径失效（pack 时裁不了图） | txt 照出；插图版 PDF 跳过并告知老板 |
 | 老板中途想换参数（每批页数等） | 别改已完成批；config 改动只影响新 init 的工程，必要时重 init 新工程 |
 | aivision 单页稳定超时 | 降 --workers；仍失败改走 pull 兜底或子代理单转，不要硬刷 |
+| pull 正文乱序/大量形近错字/图示变乱字 | 先 `qa <书名>` 看报告，按点名页 `reocr <书名> --exact --pages …`；整页繁体字形的页必须视觉重识别，别用字典硬修 |
+| qa 高分页越修越多 | 先看报告里是「图示区」还是「断段」：图示区/表格页交给 reocr；索引/目录页少数短行不算错，别追着 100% 修 |
 | chapters 疑点越裁越多 | 停：把疑点清单列给老板（多半目录页本身识别烂，或该书分册重编号） |
 | pack 报「还没切章」 | 先跑 chapters，或直接 pack --auto-chapters |
 

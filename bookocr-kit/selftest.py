@@ -9,9 +9,11 @@ bookocr-kit 自测：合成一本 12 页假书，把 init→prep→next→check�
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import shlex
 import sys
 from pathlib import Path
 
@@ -24,7 +26,7 @@ FAILS: list[str] = []
 
 
 def run(args: str, expect_fail: bool = False) -> str:
-    r = subprocess.run([PY, CLI, *args.split()], capture_output=True, text=True,
+    r = subprocess.run([PY, CLI, *[t.strip('"') for t in shlex.split(args, posix=False)]], capture_output=True, text=True,
                        encoding="utf-8", cwd=str(KIT))
     outp = (r.stdout or "") + (r.stderr or "")
     if expect_fail and r.returncode == 0:
@@ -180,7 +182,7 @@ def main() -> None:
 
     print("== init / prep ==")
     shutil.rmtree(JOB, ignore_errors=True)
-    run(f"init _selftest --src {src} --batch 4")
+    run(f'init _selftest --src "{src}" --batch 4')
     m = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
     check(m["npages"] == 12, "init 记录 12 页")
     check(len(m["batches"]) == 3, "init 直接建批（每批 4 页 → 3 批，渲染前即可 pull）")
@@ -313,7 +315,7 @@ def main() -> None:
     d.close()
 
     print("== pull 文字层拔取（多批台账一致性回归） ==")
-    run(f"init _selftest_pull --src {src} --batch 4")
+    run(f'init _selftest_pull --src "{src}" --batch 4')
     JOB2 = KIT / "jobs" / "_selftest_pull"
     run("prep _selftest_pull")
     o = run("pull _selftest_pull")
@@ -358,7 +360,7 @@ def main() -> None:
     check(mp["batches"]["b003"]["thin_pages"] == [], "patch 派出后 thin_pages 清空（防重派）")
 
     print("== init 免渲染直 pull（懒渲染路线） ==")
-    run(f"init _selftest_pull2 --src {src} --batch 4")
+    run(f'init _selftest_pull2 --src "{src}" --batch 4')
     JOB3 = KIT / "jobs" / "_selftest_pull2"
     run("pull _selftest_pull2")  # 不跑 prep，直接拔
     mp3 = json.loads((JOB3 / "manifest.json").read_text(encoding="utf-8"))
@@ -385,7 +387,7 @@ def main() -> None:
           "pull 书自动切章正确（PDF 里的两个章标题）")
 
     print("== chapters 疑点与裁决（toc_miss/gap/thin + --apply） ==")
-    run(f"init _selftest_ch2 --src {src} --batch 12")
+    run(f'init _selftest_ch2 --src "{src}" --batch 12')
     JOB4 = KIT / "jobs" / "_selftest_ch2"
     run("prep _selftest_ch2")
     run("next _selftest_ch2")
@@ -413,7 +415,7 @@ def main() -> None:
         "thin:12:第五章误切 | DROP | 12 | 第五章 误切\n"
         "gap:3 | IGNORE\n"
         "gap:4 | IGNORE\n", encoding="utf-8")
-    run(f"chapters _selftest_ch2 --apply {review}")
+    run(f'chapters _selftest_ch2 --apply "{review}"')
     m4 = json.loads((JOB4 / "manifest.json").read_text(encoding="utf-8"))
     titles = [c["t"] for c in m4["chapters"]]
     check("第四章 缺章" in titles, "ADD 裁决补进漏切章")
@@ -421,11 +423,92 @@ def main() -> None:
     check(m4.get("chapter_review_pending") is False, "IGNORE 后疑点清零、可 pack")
     check(m4["chapter_rulings"].get("p9:第四章 缺章") == "ADD|第四章 缺章", "裁决持久入台账（重跑不丢）")
 
+    print("== proofread 规则层 + AI Stub ==")
+    run(f'init _selftest_pf --src "{src}" --batch 4')
+    JOBP = KIT / "jobs" / "_selftest_pf"
+    run("prep _selftest_pf")
+    # 直接种写批文件（不走 pull，聚焦校对层逻辑）
+    junk = "勹无因管理仁覃言＄芦"
+    parts = [
+        "〔页1〕",
+        "第1页测试一。债之关系。专",                      # note_tail 段尾残留
+        "知己知彼，百战不殆；知已知彼，为谋之大忌。",      # zhiji 成语白名单
+        "甲的观点是淮确的。",                             # huai 错字
+        "",
+        "〔页2〕",
+        "（l）先看定义；（2）再看构成要件；（3）最后看效果。",  # l_paren（同段有 (2)(3)）
+        "费用共计（IO万元），分五期支付。",                 # latin_upper
+        "第2页测试一。他说此观点是女子的，实则应为好的。",   # 语义级错字留给 AI 层（规则层不动）
+        "",
+        "〔页3〕",
+        "勹示意线｛坐标轴｝",                            # junk：短、含垃圾符号、无读点
+        "＼｜卩",                                        # junk：纯垃圾符号
+        "第3页测试一。不当得利的成立要件有三。",              # 正常段：保证页3不被"全删空"兜底
+        "〔图：第3页示意〕",                               # 结构行须原样保留
+        "",
+        "〔页4〕",
+        "第4页测试一。当事人订立合同，应当具有相应的民事权利能力。",
+        "",
+    ]
+    (JOBP / "batches" / "b001.txt").write_text("\n".join(parts), encoding="utf-8")
+    (JOBP / "batches" / "b001_notes.txt").write_text("", encoding="utf-8")
+    (JOBP / "batches" / "b001_figures.json").write_text("[]", encoding="utf-8")
+
+    # ---- 规则层（--rules-only）----
+    run("next _selftest_pf")                            # proofread 只认 assigned/done 批，先派出 b001
+    run("check _selftest_pf b001 --force")              # pull 书页均字数低等判据与校对无关，--force 放行置 done
+    o = run("proofread _selftest_pf --batch b001 --rules-only --no-backup")
+    txt = (JOBP / "batches" / "b001.txt").read_text(encoding="utf-8")
+    check("债之关系。" in txt and "债之关系。专" not in txt, "note_tail：段尾「专」被删")
+    check("知己知彼" in txt, "zhiji：知已知彼 → 知己知彼")
+    check("淮确" not in txt and "准确" in txt, "huai：淮确 → 准确")
+    check("（1）" in txt and "（l）" not in txt, "l_paren：（l）→（1）")
+    check("（10万元）" in txt and "（IO万元）" not in txt, "latin_upper：（IO万元）→（10万元）")
+    p3 = txt.split("〔页3〕")[1]
+    check("勹示意线" not in p3 and "＼｜卩" not in p3, "junk：垃圾碎片段被删除")
+    check("不当得利的成立要件有三" in p3, "junk 删除不误伤同页正常段")
+    check("〔图：第3页示意〕" in p3, "结构行〔图：…〕原样保留")
+    check("〔页4〕" in txt and "第4页测试一" in txt, "页4 未命中规则原样保留（只动该动的页）")
+    m_pf = json.loads((JOBP / "manifest.json").read_text(encoding="utf-8"))
+    check(3 in (m_pf["batches"]["b001"].get("needs_vision") or []),
+          "junk≥2段整页标记 needs_vision（reocr 闭环入口）")
+    check("fix" in o or "修复" in o, "规则层运行成功")
+    check((JOBP / "proofread" / "changes.json").exists(), "changes.json 落盘")
+    ch = json.loads((JOBP / "proofread" / "changes.json").read_text(encoding="utf-8"))
+    rules = {f.get("rule") for v in ch.values() for f in v}
+    check("note_tail" in rules and "zhiji" in rules and "huai" in rules
+          and "l_paren" in rules and "latin_upper" in rules and "junk_line" in rules,
+          "六条规则全部命中")
+    check("第2页测试一" in txt and "女子的" in txt, "规则层不做语义级改写（留给 AI 层）")
+
+    # ---- AI Stub 链路 ----
+    stub = JOBP / "stub.json"
+    stub.write_text(json.dumps({
+        "edits": [{"find": "女子的", "replace": "好的"}],
+        "merges": []
+    }, ensure_ascii=False), encoding="utf-8")
+    env = dict(os.environ, PROOFREAD_AI_STUB=str(stub))
+    r = subprocess.run([PY, str(KIT / "proofread.py"), "_selftest_pf", "--batch", "b001",
+                        "--no-backup"], capture_output=True, text=True,
+                       encoding="utf-8", cwd=str(KIT), env=env)
+    txt = (JOBP / "batches" / "b001.txt").read_text(encoding="utf-8")
+    check("好的" in txt and "女子的" not in txt, "AI 层：语义级错字被修复")
+    check(r.returncode == 0, "AI Stub 全链路跑通")
+    rep = (JOBP / "proofread" / "proofread_report.md").read_text(encoding="utf-8")
+    check("AI" in rep or "ai" in rep, "报告含 AI 层记录")
+
     print("== 清理 ==")
+
+    def _cleanup_job(job_dir: Path) -> None:
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+    _cleanup_job(JOB)
     shutil.rmtree(JOB, ignore_errors=True)
     shutil.rmtree(JOB2, ignore_errors=True)
     shutil.rmtree(JOB3, ignore_errors=True)
     shutil.rmtree(JOB4, ignore_errors=True)
+    shutil.rmtree(JOBP, ignore_errors=True)
     src.unlink(missing_ok=True)
     if FAILS:
         print(f"SELFTEST FAIL：{len(FAILS)} 项未过")

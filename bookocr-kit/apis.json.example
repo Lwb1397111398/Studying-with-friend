@@ -1,0 +1,5 @@
+{
+  "base_url": "https://你的接口地址/v1",
+  "api_key": "把 key 粘贴到这里",
+  "default_model": "模型名（要和接口那边能对上的那一个）"
+}

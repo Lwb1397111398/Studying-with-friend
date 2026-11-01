@@ -1,0 +1,9 @@
+# 识别工程（含扫描页图、书稿正文、产出）——不入库，避免版权内容与体积
+jobs/
+# 本地视觉 API 凭据
+apis.json
+# Python 缓存
+__pycache__/
+*.pyc
+# 代码索引缓存
+.codegraph/

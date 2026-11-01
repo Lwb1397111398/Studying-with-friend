@@ -28,9 +28,12 @@ import argparse
 import bisect
 import difflib
 import json
+import msvcrt
 import re
 import statistics
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent
@@ -83,8 +86,10 @@ FIG_MARK = re.compile(r"^\s*〔图[:：]\s*(.+?)\s*〕(.*)$")
 PULL_FIG_MARK = re.compile(r"^〔图：第(\d+)页插图\d*〕$")
 PULL_FIG_DESC = "原书嵌入插图（坐标按原 PDF 图块精确提取）"
 # 排版标题启发式（与 APP 侧 BookParser 同一套档位口径）
-CH_RE = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十百千]+\s*[章编部篇]")
-SEC_RE = re.compile(r"^(第\s*[0-9〇零一二三四五六七八九十百千]+\s*[节讲]|[一二三四五六七八九十]+\s*、)")
+CH_RE = re.compile(r"^[第笫]\s*[0-9〇零一二三四五六七八九十百千]+\s*[章编部篇次]")
+# 二级/三级标题（「一、」「（二）」「(3)」倒装编号）也没有句末标点，质检时不算断段
+SUBHEAD_RE = re.compile(r"^(?:[一二三四五六七八九十]+、|[（(][一二三四五六七八九十0-9]+[）)])")
+SEC_RE = re.compile(r"^([第笫]\s*[0-9〇零一二三四五六七八九十百千]+\s*[节讲款]|[一二三四五六七八九十]+\s*、)")
 
 
 def out(s: str) -> None:
@@ -128,6 +133,33 @@ def save_manifest(job: Path, m: dict) -> None:
     (job / "manifest.json").write_text(
         json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8"
     )
+
+
+class _ManifestLock:
+    """跨进程/跨会话台账互斥锁（夜间 cron 每 2h 起新会话接力时，多个会话并行
+    调度同一本书，无锁读改写会把别会话刚写的「派出/done」标记覆盖回去，实测发生过）。
+    除只读命令外全部持锁执行；pull/aivision/figure-desc 内部直调 cmd_check 不经此锁，
+    这三条路线不与子代理路线混跑即可。"""
+
+    def __enter__(self):
+        JOBS.mkdir(exist_ok=True)
+        self._f = open(JOBS / ".manifest.lock", "a+")
+        deadline = time.time() + 120
+        while True:
+            try:
+                msvcrt.locking(self._f.fileno(), msvcrt.LK_NBLCK, 1)
+                return self
+            except OSError:
+                if time.time() > deadline:
+                    self._f.close()
+                    die("台账锁等待超时（另一会话占锁过久），稍后重试")
+                time.sleep(0.3)
+
+    def __exit__(self, *exc):
+        try:
+            msvcrt.locking(self._f.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self._f.close()
 
 
 def batch_dir(job: Path) -> Path:
@@ -351,8 +383,58 @@ def _aivision_page(base: str, key: str, model: str, spec: str, img: Path, pageno
     return resp["choices"][0]["message"]["content"]
 
 
+def _join_vision_lines(lines: list[str]) -> list[str]:
+    """把视觉模型输出的换行折叠成段落：空行分段；标题/编号项/图占位独立成段。
+
+    模型常把一个自然段按屏幕宽度折成多行，若逐行当段落，App 里会出现大量
+    句中断段。这里按「空行才是段界」还原，中文直接相接，西文词间补空格。"""
+    paras: list[str] = []
+    cur: list[str] = []
+
+    def flush() -> None:
+        if not cur:
+            return
+        text = ""
+        for s in cur:
+            sep = " " if (text and text[-1:].isascii() and text[-1:].isalnum()
+                          and s[:1].isascii() and s[:1].isalnum()) else ""
+            text += sep + s
+        paras.append(text.strip())
+        cur.clear()
+
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            flush()
+            continue
+        standalone = (s.startswith("〔图") or CH_RE.match(s) or SEC_RE.match(s)
+                      or re.match(r"^[（(][0-9一二三四五六七八九十]+[）)]", s)
+                      or re.match(r"^[0-9]+[.、．]", s))
+        if standalone:
+            flush()
+            paras.append(s)
+        else:
+            cur.append(s)
+    flush()
+    return paras
+
+
+def _join_vision_notes(lines: list[str]) -> list[str]:
+    """脚注行折叠：以编号开头的行是新脚注，其余行是上一条的折行续文。"""
+    out: list[str] = []
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            continue
+        if not out or re.match(r"^[①-⑳0-9]", s):
+            out.append(s)
+        else:
+            out[-1] += s
+    return out
+
+
 def _parse_aivision_page(text: str, pageno: int) -> tuple[list[str], list[str], list[dict]]:
-    """拆模型输出 → (正文行, 脚注行, figures)。容忍模型漏写分区标记。"""
+    """拆模型输出 → (正文段落, 脚注行, figures)。容忍模型漏写分区标记。"""
     body_lines, notes, figs = [], [], []
     section = "body"
     for ln in text.replace("\r\n", "\n").split("\n"):
@@ -362,12 +444,9 @@ def _parse_aivision_page(text: str, pageno: int) -> tuple[list[str], list[str], 
         if re.fullmatch(r"〔\s*FIGURES\s*〕?", s) or s.upper() == "〔FIGURES〕":
             section = "figs"; continue
         if section == "body":
-            if PAGE_MARK.match(s) or s == f"〔页{pageno}〕":
+            if s and (PAGE_MARK.match(s) or s == f"〔页{pageno}〕"):
                 continue  # 模型自己写的页标记行，统一重打
-            if s.startswith("〔图") and "〕" in s:
-                body_lines.append(s)
-            elif s:
-                body_lines.append(s)
+            body_lines.append(s)  # 空行必须保留：它是 _join_vision_lines 的段界
         elif section == "notes":
             if s:
                 notes.append(s)
@@ -380,7 +459,7 @@ def _parse_aivision_page(text: str, pageno: int) -> tuple[list[str], list[str], 
                         figs.extend(arr)
                 except json.JSONDecodeError:
                     pass
-    return body_lines, notes, figs
+    return _join_vision_lines(body_lines), _join_vision_notes(notes), figs
 
 
 def cmd_aivision(a: argparse.Namespace) -> None:
@@ -447,10 +526,233 @@ def cmd_aivision(a: argparse.Namespace) -> None:
         b["status"] = "assigned"
         save_manifest(job, m)
         try:
-            cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min))
+            cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min), m=m)
         except SystemExit:
             out(f"[!] {bid} 质检不过，retry 后可重跑 aivision 或改派子代理")
     out("下一步：status 看进度")
+
+
+# ---------------------------------------------------------------- reocr（逐页视觉重识别，修烂文字层）
+
+def _aivision_page_retry(base: str, key: str, model: str, spec: str, img: Path,
+                         pageno: int, timeout: int = 240, tries: int = 5) -> str:
+    """单页视觉识别 + 429/超时退避重试。视觉 API 实测 8 并发会 429，
+    调用方默认只开 3~4 路，这里再兜一层退避，避免整批失败。"""
+    last: Exception | None = None
+    for i in range(tries):
+        try:
+            return _aivision_page(base, key, model, spec, img, pageno, timeout=timeout)
+        except Exception as e:
+            last = e
+            msg = str(e)
+            if "429" in msg or "Too Many" in msg:
+                time.sleep(min(30, 3 * (2 ** i)))
+            elif "timed out" in msg.lower() or "Timeout" in type(e).__name__:
+                time.sleep(2 + i * 2)
+            else:
+                time.sleep(1 + i)
+    assert last is not None
+    raise last
+
+
+def _write_batch_from_pages(job: Path, b: dict, results: dict[int, dict]) -> None:
+    """用逐页视觉结果重写一个批（正文/脚注/图）。"""
+    parts: list[str] = []
+    notes_all: list[str] = []
+    figs_all: list[dict] = []
+    for n in b["pages"]:
+        r = results[n]
+        parts.append(f"〔页{n}〕")
+        for j, para in enumerate(r.get("body") or ["〔空白页〕"]):
+            if j:
+                parts.append("")
+            parts.append(para)
+        parts.append("")
+        notes_all.extend(r.get("notes") or [])
+        figs_all.extend([f for f in (r.get("figs") or []) if f.get("page") in b["pages"]])
+    (job / b["body"]).write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+    (job / b["notes"]).write_text("\n".join(notes_all) + ("\n" if notes_all else ""), encoding="utf-8")
+    (job / b["figures"]).write_text(json.dumps(figs_all, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def cmd_reocr(a: argparse.Namespace) -> None:
+    """按页/批做视觉重识别，覆盖原批文件。用于两类救火：
+    ① pull 路线碰到的扫描件 OCR 文字层烂页（qa 报告点名）；
+    ② 子代理/aivision 路线个别页转坏。
+    默认整批重识别（脚注/图台账按批才自洽），结果逐页落 reocr/ 可断点续跑。
+    加 --exact 只重识别点名页，同批其余页沿用本地 pull 结果——pull 书的正常页
+    本来就没问题，整批重跑会把识别量放大 10 倍。"""
+    import shutil
+    import concurrent.futures as futures
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    if not m["batches"]:
+        die("还没有批次，先跑 init/prep")
+    exact = bool(getattr(a, "exact", False))
+    if exact and m.get("route") != "pull":
+        die("--exact 只适用于 pull 路线（自带文字层）的书：它靠本地重抽非目标页的正文，"
+            "视觉识别路线的书没有文字层，去掉 --exact 整批重识别（或先确认 route=pull）")
+    want: set[int] | None = None
+    if a.needs_vision:
+        want = {p for b in m["batches"].values() for p in (b.get("needs_vision") or [])}
+        if not want:
+            out("[ok] 没有 needs_vision 页（pull 未标记或已复核完）")
+            return
+        bids = [bid for bid, b in m["batches"].items() if want & set(b["pages"])]
+    elif a.all:
+        bids = list(m["batches"])
+        if exact:
+            want = {p for b in m["batches"].values() for p in b["pages"]}
+    elif a.pages:
+        want = set(_parse_pages_arg(a.pages, len(m["pages"])))
+        bids = [bid for bid, b in m["batches"].items() if want & set(b["pages"])]
+        if not bids:
+            die(f"页 {sorted(want)[:8]} 不在任何批里")
+    elif a.batch:
+        bids = [normalize_bid(m, a.batch)]
+    else:
+        die("要指定 --pages / --batch / --all 之一")
+    target_pages = sorted(want if exact and want is not None
+                          else {p for bid in bids for p in m["batches"][bid]["pages"]})
+    target_set = set(target_pages)
+
+    store = job / "reocr"
+    store.mkdir(exist_ok=True)
+    todo = [p for p in target_pages
+            if a.force or not (store / f"p{p:04d}.json").exists()]
+    out(f"[i] 重识别目标：{len(bids)} 批 / {len(target_pages)} 页；待跑 {len(todo)} 页"
+        f"（已完成的页自动续跑）")
+
+    # 备份原批/产出（只备一次，按时间戳）
+    if not a.no_backup:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        bak = job / f"backup-reocr-{stamp}"
+        try:
+            shutil.copytree(job / "batches", bak / "batches")
+            if (job / "output").exists():
+                shutil.copytree(job / "output", bak / "output")
+            out(f"[i] 原批已备份：{bak}")
+        except OSError as e:
+            out(f"[警告] 备份失败（{e}），继续重识别")
+
+    # 渲染缺的页图
+    fitz = load_fit()
+    doc = fitz.open(m["src_pdf"])
+    rendered = set(m.get("rendered") or [])
+    need_render = [p for p in todo if p not in rendered]
+    if need_render:
+        out(f"[i] 渲染缺页 {len(need_render)} 张 …")
+        for k, p in enumerate(need_render, 1):
+            pix = doc[p - 1].get_pixmap(dpi=m["dpi"])
+            if not m["color"] and pix.colorspace and pix.colorspace.n > 1:
+                pix = fitz.Pixmap(fitz.csGRAY, pix)
+            pix.save(str(job / m["pages"][p - 1]["image"]))
+            rendered.add(p)
+            if k % 20 == 0 or k == len(need_render):
+                out(f"  · 渲染 {k}/{len(need_render)}")
+        m["rendered"] = sorted(rendered)
+        save_manifest(job, m)
+    doc.close()
+
+    if not todo:
+        out("[ok] 目标页都已有重识别结果，直接重建批文件")
+    else:
+        base, key, model = _load_vision_api()
+        spec = (KIT / "spec.md").read_text(encoding="utf-8")
+        workers = a.workers if a.workers is not None else 3
+        out(f"[i] 视觉 API {model}（key 已打码），并发 {workers}，待识别 {len(todo)} 页（约 {len(todo) * 8 // max(1, workers)} 秒）")
+        fails: list[int] = []
+        done = 0
+
+        def run(p: int) -> None:
+            nonlocal done
+            img = job / m["pages"][p - 1]["image"]
+            txt = _aivision_page_retry(base, key, model, spec, img, p)
+            body, notes, figs = _parse_aivision_page(txt, p)
+            (store / f"p{p:04d}.json").write_text(json.dumps(
+                {"page": p, "body": body, "notes": notes, "figs": figs,
+                 "model": model, "ts": time.strftime("%Y-%m-%d %H:%M:%S")},
+                ensure_ascii=False, indent=1), encoding="utf-8")
+            done += 1
+            if done % 5 == 0 or done == len(todo):
+                out(f"  · 识别 {done}/{len(todo)}（失败 {len(fails)}）")
+
+        with futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(run, p): p for p in todo}
+            for fu in futures.as_completed(futs):
+                p = futs[fu]
+                try:
+                    fu.result()
+                except Exception as e:
+                    fails.append(p)
+                    out(f"  · p{p} 失败：{type(e).__name__}: {str(e)[:100]}")
+        if fails:
+            out(f"[!] {len(fails)} 页失败：{fails[:12]}{'…' if len(fails) > 12 else ''}；重跑同一命令只补失败页")
+
+    # 整批重建（缺页的批保持原样，不写半批）
+    rebuilt: list[str] = []
+    pull_doc = pull_fitz = None
+    if exact:
+        # --exact：未点名页不花 token，现场按原 pull 规则重抽（本地、确定性）
+        pull_fitz = load_fit()
+        pull_doc = pull_fitz.open(m["src_pdf"])
+
+    def pull_result(p: int) -> dict:
+        d = _pull_page(pull_doc[p - 1], pull_fitz,
+                       furniture=set(m.get("furniture") or []))
+        thin = d["chars"] == 0 and d["fig_area"] > 0.3
+        body = [f"〔图：第{p}页图版〕", "〔图版页〕"] if thin else (d["paras"] or [])
+        return {"page": p, "body": body, "notes": d["notes"], "figs": d["figs"],
+                "thin": thin, "needs_vision": bool(d.get("needs_vision"))}
+
+    for bid in bids:
+        b = m["batches"][bid]
+        missing = [p for p in b["pages"]
+                   if p in target_set and not (store / f"p{p:04d}.json").exists()]
+        if missing:
+            b["status"], b["fail_reason"] = "failed", f"reocr 缺页 {missing}"
+            save_manifest(job, m)
+            out(f"[!] {bid} 还缺 {len(missing)} 页结果（{missing[:8]}…），本批暂不重建")
+            continue
+        results: dict[int, dict] = {}
+        thin_pages: list[int] = []
+        nv_pages: list[int] = []
+        for p in b["pages"]:
+            f = store / f"p{p:04d}.json"
+            # 已有视觉结果的页一律优先用结果（哪怕它不在本次 --pages 里）：
+            # 否则一次「只补几页」的重建会把先前重识别过的页退回本地 pull 文字层。
+            if f.exists():
+                results[p] = json.loads(f.read_text(encoding="utf-8"))
+            elif exact:
+                r = pull_result(p)
+                results[p] = r
+                if r["thin"]:
+                    thin_pages.append(p)
+                if r["needs_vision"]:
+                    nv_pages.append(p)
+            else:  # 非 exact 已由上面的 missing 拦掉，这里只防御
+                results[p] = {"page": p, "body": ["〔空白页〕"], "notes": [], "figs": []}
+        _write_batch_from_pages(job, b, results)
+        b["status"], b["fail_reason"] = "assigned", None
+        b["thin_pages"], b["needs_vision"] = thin_pages, nv_pages
+        save_manifest(job, m)
+        try:
+            cmd_check(argparse.Namespace(job=a.job, batch=bid, force=a.force, min=a.min), m=m)
+            rebuilt.append(bid)
+        except SystemExit:
+            out(f"[!] {bid} 重建后质检不过（原因见上）；可 --force 放行或人工看")
+    if pull_doc is not None:
+        pull_doc.close()
+
+    if rebuilt:
+        # 正文变了，旧跨页缝合/章表全部作废，强制重切
+        if (job / ".stitched.json").exists():
+            (job / ".stitched.json").unlink()
+        m["chapters"], m["chapter_warnings"], m["packed"] = [], [], False
+        save_manifest(job, m)
+    out(f"[ok] reocr 完成：重建 {len(rebuilt)} 批（{rebuilt[:8]}{'…' if len(rebuilt) > 8 else ''}）")
+    if rebuilt:
+        out("下一步：chapters 重切章 → figure-desc（若新增图）→ pack")
 
 
 # ---------------------------------------------------------------- figure-desc（pull 图补视觉描述）
@@ -636,45 +938,344 @@ def _rect_iou(a: list[float], b: list[float]) -> float:
     area_b = (b[2] - b[0]) * (b[3] - b[1])
     return inter / (area_a + area_b - inter)
 
-def _page_lines(page: dict) -> list:
-    """把一页的 dict 结构摊平成行：[{text,size,x0,y0,x1,y1}]，按阅读序排好。
+def _page_lines(page) -> list:
+    """把一页的 dict 结构摊平成**视觉行**，按真实阅读序排好。
 
-    两端对齐的排版会把同一视觉行在西文词间大空隙处拆成多个 line 对象
-    （如「dingliche|Einigung」），按 y0 聚簇后把横向间隙小于 4 字号的碎片
-    拼回一行，否则缩进判据会把碎片当新段首。"""
+    2026-10-27 关键修正（两个独立 bug，都会造成整页乱断句）：
+    ① 部分扫描页 `page.rotation=90`，PyMuPDF 的 dict 坐标仍是未旋转画布
+       （一个横排句子变成 h≈325、w≈15 的竖条），旧版按 y0 排序必然读成乱序。
+       这里先用 `page.rotation_matrix` 把 bbox 变换到显示坐标，再排序。
+    ② 引号/上标脚注的 bbox 上沿与正文行差 3~8pt，旧版 2pt 容差会把同一行
+       拆成三行并排错位置。现在按 bbox 垂直重叠聚成视觉行（重叠 ≥45% 行高
+       即同一行），行内按 x 排序；只有横向间隙小于 4 字号的碎片才拼回一行。
+    多栏/表格行保留 n_frag / max_gap 供图示区检测使用。"""
+    if hasattr(page, "get_text"):
+        src = page.get_text("dict")
+        rot = page.rotation_matrix if getattr(page, "rotation", 0) else None
+    else:  # 旧调用方式：直接传 dict（无法处理旋转，由调用方负责）
+        src, rot = page, None
+    fitz = load_fit() if rot is not None else None
     lines = []
-    for blk in page.get("blocks", []):
+    for blk in src.get("blocks", []):
         if blk.get("type") != 0:
             continue
         for ln in blk.get("lines", []):
             spans = [s for s in ln.get("spans", []) if s.get("text", "").strip()]
             if not spans:
                 continue
-            spans.sort(key=lambda s: s["bbox"][0])
+            # 旋转页的 span 坐标也要先变换再排序：未旋转画布里同一行 span 的 x0 几乎
+            # 相同（都等于行首），按原 x 排会保留内容流顺序，把「（第」「1201」拆错位。
+            if rot is not None:
+                spans.sort(key=lambda s: (fitz.Rect(s["bbox"]) * rot).x0)
+            else:
+                spans.sort(key=lambda s: s["bbox"][0])
             text = "".join(s["text"] for s in spans).strip()
             if not text:
                 continue
             x0, y0, x1, y1 = ln["bbox"]
+            if rot is not None:
+                r = fitz.Rect(x0, y0, x1, y1) * rot
+                x0, y0, x1, y1 = r.x0, r.y0, r.x1, r.y1
             size = max(s["size"] for s in spans)
-            lines.append({"text": text, "size": size, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
-    lines.sort(key=lambda l: (l["y0"], l["x0"]))
+            lines.append({"text": text, "size": size, "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+                          "cy": (y0 + y1) / 2, "h": max(1.0, y1 - y0)})
+
+    # 1) 按垂直重叠聚行（不再用固定 y0 容差）
+    rows: list = []
+    for l in sorted(lines, key=lambda z: (z["cy"], z["x0"])):
+        target = None
+        for r in rows:
+            oy0, oy1 = max(r["y0"], l["y0"]), min(r["y1"], l["y1"])
+            ov = oy1 - oy0
+            if ov >= 0.45 * min(r["h"], l["h"]):
+                target = r
+                break
+        if target is None:
+            rows.append({"y0": l["y0"], "y1": l["y1"], "h": l["h"], "cy": l["cy"], "items": [l]})
+        else:
+            target["items"].append(l)
+            target["y0"] = min(target["y0"], l["y0"])
+            target["y1"] = max(target["y1"], l["y1"])
+            target["h"] = max(1.0, target["y1"] - target["y0"])
+            target["cy"] = (target["y0"] + target["y1"]) / 2
+
+    # 2) 行间自上而下；行内自左而右，小间隙碎片接回同一行
+    rows.sort(key=lambda r: (r["cy"], min(i["x0"] for i in r["items"])))
     merged: list = []
-    for l in lines:
-        if merged and abs(l["y0"] - merged[-1]["y0"]) <= 2.0:
-            g = merged[-1]
-            gap = l["x0"] - g["x1"]
-            if -g["size"] < gap < 4 * max(g["size"], l["size"]):
-                a, bx = g["text"][-1:], l["text"][:1]
-                sep = " " if a.isascii() and a.isalpha() and bx.isascii() and bx.isalpha() else ""
-                g["text"] += sep + l["text"]
-                g["x1"] = max(g["x1"], l["x1"])
-                g["size"] = max(g["size"], l["size"])
+    for r in rows:
+        items = sorted(r["items"], key=lambda z: z["x0"])
+        text, prev, n_frag, max_gap = "", None, 0, 0.0
+        for it in items:
+            if prev is None:
+                text = it["text"]
+            else:
+                gap = it["x0"] - prev["x1"]
+                max_gap = max(max_gap, gap)
+                size = max(prev["size"], it["size"])
+                if -size < gap < 4 * size:
+                    a, bx = text[-1:], it["text"][:1]
+                    sep = " " if a.isascii() and a.isalpha() and bx.isascii() and bx.isalpha() else ""
+                    text += sep + it["text"]
+                else:
+                    text += " " + it["text"]
+                    n_frag += 1
+            prev = it
+        merged.append({"text": text.strip(), "size": max(i["size"] for i in items),
+                       "x0": min(i["x0"] for i in items), "y0": r["y0"],
+                       "x1": max(i["x1"] for i in items), "y1": r["y1"],
+                       "n_frag": n_frag, "max_gap": max_gap})
+    return [m for m in merged if m["text"]]
+
+
+# ---------------------------------------------------------------- OCR 文字层纠错
+
+# 扫描件 OCR 层系统性误码：繁体「於/于」被识成「千」（王泽鉴三本书实测
+# 976/525/521 处）。判据反过来：简体正文里「千 + 汉字」几乎必然是「于」，
+# 只有下列千字词/成语的后续字、以及数字前缀（一千、两千、数千、成千）才保留。
+_QIAN_LEGIT_NEXT = set("年月日万字百十人古秋金克米瓦佛岛山仞钧载禧里军马言语丝缕篇律姿态奇怪家户呼唤恩谢叮嘱疮孔锤炼难险水落乘门生"
+                       "元圆倍余块吨亩顷尺寸丈套辆架艘匹只棵株座层间页张片场次遍回件名句计般变差奇真辛方丝头态状岁夜")
+_QIAN_NUM_PREV = set("0123456789〇零一二三四五六七八九十百千万亿两几数成上若")
+# 只在繁体字形中出现、简体书里不该出现的字（由 zhconv 繁→简映射静态生成的 4056 字）。
+# 扫描件 OCR 层在部分页整页返回繁体字形（「枚利」「惡則」「美系」），这是最可靠的
+# 「该页文字层不可信」信号；简体正文误报率实测为 0。
+_TRAD_ONLY = frozenset(
+    "丟丣並乗乹乾亁亂亙亝亞亱亷亾佇佈佔併來侖侶侷俁係俓俔俠俥俬俻倀倆倈倉個倐們倖倣倫倲倸偉偑側偵偽傌傑傖傘備傚傢傭傯傳傴債傷傾僂僅僉僊働僑僕僞僤僥僨僱價儀儁儂億儈儉"
+    "儌儎儐儔儕儘償儣優儭儲儷儸儺儻儼兇兌兎兒兗兠內兩冄冊冐冑冪冺凈凍凙凜凢凱凴別刦刧刪刼剄則剉剋剎剏剗剙剛剝剮剳剴創剷剹剾劃劄劇劉劊劌劍劏劑劒劚効勁勅勌勑動務勛勝勞"
+    "勢勣勦勩勱勳勵勸勻匟匭匯匱匲匳區協卹卻卽厀厙厠厤厭厰厲厴參叄叢吒吚吳吶呂呌呪咊咼員哯哶唄唓唕唘唚唸啎問啑啓啗啞啟啢啣喎喚喪喫喬單喲嗁嗆嗇嗊嗎嗚嗩嗰嗶嗹嘆嘍嘑嘓嘔"
+    "嘖嘗嘜嘠嘩嘪嘮嘯嘰嘳嘵嘷嘸嘺嘽噁噅噉噓噚噝噞噠噥噦噯噲噴噸噹嚀嚇嚌嚐嚕嚙嚛嚥嚦嚧嚨嚮嚲嚳嚴嚶嚽囀囁囂囃囅囈囉囌囑囒囓囙囪圅圇國圍園圓圖團圞坿垜垻埡埨埬埰執堅堊堖"
+    "堚堝堯報場塊塋塏塒塗塚塟塢塤塲塵塸塹塿墊墖墜墠墮墰墲墳墶墻墾壇壈壋壎壓壗壘壙壚壜壞壟壠壢壣壩壪壯壺壻壼壽夘夠夢夥夾奐奧奩奪奬奮奼妝妬妳妷姉姍姙姦姪姸娙娛婁婡婣婦"
+    "婬婭媈媍媧媯媰媼媽媿嫋嫗嫰嫵嫺嫻嫿嬀嬃嬇嬈嬋嬌嬙嬝嬡嬣嬤嬦嬪嬭嬰嬸嬻嬾孃孄孆孇孋孌孎孫學孻孼孾孿宂宮寀寃寑寠寢實寧審寫寬寳寵寶尅將專尋對導尒尙尟尠尷屆屍屓屛屜屢"
+    "層屨屩屬屭岅岡峝峯峴島峽崍崑崗崙崢崬嵐嵗嵼嵽嵾嶁嶃嶄嶇嶈嶔嶗嶘嶠嶢嶧嶨嶮嶸嶹嶺嶼嶽巊巋巒巔巖巗巘巠巰巵巹帀帋帥師帬帳帶幀幃幇幑幓幗幘幙幚幝幟幣幩幫幬幹幾庫庻庽廁"
+    "廂廄廈廎廐廕廚廝廞廟廠廡廢廣廧廩廬廳廵廹廻弒弔弳張強彃彄彆彈彌彎彔彙彞彠彥彫彲彿徃後徑從徠徧復徵徹徿怱怳恆恠恡恥悅悞悤悵悶悽惏惡惥惱惲惷惻愛愜愨愴愷愻愽愾慄態慍"
+    "慘慙慚慟慣慤慪慫慮慳慴慶慺慼慽慾憂憇憊憍憐憑憒憖憚憢憤憫憮憲憶憸憹懀懇應懌懍懎懞懟懣懤懧懨懲懶懷懸懺懼懾戀戇戔戞戧戩戰戱戲戶戹扞抝拋拚挩挱挵挾捄捨捫捱捲掃掄掆掗"
+    "掙掚掛採掽揀揑揚換揫揮揯揷揹搆搇搉損搖搗搤搥搨搯搵搶搾摃摋摐摑摜摟摯摳摶摺摻撈撊撏撐撓撝撟撡撣撥撦撧撫撲撳撻撾撿擁擄擇擊擋擓擔擕據擟擠擣擥擧擫擬擯擰擱擲擴擷擺擻"
+    "擼擽擾攄攆攋攏攔攖攙攛攜攝攢攣攤攩攪攬攷敂敍敎敓敗敘敵數敺斂斃斅斆斕斬斷斸於旂旣旤旹旾昇昬時晉晛晝暈暉暐暘暢暫暱曄曆曇曉曊曏曖曠曡曥曨曬書會朞朢朥朧朮朶東杴枱枴"
+    "柵柺査栁栞栢栰桒桮桱桺桿梔梖梘梜條梟梲棄棊棖棗棟棡棧棲棶椏椗椲椶椷椾楇楊楓楥楨業極榘榦榪榮榲榿構槍槓槕槤槧槨槫槮槳槶槼樁樂樅樑樓標樞樠樢樣樤樧樫樳樸樹樺樿橈橋橜"
+    "機橢橫橯檁檉檔檜檟檢檣檭檮檯檳檵檸檻櫃櫅櫈櫍櫓櫚櫛櫝櫞櫟櫠櫥櫧櫨櫪櫫櫬櫱櫳櫸櫻欄欅欇權欍欏欐欑欒欓欖欘欝欞欵欽歎歐歛歟歡歲歴歷歸歿殀殘殞殢殤殨殫殭殮殯殰殲殺殻殼"
+    "毀毆毊毧毬毿氂氈氊氌氣氫氬氭氳氷氾汎汙汚決沒沖況泝洩洶浹浿涇涖涗涼淒淚淛淥淨淩淪淵淶淺渖渙減渢渦測渾湊湋湞湧湯湼溈準溝溡溫溮溳溼滄滅滌滎滙滛滬滯滲滷滸滻滾滿漁漊"
+    "漍漚漢漣漬漲漵漸漿潁潄潑潔潕潙潚潛潣潤潯潰潷潿澀澁澅澆澇澐澗澠澤澦澩澫澬澮澱澾濁濃濄濆濇濕濘濚濛濜濟濤濧濫濰濱濶濺濼濾濿瀂瀃瀅瀆瀇瀉瀋瀏瀕瀘瀝瀟瀠瀦瀧瀨瀰瀲瀾灃"
+    "灄灋灍灑灒灕灘灙灝灠灡灣灤灧灩災為烏烖烴無煇煉煑煒煗煙煢煥煩煬煱熂熅熈熉熌熒熓熗熚熡熰熱熲熾燀燁燄燈燉燒燖燙燜營燦燬燭燴燶燻燼燾爃爄爇爍爐爖爗爛爥爧爭爲爺爾牀牆"
+    "牋牎牐牓牕牘牠牴牽犖犛犞犢犧狀狥狹狽猂猌猙猨猶猻獁獃獄獅獊獎獘獧獨獩獪獫獮獰獱獲獵獷獸獺獻獼玀玁玅珼現琖琱琺琿瑇瑋瑒瑣瑤瑩瑪瑯瑲瑻瑽璉璊璕璗璝璡璢璣璦璫璯環璵璸"
+    "璼璽璾璿瓄瓅瓊瓏瓔瓕瓚瓛甌甎甕甖甞產産甦甯畂畆畝畢畧畫畮異畱畵當畼疇疊疎疘疿痐痙痠痮痲痺痾瘂瘉瘋瘍瘓瘖瘞瘡瘧瘮瘱瘲瘺瘻療癄癅癆癇癈癉癐癒癘癟癡癢癤癥癧癩癬癭癮癰"
+    "癱癲發皁皐皚皜皟皰皷皸皺盃盇盌盜盞盡監盤盧盨盪眎眝眞眡眥眾睍睏睜睞睠睪瞇瞖瞘瞜瞞瞤瞭瞶瞼矁矇矉矑矓矙矚矯矽砲硃硜硤硨硯碕碙碩碪碭碸確碼碽磑磚磟磠磣磧磯磽磾礄礆礎"
+    "礐礒礙礦礪礫礬礮礱祕祘祿禍禎禕禡禦禪禮禰禱禿秈秊秌秖稅稈稉稏稜稟稬稭種稱稾穀穇穌積穎穠穡穢穤穨穩穫穭穽窓窩窪窮窯窰窵窶窺窻竄竅竇竈竊竚竝竢竪竱競筆筍筞筧筩筯筴箇"
+    "箋箏箒箠節範築篋篔篘篛篠篢篤篩篳篸簀簂簍簑簒簞簡簢簣簫簮簷簹簽簾籃籅籋籌籐籔籙籛籜籟籠籤籩籪籬籮籲粃粧粵糉糝糞糧糰糲糴糶糹糺糾紀紂紃約紅紆紇紈紉紋納紐紓純紕紖紗"
+    "紘紙級紛紜紝紞紟紡紥紬紮細紱紲紳紵紹紺紼紿絀絁終絃組絅絆絍絎絏結絕絙絛絝絞絡絢絥給絧絨絪絰統絲絳絶絹絺綀綁綃綄綆綇綈綉綋綌綎綏綐綑經綖綜綝綞綟綠綡綢綣綧綪綫綬維"
+    "綯綰綱網綳綴綵綸綹綺綻綽綾綿緄緇緊緋緍緐緑緒緓緔緗緘緙線緜緝緞緟締緡緣緤緥緦編緩緬緮緯緰緱緲練緶緷緸緹緻緼縈縉縊縋縍縎縐縑縕縗縛縝縞縟縣縧縫縬縭縮縯縰縱縲縳縴縵"
+    "縶縷縸縹縺總績繂繃繅繆繈繏繐繒繓織繕繖繙繚繞繟繡繢繦繨繩繪繫繬繭繮繯繰繳繶繷繸繹繻繼繽繾繿纁纆纇纈纊續纍纏纓纔纕纖纗纘纚纜缐缽罃罇罈罋罌罎罰罵罷罸羅羆羈羋羗羢羣"
+    "羥羨義羵羶翄習翫翬翶翹翽耡耬耮聖聞聯聰聲聳聵聶職聹聻聽聾肅肎肐肧胷脃脅脇脈脗脛脣脥脩脫脹腁腎腖腡腦腪腫腳腸膃膓膕膚膞膠膢膩膹膽膾膿臈臉臋臍臏臕臗臘臙臚臝臟臠臢臥"
+    "臨臯臺與興舉舊舖舘舩艙艢艣艤艦艪艫艱艷芲芻茘茲荊荳莊莖莢莧菕菫華菴菸萇萊萬萲萴萵葉葒葝葠葤葦葯葷蒍蒐蒓蒔蒕蒞蒭蒼蓀蓆蓋蓡蓧蓮蓯蓴蓽蔄蔔蔕蔘蔞蔣蔥蔦蔭蔯蔿蕁蕆蕎蕒"
+    "蕓蕕蕘蕚蕝蕢蕩蕪蕭蕳蕷蕽蕿薀薆薈薊薌薑薔薘薟薦薩薳薴薵薹薺藍藎藝藥藪藭藴藶藷藹藺藼蘀蘄蘆蘇蘊蘋蘐蘓蘚蘞蘟蘢蘤蘭蘺蘿虆虉處虛虜號虧虯蚘蛕蛺蛻蜆蜋蜖蜨蝀蝕蝟蝦蝨蝯蝱"
+    "蝸螄螎螞螡螢螮螻螿蟁蟂蟄蟇蟈蟎蟘蟜蟣蟬蟯蟲蟳蟶蟻蠀蠁蠅蠆蠍蠏蠐蠑蠒蠔蠙蠟蠣蠦蠨蠭蠱蠶蠻蠾衂衆衇衊術衕衚衛衝衞衺袞袟袵裊裌裏補裝裠裡製複褌褘褭褲褳褸褻襀襃襇襉襍襏"
+    "襓襖襗襘襝襠襤襪襬襯襰襲襴襵覇覈覊見覎規覓覔視覘覛覡覥覦覩親覬覯覲覷覹覺覼覽覿觀觝觴觶觸訁訂訃計訊訌討訏訐訑訒訓訕訖託記訛訜訝訞訟訢訣訥訨訩訪設許訴訶診註証詀詁"
+    "詆詊詎詐詑詒詓詔評詖詗詘詛詝詞詠詡詢詣試詩詪詫詬詭詮詰話該詳詵詶詷詼詿誂誄誅誆誇誋誌認誑誒誕誖誘誚語誠誡誣誤誥誦誨說誫説誰課誳誴誶誷誹誺誼誾調諂諄談諉請諍諏諑諒"
+    "諓論諗諛諜諝諞諟諡諢諣諤諥諦諧諫諭諮諯諰諱諲諳諴諶諷諸諺諼諾謀謁謂謄謅謆謉謊謌謎謏謐謔謖謗謙謚講謝謠謡謨謫謬謭謯謱謳謸謹謾譁譂譅譆證譊譌譎譏譑譓譔譖識譙譚譜譞譟"
+    "譨譫譭譯議譴護譸譼譽譾讀讁讅變讋讌讎讐讒讓讕讖讚讜讞讬谘豈豎豐豓豔豬豵豶貍貓貗貙貛貝貞貟負財貢貧貨販貪貫責貯貰貲貳貴貶買貸貺費貼貽貿賀賁賂賃賄賅資賈賉賊賑賒賓賕"
+    "賙賚賛賜賝賞賟賠賡賢賣賤賦賧質賫賬賭賰賴賵賷賺賻購賽賾贃贄贅贇贈贉贊贋贍贏贐贑贓贔贖贗贚贛贜赬趂趕趙趨趲跡跥踁踐踫踰踴蹌蹏蹔蹕蹟蹠蹣蹤蹧蹳蹵蹺蹻躂躉躊躋躍躎躑躒"
+    "躓躕躘躚躝躡躥躦躪躭躳躶軀軉車軋軌軍軏軑軒軔軕軗軛軜軝軟軤軨軫軬軲軷軸軹軺軻軼軾軿較輄輅輇輈載輊輋輒輓輔輕輖輗輙輛輜輝輞輟輢輥輦輨輩輪輬輭輮輯輳輶輷輸輻輼輾輿轀"
+    "轂轄轅轆轇轉轊轍轎轐轔轗轟轠轡轢轣轤辠辢辤辦辭辮辯農辳迴迻逈逕這連逥逩逬週進遉遊運過達違遙遜遞遠遡適遯遱遲遶遷選遺遼邁還邇邊邏邐郟郵鄆鄉鄒鄔鄖鄟鄧鄩鄭鄰鄲鄳鄴鄶"
+    "鄺酇酈酖酧醃醆醕醖醜醞醟醣醫醬醯醱醲醶醻醼釀釁釃釅釋釐釒釓釔釕釗釘釙釚針釟釣釤釦釧釨釩釬釲釳釴釵釷釹釺釾釿鈀鈁鈃鈄鈅鈆鈇鈈鈉鈋鈍鈎鈐鈑鈒鈔鈕鈖鈗鈛鈞鈠鈡鈣鈥鈦鈧"
+    "鈮鈯鈰鈲鈳鈴鈷鈸鈹鈺鈽鈾鈿鉀鉁鉄鉅鉆鉈鉉鉊鉋鉍鉑鉔鉕鉗鉚鉛鉝鉞鉠鉢鉤鉥鉦鉧鉨鉬鉭鉮鉲鉳鉶鉷鉸鉺鉻鉽鉾鉿銀銁銂銃銅銈銊銍銏銑銓銖銘銚銛銜銠銣銥銦銨銩銪銫銬銱銲銳銶"
+    "銷銹銻銼鋁鋂鋃鋅鋇鋉鋌鋏鋐鋒鋗鋙鋝鋟鋠鋣鋤鋥鋦鋨鋩鋪鋭鋮鋯鋰鋱鋶鋸鋹鋼錀錁錂錄錆錇錈錏錐錒錕錘錙錚錛錜錝錞錟錠錡錢錤錥錦錨錩錫錮錯録錳錶錸錼錽鍀鍁鍃鍄鍅鍆鍇鍈鍉"
+    "鍊鍋鍍鍒鍔鍘鍚鍛鍠鍤鍥鍩鍫鍬鍭鍮鍰鍳鍵鍶鍺鍼鍾鎂鎄鎇鎈鎊鎌鎍鎓鎔鎖鎗鎘鎙鎚鎛鎝鎞鎡鎢鎣鎦鎧鎩鎪鎬鎭鎮鎯鎰鎲鎳鎵鎶鎷鎸鎻鎿鏃鏆鏇鏈鏉鏌鏍鏏鏐鏑鏗鏘鏚鏜鏝鏞鏟鏡鏢鏤"
+    "鏥鏦鏨鏰鏵鏷鏹鏺鏻鏽鏾鐃鐄鐇鐈鐋鐍鐎鐏鐐鐒鐓鐔鐘鐙鐝鐠鐥鐦鐧鐨鐩鐪鐫鐮鐯鐲鐳鐵鐶鐸鐺鐼鐽鐿鑀鑄鑈鑉鑊鑌鑑鑒鑔鑕鑚鑛鑞鑠鑣鑤鑥鑪鑭鑰鑱鑲鑴鑵鑷鑹鑼鑽鑾鑿钁钂钜锺镟"
+    "長門閂閃閆閈閉開閌閍閎閏閐閑閒間閔閗閘閙閝閞閡閣閤閥閧閨閩閫閬閭閱閲閵閶閹閻閼閽閾閿闃闆闇闈闉闊闋闌闍闐闑闒闓闔闕闖闚關闞闠闡闢闤闥阨阬陗陘陜陝陞陣陰陳陸陻陽陿"
+    "隂隄隉隊階隑隕隖際隣隤隨險隮隯隱隴隷隸隻雋雖雙雛雜雞離難雲電霑霢霣霧霼霽靂靄靆靈靉靚靜靝靦靧靨靭靱鞀鞏鞝鞦鞵鞽鞾韁韃韆韈韉韋韌韍韓韙韚韛韜韝韞韠韤韮韻響頁頂頃項"
+    "順頇須頊頌頍頎頏預頑頒頓頔頗領頜頟頠頡頤頦頫頭頮頰頲頴頵頷頸頹頻頼頽顂顃顅顆顇顋題額顎顏顒顓顔顗願顙顛類顢顣顥顦顧顫顬顯顰顱顳顴風颭颮颯颰颱颳颶颷颸颺颻颼颾飀飃"
+    "飄飆飈飋飛飜飠飢飣飤飥飦飩飪飫飭飯飱飲飴飵飶飼飽飾飿餁餃餄餅餈餉養餌餎餏餑餒餓餔餕餖餗餘餚餛餜餞餡餦餧館餪餫餬餭餱餳餵餶餷餸餹餺餻餼餽餾餿饁饃饅饈饉饊饋饌饍饑饒"
+    "饗饘饜饝饞饟饠饢馀馬馭馮馯馱馳馴馹馼駁駃駈駉駊駎駐駑駒駓駔駕駘駙駚駛駝駞駟駡駢駤駧駩駪駫駭駰駱駶駸駻駼駿騁騂騃騄騅騉騊騌騍騎騏騐騑騔騖騙騚騜騝騞騟騠騣騤騧騪騫騭"
+    "騮騰騱騴騵騶騷騸騻騼騾驀驁驂驃驄驅驊驋驌驍驎驏驓驕驗驘驙驚驛驟驢驤驥驦驨驪驫骯骽骾髈髏髒體髕髖髥髮鬀鬆鬉鬍鬖鬚鬠鬢鬥鬦鬧鬨鬩鬪鬮鬰鬱鬹魎魘魚魛魟魢魥魦魨魯魴魵魷"
+    "魺魽鮀鮁鮃鮄鮅鮆鮈鮊鮋鮍鮎鮐鮑鮒鮓鮚鮜鮝鮞鮟鮠鮡鮣鮤鮦鮪鮫鮭鮮鮯鮰鮳鮵鮶鮸鮺鮿鯀鯁鯄鯆鯇鯉鯊鯒鯔鯕鯖鯗鯛鯝鯞鯡鯢鯤鯧鯨鯪鯫鯬鯰鯱鯴鯶鯷鯻鯽鯾鯿鰁鰂鰃鰆鰈鰉鰊鰋鰌"
+    "鰍鰏鰐鰑鰒鰓鰕鰛鰜鰟鰠鰣鰤鰥鰦鰧鰨鰩鰫鰭鰮鰱鰲鰳鰵鰶鰷鰹鰺鰻鰼鰽鰾鱀鱂鱄鱅鱆鱇鱈鱉鱊鱒鱔鱖鱗鱘鱚鱝鱟鱠鱢鱣鱤鱧鱨鱭鱮鱯鱲鱷鱸鱺鳥鳧鳩鳬鳲鳳鳴鳶鳷鳼鳽鳾鴀鴃鴅鴆鴇"
+    "鴈鴉鴐鴒鴔鴕鴗鴛鴜鴝鴞鴟鴣鴥鴦鴨鴮鴯鴰鴲鴳鴴鴷鴻鴽鴿鵁鵂鵃鵊鵏鵐鵑鵒鵓鵚鵜鵝鵞鵟鵠鵡鵧鵩鵪鵫鵬鵮鵯鵰鵲鵶鵷鵾鶄鶇鶉鶊鶌鶒鶓鶖鶗鶘鶚鶠鶡鶥鶦鶩鶪鶬鶭鶯鶰鶱鶲鶴鶹鶺"
+    "鶻鶼鶿鷀鷁鷂鷄鷅鷈鷉鷊鷐鷓鷔鷖鷗鷙鷚鷟鷣鷤鷥鷦鷨鷩鷫鷭鷯鷰鷲鷳鷴鷷鷸鷹鷺鷽鷿鸂鸇鸊鸋鸌鸎鸏鸑鸕鸗鸘鸚鸛鸝鸞鹵鹹鹺鹻鹼鹽麗麥麨麩麪麫麬麯麲麳麴麵麷麹麺麼麽黃黌點黨"
+    "黲黴黶黷黽黿鼂鼃鼇鼈鼉鼕鼴齊齋齎齏齒齔齕齗齘齙齜齟齠齡齣齦齧齩齪齬齭齮齯齰齲齴齶齷齼齾龍龎龐龑龓龔龕龜龭龯鿁鿐鿓"
+)
+
+
+
+def _fix_ocr_text(s: str) -> str:
+    """pull 路线专用：修 OCR 层的系统性形近误字（不影响视觉路线）。"""
+    if not s:
+        return s
+    # 上标脚注标记被 OCR 成 ＠：句末/段首的 ＠ 直接删（脚注本体在 notes 里），
+    # 不当成列表序号——「微博＠北京大学出版社」这类正文里的 ＠ 不受影响
+    s = re.sub(r"＠(?=[。，；：、！？）】》]|$)", "", s)
+    s = re.sub(r"(^|(?<=[。；：！？]))＠(?=[\u4e00-\u9fff])", r"\1", s)
+    # 列表标记 ①②③④ 被 OCR 认成 心/卫/卢/竺；只替换「段首或句读后 + 紧跟汉字」
+    # 的位置，并避开「心理/心证/卫生/卢梭」等真词（统一换成 ●，不猜具体序号）
+    s = re.sub(r"(^|(?<=[。；：！？\n]))心(?![理中情态灵得意愿证血脏智存怀思])(?=[\u4e00-\u9fff])"
+               r"|(^|(?<=[。；：！？\n]))[卫卢竺](?![生星梭森法])(?=[\u4e00-\u9fff])",
+               lambda m: (m.group(1) if m.group(1) is not None else m.group(2)) + "●", s)
+    if "千" not in s:
+        return s
+    out: list[str] = []
+    for i, ch in enumerate(s):
+        if ch == "千":
+            prev = s[i - 1] if i > 0 else ""
+            nxt = s[i + 1] if i + 1 < len(s) else ""
+            is_cjk = "\u4e00" <= nxt <= "\u9fff"
+            # 合法千：数字前缀（一千、两千、数千、成千、上万）或千字词后续字
+            if prev in _QIAN_NUM_PREV or nxt in _QIAN_LEGIT_NEXT:
+                out.append(ch)
                 continue
-        merged.append(dict(l))
-    return merged
+            # 「相当于千台湾」：前面的于已正确，这个千是 OCR 多出来的，删掉
+            if prev == "于" and (is_cjk or nxt.isdigit()):
+                continue
+            # 其余「千 + 汉字/数字/标点」= 繁体「於」被识成「千」。
+            # 实测「有助于千」「致力于千」「于千，」「屈服千」「使其千」都靠这条兜住。
+            if nxt and (is_cjk or nxt.isdigit() or (nxt.isascii() and nxt.isalpha())
+                        or nxt in "，。；：、！？（）“”｀“＂'\"（《"):
+                out.append("于")
+                continue
+        out.append(ch)
+    return "".join(out)
 
 
-def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = None) -> dict:
+def _fix_quotes(s: str) -> str:
+    """修 OCR 层把成对引号拆错/认成正引号的问题。
+
+    扫描件 OCR 常把后引号也认成「“」，于是出现「“民法“总则」这种两个正引号
+    连用。只要一段里有两个以上正引号，就按「开-闭」交替纠正；只有一个正引号
+    的段落可能跨段引用，保持原样不硬改。同时去掉引号内侧 OCR 带出的空格。"""
+    if not s:
+        return s
+    # OCR 把中文引号认成 ｀/＇/＂：｀ 按开-闭交替还原，＇/＂ 一律当后引号
+    if "｀" in s or "＇" in s or "＂" in s:
+        s = s.replace("｀｀", "“").replace("＇", "”").replace("＂", "”")
+        buf: list[str] = []
+        opened = False
+        for ch in s:
+            if ch == "｀":
+                buf.append("”" if opened else "“")
+                opened = not opened
+            else:
+                buf.append(ch)
+        s = "".join(buf)
+    if "“" not in s and "”" not in s:
+        return s
+    s = re.sub(r"“\s+", "“", s)
+    s = re.sub(r"\s+”", "”", s)
+    s = re.sub(r"”\s+(?=[\u4e00-\u9fff])", "”", s)
+    if s.count("“") < 2:
+        return s
+    out: list[str] = []
+    opened = False
+    for ch in s:
+        if ch == "“":
+            if opened:
+                out.append("”")
+                opened = False
+            else:
+                out.append(ch)
+                opened = True
+        elif ch == "”":
+            if opened:
+                out.append(ch)
+                opened = False
+            else:
+                out.append("“")
+                opened = True
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+# 图示/表格垃圾区检测：OCR 层把图里的坐标文字按框乱序拼出来时，会出现
+# 「｛｝｀＼｜〜」这类正文几乎不会用的符号，或一行里多个冒号且没有句读。
+_FIG_SYMBOLS = set(r"｛｝＼｜〜\|")
+
+
+def _is_caption(t: str) -> bool:
+    t = t.strip()
+    return (4 <= len(t) <= 42 and not re.search(r"[，。；！？：]$", t)
+            and not CH_RE.match(t) and not SEC_RE.match(t))
+
+
+def _detect_fig_bands(rows: list, page) -> list:
+    """在一页的视觉行里找出「图/表垃圾区」，返回
+    [{start,end,rect,title,kind}]（start/end 为 rows 下标，rect 为比例坐标）。
+
+    精度优先：只有出现 ≥2 个制图符号（｛｝｀＼｜〜 等，正文几乎不用）或
+    密集冒号无句读的行才**启动**一个图区；相邻的表格式多碎片行可以并入，
+    但不会单凭「碎片多」就删正文。面积 <2% 或高度 <2% 的小块直接忽略
+    （影印页边缘常有一两个噪声符号，不能当图）。"""
+    W, H = page.rect.width, page.rect.height
+    kinds: list[str] = []
+    for r in rows:
+        t = r["text"]
+        if r["y1"] <= 0 or r["y0"] >= H or r["y1"] <= r["y0"]:
+            kinds.append("")
+            continue
+        sym = sum(1 for c in t if c in _FIG_SYMBOLS)
+        strong = ("｛" in t or "｝" in t) or (sym >= 2 and sym / max(1, len(t)) >= 0.03)
+        dense_colon = len(t) >= 10 and t.count("：") >= 4 and not re.search(r"[，。！？；]", t)
+        table_like = (r.get("n_frag", 0) >= 2 and r.get("max_gap", 0) > 2.5 * r["size"]
+                      and len(t) <= 80)
+        kinds.append("strong" if (strong or dense_colon) else ("table" if table_like else ""))
+
+    bands: list[dict] = []
+    i = 0
+    while i < len(rows):
+        if kinds[i] != "strong":
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(rows):
+            k = kinds[j + 1]
+            if k in ("strong", "table"):
+                j += 1
+                continue
+            t = rows[j + 1]["text"]
+            # 图区里夹的短残片（如「英”\」）也并入
+            if len(t) <= 12 and any(c in _FIG_SYMBOLS for c in t):
+                j += 1
+                continue
+            # 允许中间夹一行图题/说明（下一行仍是垃圾行）
+            if j + 2 < len(rows) and kinds[j + 2] in ("strong", "table") and _is_caption(t):
+                j += 2
+                continue
+            break
+        # 紧跟其后的短行如果是图题，一并纳入（作为图题，不留在正文）
+        end = j
+        if end + 1 < len(rows):
+            cap = rows[end + 1]
+            if _is_caption(cap["text"]) and (cap["x1"] - cap["x0"]) < 0.75 * W:
+                end += 1
+        band_rows = rows[i:end + 1]
+        widths = [r["x1"] - r["x0"] for r in band_rows]
+        # 整段都是满行正文 → 符号只是正文里的特殊符号，不当图
+        if widths and max(widths) > 0.9 * W and sum(1 for w in widths if w > 0.8 * W) >= max(2, len(widths) // 2):
+            i = j + 1
+            continue
+        y0 = min(r["y0"] for r in band_rows)
+        y1 = max(r["y1"] for r in band_rows)
+        if y1 - y0 > 0.75 * H or y1 - y0 < 0.02 * H:
+            i = j + 1
+            continue
+        x0 = min(r["x0"] for r in band_rows)
+        x1 = max(r["x1"] for r in band_rows)
+        if (x1 - x0) * (y1 - y0) < 0.02 * W * H:
+            i = j + 1
+            continue
+        cap = [r["text"] for r in band_rows[-2:]
+               if _is_caption(r["text"]) and not any(c in _FIG_SYMBOLS for c in r["text"])]
+        rect = [max(0.02, x0 / W - 0.02), max(0.02, y0 / H - 0.02),
+                min(0.98, x1 / W + 0.02), min(0.98, y1 / H + 0.02)]
+        bands.append({"start": i, "end": end, "rect": [round(x, 4) for x in rect],
+                      "title": cap[-1] if cap else "",
+                      "kind": "table" if any(r.get("n_frag", 0) >= 2 for r in band_rows) else "diagram"})
+        i = end + 1
+    return bands
+
+
+def _running_norm(text: str) -> str:
+    """书眉/书脚归一化：去掉数字与空白（页码常粘在标题尾部），用于跨页比对。"""
+    return re.sub(r"[\s\d０-９]+", "", text)
+
+
+def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = None,
+               furniture: set[str] | None = None) -> dict:
     """拔一页：返回 {paras, notes, figs, chars, first/last 行属性}。页眉页脚/页码剔除，脚注按字号分区。
 
     body_size/lines 可由 cmd_pull 全书预算后传入：页内小样本会被脚注/年表等
@@ -686,7 +1287,7 @@ def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = 
     （size=框高×0.68 有系统性偏差），判据更保守。两套数值差异数值表见
     docs/模块总览/M9-书籍识别台bookocr-kit.md「双端分段规则对照」。"""
     H = page.rect.height
-    raw = lines if lines is not None else _page_lines(page.get_text("dict"))
+    raw = lines if lines is not None else _page_lines(page)
 
     # 正文主字号：中带区按字数加权的众数（未传全书值时按本页算）
     if body_size is None:
@@ -697,21 +1298,129 @@ def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = 
             tally[k] = tally.get(k, 0) + len(l["text"])
         body_size = max(tally, key=tally.get) if tally else 12.0
 
-    body, notes = [], []
+    body, note_items = [], []
     for l in raw:
         y0n, y1n = l["y0"] / H, l["y1"] / H
-        if y1n <= 0.062 or y0n >= 0.958 or PNUM_RE.match(l["text"]) and (y1n <= 0.10 or y0n >= 0.90):
-            continue  # 页眉带/页脚带/孤立页码
-        if y0n > 0.72 and l["size"] < body_size * 0.88:
-            notes.append(l["text"])
+        # 全书级书眉：同一行文字在 ≥3 页顶部重复出现（去页码后相同），必然是书眉。
+        # 单页启发式（短行/小字号）会漏掉与正文同字号的长书眉，书眉还会和页首正文
+        # 粘成一句（「第九章…形成481诉人犹复提起上诉…」）。
+        if furniture and y1n <= 0.13 and _running_norm(l["text"]) in furniture:
             continue
+        # 页眉带/页脚带/孤立页码；另加顶带补充判：有的影印 PDF（z-lib 裁切本）书眉坐在
+        # y≈8%~10.5%（高于 0.062 主带），特征是短行（「10不当得利」「笫一章绪论11」）
+        # 或小字号或孤立页码——正文首行 y0≥0.13 且字号=正文，不受影响
+        top_furniture = y1n <= 0.11 and (
+            bool(PNUM_RE.match(l["text"])) or l["size"] < body_size * 0.88
+            or (len(l["text"]) <= 12 and l["size"] < body_size * 1.15))
+        if y1n <= 0.062 or y0n >= 0.958 or top_furniture or (
+                PNUM_RE.match(l["text"]) and (y1n <= 0.10 or y0n >= 0.90)):
+            continue
+        if y0n > 0.72 and l["size"] < body_size * 0.88:
+            note_items.append((l["y0"], l["text"]))
+            continue
+        # 页眉页码与正文首行落在同一视觉行时会被拼成「7束；但…」：剥掉开头
+        # 1~3 位页码（后接非年/月/日等量词单位的汉字）再进正文
+        if y0n < 0.20 and len(l["text"]) > 20:
+            mm = re.match(r"^\d{1,3}(?![\d年月日世条项款章节页人次个种分秒元万亿])([\u4e00-\u9fff].*)$",
+                          l["text"])
+            if mm:
+                l["text"] = mm.group(1)
         body.append(l)
 
+    # 脚注区分隔：正文与页脚注之间常有一大段空白（脚注首行字号可能接近正文，
+    # 单靠字号会漏判，如「0关于罗马法上不当得利…」）。正文末行到某行的垂直
+    # 间距 > 2.2 字号且该行落在页面下 1/3，则从这里整段划入脚注。
+    if body:
+        split = None
+        for i in range(1, len(body)):
+            if (body[i]["y0"] / H > 0.68 and (body[i]["y0"] - body[i - 1]["y1"]) > 2.2 * body_size):
+                split = i
+                break
+        if split is not None:
+            note_items.extend((x["y0"], x["text"]) for x in body[split:])
+            body = body[:split]
+    notes = [t for _, t in sorted(note_items, key=lambda x: x[0])]
+
+    # 图示/表格垃圾区：OCR 层常把图里的坐标文字按文本框乱序拼出来（如
+    # 「/ 厂｀昙岱气典f》」「中国三气民法：二（2（立了」）。先把这些高置信
+    # 垃圾区整体摘出、换成图占位行，rect 交给 figure-desc 裁图补语义，
+    # 不让乱字混进正文。正文段落只由剩余行重组。
+    bands = _detect_fig_bands(body, page)
+    W, H = page.rect.width, page.rect.height
+
+    def _bodylike(t: str) -> bool:
+        """像正文的行：有句读且够长，或以冒号收尾引出图表。"""
+        return (len(t) > 20 and bool(re.search(r"[，。；]", t))) or (len(t) > 8 and t.endswith("："))
+
+    # 图区上下扩展：把紧邻的短图注/图内文字一并纳入（如「实、控制契约」「迭标 的金」），
+    # 遇到正文行就停。扩展后重算 rect，figure-desc 裁到的才是完整图。
+    for bd in bands:
+        start, end = bd["start"], bd["end"]
+        while start > 0:
+            r = body[start - 1]
+            if _bodylike(r["text"]):
+                break
+            if len(r["text"]) <= 40 or r["size"] > body_size * 1.5:
+                start -= 1
+            else:
+                break
+        while end + 1 < len(body):
+            r = body[end + 1]
+            if _bodylike(r["text"]):
+                break
+            if len(r["text"]) <= 40 or r["size"] > body_size * 1.5:
+                end += 1
+            else:
+                break
+        bd["start"], bd["end"] = start, end
+        rows_bd = body[start:end + 1]
+        x0 = min(r["x0"] for r in rows_bd)
+        y0 = min(r["y0"] for r in rows_bd)
+        x1 = max(r["x1"] for r in rows_bd)
+        y1 = max(r["y1"] for r in rows_bd)
+        bd["rect"] = [round(max(0.02, x0 / W - 0.02), 4), round(max(0.02, y0 / H - 0.02), 4),
+                      round(min(0.98, x1 / W + 0.02), 4), round(min(0.98, y1 / H + 0.02), 4)]
+
+    # 纯垃圾图区（无正文句）就地摘掉换图占位；混着正文的图区不动正文，
+    # 整页标 needs_vision 交给 reocr（本地硬拆会丢句子）。
+    pure_bands: list[dict] = []
+    band_idx: set[int] = set()
+    for bd in bands:
+        mixed = any(_bodylike(r["text"]) for r in body[bd["start"]:bd["end"] + 1])
+        bd["mixed"] = mixed
+        if mixed:
+            continue
+        pure_bands.append(bd)
+        band_idx.update(range(bd["start"], bd["end"] + 1))
+    needs_vision = any(bd["mixed"] for bd in bands)
+    # 索引/年表页：双栏 + 密集页码，OCR 层会按文本框把两栏交错拼成一大段
+    # （「… 122, 1(J7,错误374 …」）。视觉模型能按栏还原，逐条对齐。
+    # 判据用「短行 + ≥3 个独立数字」而不是数字字符数：正文句子里的「第10页」「第1201条」
+    # 也含 3 个以上数字字符，却不会交错；索引行是短词条 + 一串页码，多个独立数字才是真信号。
+    if len(body) >= 10:
+        num_rows = sum(1 for r in body
+                       if len(r["text"]) <= 45 and len(re.findall(r"\d+", r["text"])) >= 3)
+        needs_vision = needs_vision or num_rows >= len(body) * 0.5
+    # 整页繁体字形：扫描件 OCR 层在部分页返回繁体（「枚利」「惡則」「美系」），
+    # 简体正文里出现 ≥3 个繁体专用字几乎必然是识别层坏了，整页交视觉重识别。
+    trad = sum(1 for ch in "".join(r["text"] for r in body) if ch in _TRAD_ONLY)
+    if trad >= 3:
+        needs_vision = True
+    # 图区矩形内夹着的短残片（如「英”\」）一并清掉；满行正文不动
+    for i, l in enumerate(body):
+        if i in band_idx or ((l["x1"] - l["x0"]) > 0.5 * W and len(l["text"]) > 20):
+            continue
+        cx, cy = (l["x0"] + l["x1"]) / 2 / W, (l["y0"] + l["y1"]) / 2 / H
+        if any(bd["rect"][0] <= cx <= bd["rect"][2] and bd["rect"][1] <= cy <= bd["rect"][3]
+               for bd in pure_bands):
+            band_idx.add(i)
+    body_clean = [l for i, l in enumerate(body) if i not in band_idx]
+
     # 段落重组：标题独立成行；正文行首缩进超 1.4 字号 = 新段
-    left = min((l["x0"] for l in body), default=0.0)
+    left = min((l["x0"] for l in body_clean), default=0.0)
     paras: list[str] = []
     para_y0: list[float] = []  # 每段首行 y0（图占位行按 y 插段间用）
-    for l in body:
+    for l in body_clean:
         is_head = l["size"] >= body_size * 1.15 or CH_RE.match(l["text"]) or SEC_RE.match(l["text"])
         new_para = is_head or (l["x0"] - left > body_size * 1.4) or not paras
         if new_para or is_head:
@@ -720,11 +1429,21 @@ def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = 
         else:
             paras[-1] += l["text"]
 
+    # OCR 层系统性误字/引号纠错（只对 pull 路线做；视觉路线输出本是干净的）
+    paras = [_fix_quotes(_fix_ocr_text(p)) for p in paras]
+    notes = [_fix_quotes(_fix_ocr_text(n)) for n in notes]
+
     # 嵌入真图：按实际图块坐标登记（比目测准），整页水印图跳过。
+    # 图示垃圾区按检测到的 band 登记（rect 为比例坐标）。
     # title/desc 先写占位（pull 不看图内容），figure-desc 命令补语义、pack 重写正文占位行
-    figs = [{"page": page.number + 1, "rect": rr, "kind": "photo",
+    figs = [{"page": page.number + 1, "rect": rr, "kind": "photo", "from_pull": True,
              "title": f"第{page.number + 1}页插图", "desc": PULL_FIG_DESC}
             for rr in _embedded_fig_rects(page)]
+    for bd in pure_bands:
+        figs.append({"page": page.number + 1, "rect": bd["rect"], "kind": bd["kind"],
+                     "from_pull": True,
+                     "title": bd["title"] or f"第{page.number + 1}页插图",
+                     "desc": PULL_FIG_DESC})
     chars = sum(len(re.sub(r"\s", "", p)) for p in paras)
 
     # 图占位行按 y 插段间：图的 y0 落在第一个首行 y0 大于它的段之前（两段之间），
@@ -740,14 +1459,15 @@ def _pull_page(page, fitz, body_size: float | None = None, lines: list | None = 
     def _is_head(l: dict) -> bool:
         return bool(l["size"] >= body_size * 1.15 or CH_RE.match(l["text"]) or SEC_RE.match(l["text"]))
 
-    first, last = (body[0], body[-1]) if body else (None, None)
+    first, last = (body_clean[0], body_clean[-1]) if body_clean else (None, None)
     return {"paras": paras, "notes": notes, "figs": figs, "chars": chars, "fig_area": sum(
         (f["rect"][2] - f["rect"][0]) * (f["rect"][3] - f["rect"][1]) for f in figs),
+        "needs_vision": needs_vision,
         "first_x0": first["x0"] if first else None,
         "first_size": first["size"] if first else None,
         "first_is_head": _is_head(first) if first else True,
         "last_is_head": _is_head(last) if last else True,
-        "page_left": left if body else None}
+        "page_left": left if body_clean else None}
 
 
 def cmd_pull(a: argparse.Namespace) -> None:
@@ -756,12 +1476,13 @@ def cmd_pull(a: argparse.Namespace) -> None:
     m = load_manifest(job)
     if not m["batches"]:
         die("还没有批次，先跑 prep")
+    m["route"] = "pull"  # reocr --exact 据此判断能否沿用本地文字层
     fitz = load_fit()
     doc = fitz.open(m["src_pdf"])
 
     # 全书一次拔取：跨页缝合需要全书视野（批边界上的段落照样缝）
     npages = len(m["pages"])
-    all_lines = {n: _page_lines(doc[n - 1].get_text("dict")) for n in range(1, npages + 1)}
+    all_lines = {n: _page_lines(doc[n - 1]) for n in range(1, npages + 1)}
     # 全书正文主字号：跨页统计——页内小样本会被脚注/年表小字号带偏（实测 43 页误判）
     tally: dict[float, int] = {}
     for n in range(1, npages + 1):
@@ -771,7 +1492,20 @@ def cmd_pull(a: argparse.Namespace) -> None:
                 k = round(l["size"], 1)
                 tally[k] = tally.get(k, 0) + len(l["text"])
     gbody = max(tally, key=tally.get) if tally else 12.0
-    all_pages = {n: _pull_page(doc[n - 1], fitz, body_size=gbody, lines=all_lines[n])
+
+    # 全书书眉：同一行在 ≥3 页顶部重复（去页码后相同）即视为书眉。页眉字号常与正文
+    # 相同、又长，单页规则抓不住，还会和页首正文粘成一段——必须在全书视野里判。
+    from collections import Counter
+    head_tally: Counter = Counter()
+    for n in range(1, npages + 1):
+        ph = doc[n - 1].rect.height
+        heads = {_running_norm(l["text"]) for l in all_lines[n]
+                 if l["y1"] / ph <= 0.13}
+        head_tally.update(t for t in heads if 4 <= len(t) <= 60 and not t.endswith("。"))
+    furniture = {t for t, c in head_tally.items() if c >= 3}
+    m["furniture"] = sorted(furniture)
+    all_pages = {n: _pull_page(doc[n - 1], fitz, body_size=gbody, lines=all_lines[n],
+                               furniture=furniture)
                  for n in range(1, npages + 1)}
     doc.close()
 
@@ -790,7 +1524,9 @@ def cmd_pull(a: argparse.Namespace) -> None:
         # 时拼段会把文字粘到图行前后，图文交错关系失真
         if prev["paras"][-1].startswith("〔图：") or cur["paras"][0].startswith("〔图："):
             continue
-        indent = (cur["first_x0"] - gleft) / (cur["first_size"] or 1)
+        # 顶格判据用当页左缘（镜像排版单双页左缘不同，全局 gleft 会把双数页续行误判成段首；
+        # page_left 由 _pull_page 按当页正文行算好带出，空页已被上面 continue 拦掉）
+        indent = (cur["first_x0"] - (cur["page_left"] or gleft)) / (cur["first_size"] or 1)
         if indent < 0.6:
             tail, head = prev["paras"][-1][-1:], cur["paras"][0][:1]
             sep = " " if tail.isascii() and tail.isalpha() and head.isascii() and head.isalpha() else ""
@@ -798,13 +1534,14 @@ def cmd_pull(a: argparse.Namespace) -> None:
             cur["paras"] = cur["paras"][1:]
             stitched += 1
 
-    pulled, thin_total = [], 0
+    pulled, thin_total, vision_total = [], 0, 0
     for bid, b in m["batches"].items():
         pages_data = {n: all_pages[n] for n in b["pages"]}
         # 页级路由：无文字但被大图占据的页 = 图版页，正文写占位、记 thin_pages 留给 patch 补描述；
         # 不再整批跳过——一批里混几页图版不再连累其余 9 页走视觉
         thin = sorted(n for n, d in pages_data.items()
                       if d["chars"] == 0 and d["fig_area"] > 0.3)
+        vision_pages = sorted(n for n, d in pages_data.items() if d.get("needs_vision"))
 
         parts, all_notes = [], []
         figs = []
@@ -830,7 +1567,9 @@ def cmd_pull(a: argparse.Namespace) -> None:
 
         b["status"] = "assigned"  # 防止 next 重派；由 pull 内部直接质检
         b["thin_pages"] = thin
+        b["needs_vision"] = vision_pages
         thin_total += len(thin)
+        vision_total += len(vision_pages)
         save_manifest(job, m)
         try:
             # 传共享台账：check 在外层 m 上标 done、重建图台账，循环内不产生状态回退
@@ -838,8 +1577,10 @@ def cmd_pull(a: argparse.Namespace) -> None:
             pulled.append(bid)
         except SystemExit:
             out(f"[!] {bid} 质检不过，看 check 输出（可 retry 后派视觉子代理/aivision）")
-    out(f"[ok] pull 完成：拔取 {len(pulled)}/{len(m['batches'])} 批，跨页缝合 {stitched} 处，图版页 {thin_total} 页"
-        + (f"（python bookocr.py patch {a.job} 可派视觉补图版描述）" if thin_total else ""))
+    out(f"[ok] pull 完成：拔取 {len(pulled)}/{len(m['batches'])} 批，跨页缝合 {stitched} 处，图版页 {thin_total} 页，"
+        f"图示/表格页需视觉复核 {vision_total} 页"
+        + (f"（先 patch {a.job} 补图版描述）" if thin_total else "")
+        + (f"（再 reocr {a.job} --pages <qa 报告点名的页> 或按 needs_vision 列表复核）" if vision_total else ""))
     if pulled:
         out("下一步：status 看进度；全 done 即可 pack")
 
@@ -969,16 +1710,18 @@ def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
         out(f"[i] 图版页自动豁免 {len(want) - len(eff_want)} 页（{sorted(fig_heavy_pages)[:8]}），按剩余 {len(eff_want)} 页计页均")
     else:
         per_page = chars / len(want)
-    zh = len(re.findall(r"[\u4e00-\u9fff]", body_only))
-    ratio = zh / max(1, len(re.sub(r"\s", "", body_only)))
+    # 可读字符占比：中文 + 拉丁字母 + 数字。书末参考书目（德文）、索引（密集页码）
+    # 本来就该低中文，按纯中文占比判会把正常页误判成串台；真乱码页连可读字符都很少。
+    readable = len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", body_only))
+    ratio = readable / max(1, len(re.sub(r"\s", "", body_only)))
     if not a.force and per_page < a.min:
         b["status"], b["fail_reason"] = "failed", f"页均字数 {per_page:.0f} < {a.min}"
         save_manifest(job, m)
         die(f"{bid} 质检不过：页均 {per_page:.0f} 字（阈值 {a.min}）。确认是图表页/空白页就 retry 后带 --force 放行，否则重转")
     if not a.force and ratio < 0.5:
-        b["status"], b["fail_reason"] = "failed", f"中文占比 {ratio:.0%} 异常"
+        b["status"], b["fail_reason"] = "failed", f"可读字符占比 {ratio:.0%} 异常"
         save_manifest(job, m)
-        die(f"{bid} 质检不过：中文占比 {ratio:.0%}，疑似识别串台")
+        die(f"{bid} 质检不过：可读字符占比 {ratio:.0%}，疑似乱码/串台")
 
     # 4) 真图台账（figures.json 缺失按无图处理）
     figs = []
@@ -1000,7 +1743,8 @@ def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
             if ok and f.get("page") in want:
                 figs.append({"batch": bid, "page": int(f["page"]), "rect": [round(float(x), 4) for x in r],
                              "kind": str(f.get("kind", "figure")), "title": str(f.get("title", "")).strip(),
-                             "desc": str(f.get("desc", "")).strip()})
+                             "desc": str(f.get("desc", "")).strip(),
+                             "from_pull": bool(f.get("from_pull"))})
     # rect 交叉校正：视觉路线的 rect 是模型按画面目测的，pack 按 rect 裁图会偏——
     # 与原 PDF 嵌入图块坐标（程序级精确）比对，IoU 最大且 ≥0.3 即用程序坐标替换。
     # pull 路线 rect 本就来自 PDF 坐标（IoU=1.0），替换等于不变，无副作用
@@ -1026,7 +1770,11 @@ def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
             out(f"  [警告] rect 交叉校正跳过（{e}）")
 
     kept = [x for x in m["figures"] if x["batch"] != bid]
-    base = len(kept)  # 删本批旧图后再计基数，防 id 重复
+    # id 取全局最大号 +1（不按 kept 长度：重跑 pull 时后批旧账仍在列表里，
+    # 按长度算基数会让多批领到同一 id，裁图文件名互相覆盖）
+    _ids = [int(x["id"][1:]) for x in m["figures"]
+            if str(x.get("id", "")).startswith("f") and x["id"][1:].isdigit()]
+    base = max(_ids, default=0)
     for i, f in enumerate(figs):
         f["id"] = f"f{base + i + 1:03d}"
     m["figures"] = kept + figs
@@ -1064,6 +1812,79 @@ def cmd_retry(a: argparse.Namespace) -> None:
     out(f"[ok] 重置 {n} 批 → pending（next 重新领）")
 
 
+def cmd_qa(a: argparse.Namespace) -> None:
+    """逐页质量体检：揪出 OCR 文字层烂页（图示乱码/系统性误字/引号乱序），
+    产出 qa_report.json + qa_report.md。只读正文与 PDF，不改批文件。"""
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    book, _ = collect_book(job, m)
+    if not book:
+        die("还没有 done 批，先识别或 pull")
+    fitz = load_fit()
+    doc = fitz.open(m["src_pdf"])
+    sel = _parse_pages_arg(a.pages, len(m["pages"])) if a.pages else sorted(book)
+    recs: list[dict] = []
+    for p in sel:
+        if p not in book:
+            continue
+        paras = book[p]
+        text = "\n".join(paras)
+        page = doc[p - 1]
+        # 已视觉重识别的页：正文来自看图转写，已有图占位/图台账，不再拿原 PDF
+        # 文字层的乱码区去扣分（否则修好的页会一直显示「图示乱码区」）。
+        reocred = (job / "reocr" / f"p{p:04d}.json").exists()
+        raw = _page_lines(page)
+        bands = [] if reocred else _detect_fig_bands(raw, page)
+        fixed = _fix_ocr_text(text)
+        bad = sum(1 for x, y in zip(text, fixed) if x != y)
+        bad += sum(text.count(c) for c in "＠｛｝｀＼｜〜�")
+        trad = sum(1 for c in text if c in _TRAD_ONLY)
+        quote_bad = sum(1 for x in paras if len(x) >= 8 and x.count("“") != x.count("”"))
+        short = sum(1 for x in paras if 0 < len(x) <= 3 and not x.startswith("〔")
+                    and not CH_RE.match(x) and not SEC_RE.match(x) and not SUBHEAD_RE.match(x))
+        noterm = sum(1 for x in paras if len(x) >= 15 and not x.startswith("〔")
+                     and not CH_RE.match(x) and not SEC_RE.match(x) and not SUBHEAD_RE.match(x)
+                     and x[-1] not in "。！？；…”』」）】》?!;.：:")
+        fig_ph = sum(1 for x in paras if x.startswith("〔图"))
+        open_bands = max(0, len(bands) - fig_ph)
+        score = 3 * open_bands + 2 * bad + 2 * trad + quote_bad + 0.5 * short + 0.5 * noterm
+        recs.append({"page": p, "chars": len(re.sub(r"\s", "", text)), "score": round(score, 1),
+                     "bands": len(bands), "open_bands": open_bands, "fig_ph": fig_ph,
+                     "bad": bad, "trad": trad, "quote": quote_bad, "short": short,
+                     "noterm": noterm, "sample": (paras[0] if paras else "")[:60]})
+    doc.close()
+
+    recs.sort(key=lambda r: (-r["score"], r["page"]))
+    bad_pages = [r["page"] for r in recs if r["score"] >= 3]
+    band_pages = [r["page"] for r in recs if r["open_bands"]]
+    out(f"[ok] QA：检查 {len(recs)} 页；可疑 {len(bad_pages)} 页"
+        f"（图示乱码区 {len(band_pages)} 页，坏字/引号/断段见下）")
+    out("  top 页：")
+    for r in recs[:min(a.top, len(recs))]:
+        out(f"   p{r['page']:>4} score={r['score']:<5} 图示区{r['open_bands']} 坏字{r['bad']}"
+            f" 繁体{r['trad']} 引号{r['quote']} 短行{r['short']} 无句读{r['noterm']} | {r['sample']}")
+    rp_json = job / "qa_report.json"
+    rp_json.write_text(json.dumps({"name": m["name"], "pages": recs}, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+    md = [f"# 质量体检：{m['name']}", "",
+          f"检查 {len(recs)} 页，可疑 {len(bad_pages)} 页。分数越高越可疑；"
+          f"图示区=OCR 把图里的字按框乱拼的区域，坏字=千→于等系统性误码，繁体=简体书里混入的繁体字形。", "",
+          "| 页 | 分数 | 图示区 | 坏字 | 繁体 | 引号 | 短行 | 无句读 | 样本 |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for r in recs[:200]:
+        md.append(f"| {r['page']} | {r['score']} | {r['open_bands']} | {r['bad']} | {r['trad']} | "
+                  f"{r['quote']} | {r['short']} | {r['noterm']} | {r['sample'].replace('|', '｜')} |")
+    rp_md = job / "qa_report.md"
+    rp_md.write_text("\n".join(md) + "\n", encoding="utf-8")
+    out(f"[ok] 报告 → {rp_md}")
+    if bad_pages:
+        pages = sorted(r["page"] for r in recs if r["score"] >= 6)
+        exact = " --exact" if m.get("route") == "pull" else ""
+        out(f"    建议：python bookocr.py reocr {job.name}{exact} --pages "
+            f"{','.join(str(x) for x in pages[:80])}"
+            + (f"（共 {len(pages)} 页，超出部分见 qa_report.json）" if len(pages) > 80 else ""))
+
+
 def cmd_status(a: argparse.Namespace) -> None:
     job = resolve_job(a.job)
     m = load_manifest(job)
@@ -1094,7 +1915,7 @@ def cmd_status(a: argparse.Namespace) -> None:
 # ---------------------------------------------------------------- chapters（全书切章 + 目录对账）
 
 # 章号族（1 级正文章）：第X章/编/部/篇/卷/回；「第X版序」是前置标题变体族
-CH_NUM_RE = re.compile(r"^第\s*([0-9〇零一二三四五六七八九十百千]+)\s*[章编部篇卷回]")
+CH_NUM_RE = re.compile(r"^第\s*([0-9〇零一二三四五六七八九十百千]+)\s*[章编部篇卷回次]")
 RE_EDITION_PRE = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十]+\s*版序")
 CH_WORD_FRONT = ("前言", "序言", "自序", "再版序", "初版序", "重排版序", "增订版序", "修订版序",
                  "总序", "译序", "代序", "导读", "引言", "导论", "导言", "写在前面", "绪论",
@@ -1135,11 +1956,15 @@ def _title_kind(s: str):
     行尾带数字（目录形态）不认。"""
     if not s or len(s) > 40 or TOC_ENTRY_RE.match(s):
         return None
-    if s[-1:] in "。！？；，,;?!" or any(c in s for c in "，,；;"):
-        return None
+    # 序号锚定的行（第X章/次/编…）优先于句读护栏：章题可自带问号（「第三次 推论是什么？」），
+    # 但带逗号分号的仍按对话行处理，直接不认
     mm = CH_NUM_RE.match(s)
     if mm:
-        return ("num", mm.group(1))
+        if not any(c in s for c in "，,；;"):
+            return ("num", mm.group(1))
+        return None
+    if s[-1:] in "。！？；，,;?!" or any(c in s for c in "，,；;"):
+        return None
     if RE_EDITION_PRE.match(s):
         return ("front",)
     for w in CH_WORD_FRONT:
@@ -1361,6 +2186,15 @@ def cmd_chapters(a: argparse.Namespace) -> None:
     undone = [k for k, v in m["batches"].items() if v["status"] != "done"]
     if undone:
         die(f"还有 {len(undone)} 批没完成（{undone[:5]}…），切章需要全书视野，补完再来")
+    # 子代理/aivision 路线的批文件没有跨页缝合（pull 路线在拔取时就缝了），全书转完
+    # 在此统一缝一次——哪个会话收尾都会走到 chapters，缝合不落在个人自觉上；
+    # .stitched.json 标记保证幂等（多会话重复跑 chapters 不会二次缝合）
+    if not (job / ".stitched.json").exists() and (KIT / "stitch.py").exists():
+        r = subprocess.run([sys.executable, str(KIT / "stitch.py"), job.name, "--apply"],
+                           capture_output=True, text=True, encoding="utf-8", cwd=str(KIT))
+        lines = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+        out(f"[i] 跨页缝合：{lines[-1] if lines else '(stitch.py 无输出)'}")
+        m = load_manifest(job)
     book, _ = collect_book(job, m)
 
     rulings = dict(m.get("chapter_rulings") or {})
@@ -1446,6 +2280,13 @@ def cmd_pack(a: argparse.Namespace) -> None:
         pages = sorted(p for v in thin_pending.values() for p in v)
         die(f"有 {len(pages)} 页图版页没补描述（{pages[:8]}{'…' if len(pages) > 8 else ''}）："
             f"先跑 patch {a.job} 派视觉补图版描述，再 pack；确要带「〔图版页〕」占位打包加 --force")
+    # pull 文字层检测到图示/表格垃圾区的页：本地拆分有丢句风险，必须视觉复核后才算成品
+    vision_pending = {bid: b.get("needs_vision") or [] for bid, b in m["batches"].items()
+                      if b.get("needs_vision")}
+    if vision_pending and not a.force:
+        pages = sorted(p for v in vision_pending.values() for p in v)
+        die(f"有 {len(pages)} 页图示/表格区需要视觉复核（{pages[:8]}{'…' if len(pages) > 8 else ''}）："
+            f"先跑 reocr {a.job} --needs-vision，再 pack；确要带文字层乱码打包加 --force")
     # 批C：pull 占位图拦截——README 写「有图的书必跑 figure-desc」却靠人记得，漏跑即
     # 静默降级（App 里全是「第N页插图」占位文案）。台账里 desc 仍是占位的图非空即拦
     placeholder_figs = [f for f in m.get("figures") or [] if f.get("desc") == PULL_FIG_DESC]
@@ -1488,7 +2329,7 @@ def cmd_pack(a: argparse.Namespace) -> None:
                 if fi < len(figs_here):
                     f = figs_here[fi]
                     fi += 1
-                    if PULL_FIG_MARK.match(p):
+                    if PULL_FIG_MARK.match(p) or f.get("from_pull"):
                         p = f"〔图：{f['title'] or f['kind']}〕{f['desc'] or ''}".strip()
             rewritten.append(p)
         for f in figs_here[fi:]:
@@ -1843,6 +2684,12 @@ def _style_of(para: str, h1, h2, body):
 
 # ---------------------------------------------------------------- main
 
+def _cmd_proofread_bridge(a: argparse.Namespace) -> None:
+    """proofread 子命令：转发到独立模块 proofread.py（命令行入口统一在 bookocr.py）。"""
+    import proofread
+    proofread.cmd_proofread(a)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="扫描版 PDF 识别台（agent 驱动）")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1897,6 +2744,26 @@ def main() -> None:
     p.add_argument("--min", type=int, default=100)
     p.set_defaults(fn=cmd_aivision)
 
+    p = sub.add_parser("qa")
+    p.add_argument("job")
+    p.add_argument("--pages", default=None, help="只查指定页，如 31,100-120（缺省=全书）")
+    p.add_argument("--top", type=int, default=40, help="打印最可疑的前 N 页（默认 40）")
+    p.set_defaults(fn=cmd_qa)
+
+    p = sub.add_parser("reocr")
+    p.add_argument("job")
+    p.add_argument("--pages", default=None, help="按页选批重识别，如 31,100-120（默认扩到整批，--exact 则只跑点名页）")
+    p.add_argument("--batch", default=None, help="只重识别指定批（配 --exact 可只跑 --pages 点名的页）")
+    p.add_argument("--all", action="store_true", help="全书重识别")
+    p.add_argument("--needs-vision", action="store_true", help="只重识别 pull 标记的图示/表格页")
+    p.add_argument("--exact", action="store_true",
+                   help="只重识别点名页，同批其余页沿用本地 pull 结果（pull 书省钱首选）")
+    p.add_argument("--workers", type=int, default=None, help="页级并发（默认 3，过高会 429）")
+    p.add_argument("--force", action="store_true", help="已有重识别结果也重跑；质检失败也放行")
+    p.add_argument("--min", type=int, default=100)
+    p.add_argument("--no-backup", action="store_true", help="不备份原批（默认备份）")
+    p.set_defaults(fn=cmd_reocr)
+
     p = sub.add_parser("retry")
     p.add_argument("job")
     p.add_argument("batch", nargs="?")
@@ -1909,10 +2776,6 @@ def main() -> None:
     p.add_argument("--no-review", action="store_true", help="不生成裁决任务卡（疑点只记台账，pack 不拦）")
     p.set_defaults(fn=cmd_chapters)
 
-    p = sub.add_parser("status")
-    p.add_argument("job")
-    p.set_defaults(fn=cmd_status)
-
     p = sub.add_parser("pack")
     p.add_argument("job")
     p.add_argument("--no-pdf", action="store_true")
@@ -1921,10 +2784,30 @@ def main() -> None:
     p.add_argument("--no-chapters", action="store_true", help="txt 不带章界元数据块（旧格式）")
     p.set_defaults(fn=cmd_pack)
 
+    p = sub.add_parser("status")
+    p.add_argument("job")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("proofread")
+    p.add_argument("job")
+    p.add_argument("--pages", default=None, help="只校对指定页，如 31,100-120")
+    p.add_argument("--batch", default=None, help="只校对指定批，如 b011")
+    p.add_argument("--all", action="store_true", help="全书所有 done 批")
+    p.add_argument("--rules-only", action="store_true", help="只跑规则层，不调文本 API")
+    p.add_argument("--no-ai", action="store_true", help="禁用 AI 层（与 --rules-only 等效）")
+    p.add_argument("--dry-run", action="store_true", help="只出报告和标记，不写回批文件")
+    p.add_argument("--workers", type=int, default=3, help="AI 层并发（默认 3，过高会 429）")
+    p.add_argument("--no-backup", action="store_true", help="不备份原批")
+    p.set_defaults(fn=_cmd_proofread_bridge)
+
     a = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    a.fn(a)
+    if a.cmd == "status":  # 只读命令不占锁
+        a.fn(a)
+    else:
+        with _ManifestLock():
+            a.fn(a)
 
 
 if __name__ == "__main__":
