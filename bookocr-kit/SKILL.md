@@ -137,4 +137,8 @@ python bookocr.py status <书名>      # 单本书细看：流水线 识别→�
 
 ## 换电脑 / 换 agent
 
-见 kit 内 README.md：装 Python 3.10+ 与 `pip install -r requirements.txt`，把本 SKILL.md 拷进对应 agent 的技能目录（ZCode：`~\.agents\skills\scan-book\`），或直接对该 agent 说「打开 bookocr-kit/SKILL.md 照着做」。jobs/ 不随拷贝走，每台电脑识别自己的书。aivision 路线需在 kit 目录 `apis.json` 填 base_url/api_key/default_model 三键（已 gitignore）；子代理路线零配置。
+见 kit 内 README.md：装 Python 3.10+ 与 `pip install -r requirements.txt`，然后**对 agent 说一句「打开 bookocr-kit/SKILL.md 照着做」就行**——本手册是外置的，不需要装进任何 agent 的技能目录（想常驻也可以拷到技能目录，二选一）。
+
+- **同一台电脑换 agent / 换会话**：直接 `python bookocr.py auto` 接续（状态都在本机三文件夹里）。
+- **跨电脑续跑**：三个工作文件夹不入 git（书稿版权内容），把整个 `bookocr-kit` 文件夹（含 `识别中/`）用 U盘/网盘拷过去再 `auto`。
+- API 需求：subagent 识别路线**零配置**；aivision 重识别 / proofread 的 AI 校对层需在 kit 目录 `apis.json` 填 base_url/api_key/default_model 三键（已 gitignore，缺了只降级不崩：校对自动退规则层、reocr 提示去配）。
