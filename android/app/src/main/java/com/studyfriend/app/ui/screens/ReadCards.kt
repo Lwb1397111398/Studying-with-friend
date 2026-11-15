@@ -59,7 +59,9 @@ import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.study.KeyTermsCodec
+import com.studyfriend.app.data.study.ParaIdsCodec
 import com.studyfriend.app.data.study.decodeStringList
+import com.studyfriend.app.ui.components.RefAwareText
 import kotlin.math.roundToInt
 
 
@@ -440,9 +442,15 @@ internal fun GistCard(gist: String, keyTermsJson: String?) {
 }
 
 /** 讲解卡（计划 M4b §3.2 + 学习闭环轮）：标题+大白话+类比+要点+记忆钩子；生成中显示占位；
- *  底部「换个讲法」由调用方接弹层（临时重讲不落库，见 ReNoteSheet） */
+ *  底部「换个讲法」由调用方接弹层（临时重讲不落库，见 ReNoteSheet）；
+ *  P1-③ 引用溯源：onJumpPara 非空时 friendly 里的〔p编号〕渲染成胶囊，点击跳对应段（回调段 id） */
 @Composable
-internal fun NoteCard(note: ParaNoteEntity?, generating: Boolean, onReNote: ((ParaNoteEntity) -> Unit)? = null) {
+internal fun NoteCard(
+    note: ParaNoteEntity?,
+    generating: Boolean,
+    onReNote: ((ParaNoteEntity) -> Unit)? = null,
+    onJumpPara: ((Long) -> Unit)? = null,
+) {
     when {
         note != null -> Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
@@ -454,7 +462,18 @@ internal fun NoteCard(note: ParaNoteEntity?, generating: Boolean, onReNote: ((Pa
             Column(Modifier.padding(12.dp)) {
                 Text(note.title, style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(4.dp))
-                Text(note.friendly, style = MaterialTheme.typography.bodyMedium)
+                if (onJumpPara != null) {
+                    // paraIds 与喂 prompt 的段落序号一一对应（textsForPrompt 按 members 顺序产出，
+                    // 截断只截尾）——标记编号 i 直接映射 paraIds[i]；越界（旧数据防御）不跳
+                    val paraIds = remember(note.paraIds) { ParaIdsCodec.decode(note.paraIds) }
+                    RefAwareText(
+                        note.friendly,
+                        MaterialTheme.typography.bodyMedium,
+                        onParaRef = { idx -> paraIds.getOrNull(idx)?.let(onJumpPara) },
+                    )
+                } else {
+                    Text(note.friendly, style = MaterialTheme.typography.bodyMedium)
+                }
                 note.analogy?.let {
                     Spacer(Modifier.height(4.dp))
                     Text(

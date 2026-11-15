@@ -242,7 +242,10 @@ class NotePlanner(
                 ),
             ) { },
         ) ?: throw PlannerException("讲解输出缺少 <讲解> 标签")
-        val n = NoteParser.normalize(plan, anchor.text)
+        val n0 = NoteParser.normalize(plan, anchor.text)
+        // P1-③ 引用溯源软校验：白名单外标记剔除——texts 是喂给模型的段落序列，
+        // 模型可见编号 = 0..texts.size-1（textsForPrompt 截断后小于成员数），越界即幻觉出处
+        val n = n0.copy(friendly = ParaRef.stripInvalid(n0.friendly) { it in 0 until texts.size })
         return ParaNoteEntity(
             chapterId = chapter.id,
             paraIds = ParaIdsCodec.encode(unit.members.map { it.id }),

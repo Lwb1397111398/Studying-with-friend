@@ -95,11 +95,13 @@ class SummaryPlanner(
         var retried = false
         var lastRaw: String? = null
         var bundle: SummaryBundle? = null
+        // P1-③ 引用溯源：allowedParaIdx = 进 prompt 的段落 idx 白名单（输出标记超名单的落库前剔除）
+        val pack = buildSummaryUserJson(
+            chapter.title, chapter.gist, terms, paragraphs, noteByAnchorIdx, learner,
+        )
         for (attempt in 1..PARSE_ATTEMPTS) {
             coroutineContext.ensureActive()
-            val userJson = buildSummaryUserJson(
-                chapter.title, chapter.gist, terms, paragraphs, noteByAnchorIdx, learner,
-            ) +
+            val userJson = pack.json +
                 if (attempt > 1) "\n\n上次输出不符合五标签格式，请严格按标签格式重新输出全部五段" else ""
             // 累计 partial 直通 UI（重试时归零重算），Streaming 视图据此增量渲染；
             // 按 STREAM_FLUSH_MS 节流发射，成功/失败态紧随其后无需尾部补刷
@@ -124,6 +126,9 @@ class SummaryPlanner(
             Log.w(TAG, "总结包解析失败 raw 快照: ${lastRaw?.take(2000)}")
             throw PlannerException("总结包解析失败，请重试")
         }
+        // P1-③ 引用溯源软校验：白名单外标记剔除（引用是增益不是硬要求，剔除不重试零烧钱）。
+        // 三个 markdown 字段防御性全剔——prompt 只要求 总结/串联 标，模型自作主张标到别处也不展示
+        val allow = pack.allowedParaIdx
 
         // 落库三连写包单事务：清旧作答、upsert 资产、排期种子要么全成要么全无——
         // 写库窗口内取消/异常整体回滚，不会出现"作答被清而资产旧"或"资产新而种子缺"
@@ -136,11 +141,11 @@ class SummaryPlanner(
             db.chapterAssetDao().upsert(
                 ChapterAssetEntity(
                     chapterId = chapterId,
-                    summaryMd = result.summaryMd,
+                    summaryMd = ParaRef.stripInvalid(result.summaryMd) { it in allow },
                     mindmapTree = result.mindmapTree,
                     mindmapJson = null, // 渲染时由 TAB 树现转，库存原始可人读文本
-                    memoryMd = result.memoryMd,
-                    chainMd = result.chainMd,
+                    memoryMd = ParaRef.stripInvalid(result.memoryMd) { it in allow },
+                    chainMd = ParaRef.stripInvalid(result.chainMd) { it in allow },
                     quizJson = QuizCodec.encode(result.questions),
                     model = llm.model,
                     promptVersion = summaryVersion(learner != null),

@@ -25,6 +25,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -120,6 +121,29 @@ class SummaryPlannerTest {
 
     private fun planner(fake: FakeChatText, store: SettingsRepository = SettingsRepository(db, FakeSecretStore())) =
         SummaryPlanner(db, ApplicationProvider.getApplicationContext(), store, fake)
+
+    // ---------- P1-③ 引用溯源：白名单外标记落库前剔除 ----------
+
+    @Test
+    fun run_stripsOutlierParaRefsKeepsAllowlisted(): Unit = runBlocking {
+        val fake = FakeChatText()
+        // setUp 段落 idx 0/1/2 全部非 NONE → 白名单 {0,1,2}；p999 是幻觉出处
+        fake.onText = { _ -> buildString {
+            append("<总结>\n三档分段〔p0〕，幻觉出处〔p999〕。\n</总结>\n")
+            append("<导图>\n民事行为能力\n\t无行为能力\n</导图>\n")
+            append("<记忆思路>\n先记三档〔p1〕。\n</记忆思路>\n")
+            append("<串联>\n成长线〔p2〕。\n</串联>\n")
+            append("<自测>\n").append(legalQuizJson()).append("\n</自测>")
+        } }
+
+        planner(fake).run(ch)
+
+        val asset = db.chapterAssetDao().byChapter(ch)!!
+        assertTrue("合法标记原样保留", asset.summaryMd.contains("〔p0〕"))
+        assertFalse("越界标记剔除", asset.summaryMd.contains("〔p999〕"))
+        assertTrue("记忆思路防御性剔除同样生效（合法保留）", asset.memoryMd.contains("〔p1〕"))
+        assertTrue(asset.chainMd.contains("〔p2〕"))
+    }
 
     // ---------- 1. 生成落库 + 排期种子 ----------
 

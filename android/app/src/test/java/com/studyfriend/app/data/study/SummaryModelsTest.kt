@@ -164,7 +164,7 @@ class SummaryModelsTest {
             analogy = null, keyPointsJson = "[]", memoryHook = null, questionsJson = null,
             model = "m", promptVersion = "v", createdAt = 1L,
         )
-        val json = buildSummaryUserJson("第一章", "梗概", listOf("行为能力"), paras, mapOf(2 to anchorNote))
+        val json = buildSummaryUserJson("第一章", "梗概", listOf("行为能力"), paras, mapOf(2 to anchorNote)).json
 
         val skipText = Regex("\"id\":1,\"act\":\"skip\",\"text\":\"(段+)\"").find(json)!!.groupValues[1]
         assertEquals("SKIP 段只带 300 字", 300, skipText.length)
@@ -179,7 +179,7 @@ class SummaryModelsTest {
     fun input_overlongChapterDowngradesWithinBudget() {
         // 400 段全 EXPLAIN、每段 1000 字：档 0/1/2 依次爆预算，必须逐档降级到 ≤10 万
         val paras = (0 until 400).map { para(it, "EXPLAIN", 1000) }
-        val json = buildSummaryUserJson("长章", null, emptyList(), paras, emptyMap())
+        val json = buildSummaryUserJson("长章", null, emptyList(), paras, emptyMap()).json
         assertTrue("总字数 ${json.length} 应 ≤${AiBudgets.INPUT_CHARS_MAX}", json.length <= AiBudgets.INPUT_CHARS_MAX)
         assertTrue("确实发生了降级（终档每段 120 字）", json.length < 100_000)
     }
@@ -187,8 +187,22 @@ class SummaryModelsTest {
     @Test
     fun input_smallChapterStaysTier0() {
         val paras = (0 until 5).map { para(it, "EXPLAIN", 100) }
-        val json = buildSummaryUserJson("短章", "梗概", emptyList(), paras, emptyMap())
+        val json = buildSummaryUserJson("短章", "梗概", emptyList(), paras, emptyMap()).json
         assertTrue("小章不降级：每段全文 100 字保留", json.contains("段".repeat(100)))
         assertTrue(json.length < 3_000)
+    }
+
+    @Test
+    fun input_allowlistCoversExactlyPromptedParagraphs() {
+        // P1-③ 引用溯源白名单：进 prompt 的段（含只带线索的 skip 段）才可被引用
+        val paras = listOf(
+            para(0, "EXPLAIN", 300),
+            para(1, "SKIP", 200),
+            para(2, "NONE", 100), // NONE 段不进输入也不进白名单
+        )
+        val pack = buildSummaryUserJson("章", "梗概", emptyList(), paras, emptyMap())
+        assertTrue(0 in pack.allowedParaIdx)
+        assertTrue("skip 段模型看得到 id，进白名单", 1 in pack.allowedParaIdx)
+        assertFalse("NONE 段不进白名单", 2 in pack.allowedParaIdx)
     }
 }

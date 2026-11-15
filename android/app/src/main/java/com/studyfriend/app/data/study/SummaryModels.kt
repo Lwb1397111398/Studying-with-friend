@@ -99,6 +99,9 @@ private val TIERS = listOf(
     Triple(120, null, 0),
 )
 
+/** user 消息 + 引用白名单（P1-③）：allowedParaIdx = 进 prompt 的段落 idx 集合（含只带线索的 skip/limited 段——模型看得到这些 id） */
+data class SummaryUserPack(val json: String, val allowedParaIdx: Set<Int>)
+
 /**
  * 组装总结包 user JSON。noteByAnchorIdx 以讲解卡锚段 idx 为键（调用方经
  * enumerateUnits + ParaIdsCodec 归位），保证 note 只挂在锚段条目上。
@@ -113,10 +116,10 @@ fun buildSummaryUserJson(
     paragraphs: List<ParagraphEntity>,
     noteByAnchorIdx: Map<Int, ParaNoteEntity>,
     learner: String? = null,
-): String {
+): SummaryUserPack {
     repeat(TIERS.size) { tier ->
         val s = buildUserJson(title, gist, terms, paragraphs, noteByAnchorIdx, tier, learner)
-        if (s.length <= INPUT_BUDGET) return s
+        if (s.json.length <= INPUT_BUDGET) return s
     }
     return buildUserJson(title, gist, terms, paragraphs, noteByAnchorIdx, TIERS.size, learner)
 }
@@ -161,10 +164,11 @@ private fun buildUserJson(
     noteByAnchorIdx: Map<Int, ParaNoteEntity>,
     tier: Int,
     learner: String? = null,
-): String {
+): SummaryUserPack {
     val spec = TIERS.getOrElse(tier) { Triple(80, null, 0) }
     var kept = 0
     val entries = ArrayList<String>(paragraphs.size)
+    val allowed = HashSet<Int>()
     for (p in paragraphs) {
         val act = when (p.aiAction) {
             "EXPLAIN" -> "explain"
@@ -172,6 +176,7 @@ private fun buildUserJson(
             "SKIP" -> "skip"
             else -> continue // NONE 段不进总结输入
         }
+        allowed.add(p.idx)
         val withinLimit = kept < TIER4_LIMIT
         if (withinLimit) kept++
         val limited = tier >= TIERS.size && !withinLimit
@@ -195,13 +200,14 @@ private fun buildUserJson(
         sb.append('}')
         entries.add(sb.toString())
     }
-    return buildString {
+    val json = buildString {
         append("{\"title\":").append(jsonEsc(title))
         append(",\"gist\":").append(jsonEsc(gist.orEmpty()))
         append(",\"terms\":").append(jsonEsc(terms.joinToString("、")))
         learner?.let { append(",\"learner\":").append(jsonEsc(it)) }
         append(",\"paragraphs\":[").append(entries.joinToString(",")).append("]}")
     }
+    return SummaryUserPack(json, allowed)
 }
 
 /**

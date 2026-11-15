@@ -16,7 +16,7 @@
 | 输出规整 | NoteParser：friendly 缺失按单元失败走重试；title 回退锚段前 16 字；analogy 80 / keyPoints 过滤截 5 条各 30 字 / memoryHook 40 / check_questions 过滤截 3（M5 自测卡输入） |
 | 讲解工具条四态 | NoteBar（ActionBar 之下、要点卡之上）：进行中（进度 x/y+停止）/ 另一任务占用（禁用提示）/ 全部生成（N 处+重新生成）/ 部分·无（"让搭子讲解本章（共 N 处）"或"继续生成（已有 x/N）"）；中断原因以小字同现；单元空不渲染；状态按数据推导，进程重启可恢复"继续"入口 |
 | force 二次确认 | "重新生成"先弹确认框（覆盖现有讲解），确认才 force=true |
-| 讲解卡 | NoteCard 渲染在锚段 ParaRow 之下：标题+大白话+打个比方+要点列表+记忆钩子（primary 色）；生成中本章 Running 时全部未成卡单元统一"搭子正在讲这一段…"占位；只认 promptVersion 匹配且 friendly 非空的行 |
+| 讲解卡 | NoteCard 渲染在锚段 ParaRow 之下：标题+大白话+打个比方+要点列表+记忆钩子（primary 色）；生成中本章 Running 时全部未成卡单元统一"搭子正在讲这一段…"占位；只认 promptVersion 匹配且 friendly 非空的行；**P1-③ 引用溯源**：onJumpPara 非空时 friendly 里的〔p编号〕渲染成可点胶囊「段N」（foundation InlineTextContent），点击滚动到对应段 |
 | 结构化错误 | 无 Key → Failed.keyIssue=true（UI 引导去设置）；占用拒绝 → Failed("另一项 AI 任务进行中") |
 
 ## 关键文件
@@ -83,6 +83,7 @@ test/.../M4bUiSmokeTest.kt      3 例（Compose 冒烟）
 
 ## 最后更新
 
+- 2026-11-15 **P1-③ 引用溯源轮**（调研落地，SurfSense 白名单思路）：①explain_note.txt `<讲解>` 加〔p编号〕出处标记要求——编号必须来自 paragraphs 中出现过的编号，整篇 2~5 处；②`NotePlanner.runUnitOnce` 落库前 `ParaRef.stripInvalid` 剔除白名单外标记（软校验不整页重试零烧钱；白名单=texts.size，textsForPrompt 按 members 顺序产出只截尾——**标记编号 i ↔ paraIds[i] 严格对齐**）；③NoteCard 加 `onJumpPara` 参数：friendly 标记渲染成可点胶囊「段N」（`ui/components/ParaRefs.kt` 的 RefAwareText），点击经 ReadScreen rows 反查 `animateScrollToItem` 滚到段（TTS 跟随同款）；④**缓存零烧钱**：NOTE_VERSION 不动，旧讲解照常显示（无胶囊），新生成才带标记。**坑**：`InlineTextContent`/`appendInlineContent` 在 `androidx.compose.foundation.text` 不在 ui.text（Placeholder/PlaceholderVerticalAlign 才在 ui.text），jar 实查确认。
 - 2026-10-31 **优化轮批A1/A2+D2/D3**：①**讲解缓存失效真 bug 修复**——缓存判定从只比 promptVersion 改三条件：`existing.promptVersion == noteVersion(详略档位, 有学情) && existing.model == 实际讲解模型 && friendly 非空`；`noteVersion(detailLevel, hasLearnerContext)` 拼档位/学情后缀、`isCurrentNote` 前缀匹配（切「深入」档、换更强模型下一章立刻生效）；②**学情进讲解输入**——该章 para_memos 按 paraId 匹配 ≤10 条×60 字（MEMO_INPUT_MAX）拼 `unitMemos` 进单元输入 userJson `"memos"`，explain_note.txt prompt 加「读者学情」段；**防烧钱**：版本号只在该章有学情时才带后缀，无学情书缓存全命中零重讲；③**讲解自问落错题本**——讲解卡自测（ChapterAssetsScreen SelfCheckCard）三按钮「答对/模糊/答错」落 quiz_attempts `source="NOTE"`、`qIndex=NOTE_Q_BASE+i`（Room v10 见 M1），进错题重练数据源。
 
 - 2026-10-26 **数据安全与体验增量轮：AiTaskRunner 排队化 + 429 退避递增**：①AiTaskRunner（四 Runner 共享骨架）抢锁从 tryBegin 立即拒绝改 gate.awaitBegin 排队——新抽象 queuedState(id)（四子类各加 Queued 变体）、10 分钟超时走 Failed「排队等待超时」、stop 挂起期间可取消（锁无半获得）；排队/失败/取消原因同步写 DiagLog（设置页可导出，见 M3）；NoteRunnerGateTest 前两例改排队接力语义+新增排队取消例。②NotePlanner 的 plannerBackoff 传 attempt：429 退避 30→60→120s 封顶（backoffDelayMs 纯函数）。

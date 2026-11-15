@@ -14,6 +14,7 @@ import com.studyfriend.app.data.db.StudyDatabase
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -163,6 +164,24 @@ class NotePlannerTest {
         assertEquals(NotePlanner.NOTE_VERSION, single.promptVersion)
         assertEquals("test-model", single.model)
         assertTrue(notes.any { it.paraIds == "[${ids[1]},${ids[2]}]" })
+        db.close()
+    }
+
+    // ---------- 1b. P1-③ 引用溯源：白名单外标记落库前剔除 ----------
+
+    @Test
+    fun batch_stripsOutlierParaRefs() = runBlocking {
+        val db = db()
+        val fake = FakeChat()
+        // 单段单元白名单 = texts.size = 1（模型可见编号只有 p0）：p0 保留、p5 幻觉编号剔除
+        fake.onNote = { _, _ -> noteTagged(friendly = "先看〔p0〕这段，〔p5〕是编出来的出处") }
+        val ch = seed(db, listOf(Triple(0, "EXPLAIN", null)))
+
+        planner(db, fake).run(ch)
+
+        val friendly = db.paraNoteDao().byChapterOnce(ch).single().friendly
+        assertTrue("合法标记原样保留（渲染端消费）", friendly.contains("〔p0〕"))
+        assertFalse("越界标记剔除", friendly.contains("〔p5〕"))
         db.close()
     }
 

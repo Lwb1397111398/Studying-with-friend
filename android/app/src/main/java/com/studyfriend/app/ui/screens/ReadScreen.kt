@@ -719,6 +719,14 @@ fun ReadScreen(
                                     onReNote = { n ->
                                         reNoteTarget = n to unit.members.joinToString("\n") { it.text }
                                     },
+                                    // P1-③ 引用溯源：胶囊点击跳段（paraIds[i] 即段 id；TTS 跟随同款 animate 滚动）
+                                    onJumpPara = { pid ->
+                                        scope.launch {
+                                            rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
+                                                .takeIf { it >= 0 }
+                                                ?.let { listState.animateScrollToItem(it) }
+                                        }
+                                    },
                                 )
                             }
                             // P7：段落分隔线删除，靠段间距留白分段

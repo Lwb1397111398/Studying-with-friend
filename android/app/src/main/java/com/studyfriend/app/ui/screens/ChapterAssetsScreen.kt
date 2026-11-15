@@ -97,6 +97,8 @@ fun ChapterAssetsScreen(
     onOpenSettings: () -> Unit = {},
     /** 导图跳章（体验增量轮）：导图节点文本匹配本书章标题时跳阅读页 */
     onOpenChapter: (Long) -> Unit = {},
+    /** P1-③ 引用溯源：总结/串联胶囊点击跳阅读页指定段（章 id + 段 id） */
+    onOpenPara: (chapterId: Long, paraId: Long) -> Unit = { _, _ -> },
 ) {
     val app = LocalContext.current.applicationContext as StudyApp
     val db = app.database
@@ -113,6 +115,15 @@ fun ChapterAssetsScreen(
     var confirmRegen by rememberSaveable { mutableStateOf(false) }
     var exportContent by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+
+    // P1-③ 引用溯源：〔p编号〕点击 → 段 idx 反查段 id（openBookmark 同款 byChapterAndIdx）→ 跳阅读页
+    fun jumpToPara(paraIdx: Int) {
+        scope.launch(Dispatchers.IO) {
+            val pid = db.paragraphDao().byChapterAndIdx(chapterId, paraIdx)?.id ?: return@launch
+            withContext(Dispatchers.Main) { onOpenPara(chapterId, pid) }
+        }
+    }
+
     val context = LocalContext.current
     val mdLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
         val content = exportContent
@@ -192,6 +203,7 @@ fun ChapterAssetsScreen(
                     onTab = { tab = it },
                     onOpenSettings = onOpenSettings,
                     onOpenChapter = onOpenChapter,
+                    onParaRef = ::jumpToPara,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -294,6 +306,8 @@ private fun AssetTabs(
     onTab: (Int) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenChapter: (Long) -> Unit = {},
+    /** P1-③ 引用溯源：总结/串联正文〔p编号〕胶囊点击（参数=段落 idx） */
+    onParaRef: (Int) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val titles = listOf("总结", "导图", "记忆", "自测")
@@ -307,11 +321,11 @@ private fun AssetTabs(
             0 -> Column(
                 Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) { MdText(asset.summaryMd) }
+            ) { MdText(asset.summaryMd, onParaRef = onParaRef) }
 
             1 -> MindmapPane(asset, chapterTitle, onOpenChapter)
 
-            2 -> MemoryPane(asset)
+            2 -> MemoryPane(asset, onParaRef)
 
             // 资产版本换代后题卡状态（展开/输入框）必须重建：rememberSaveable 键不含版本，用 key 隔离
             3 -> key(asset.createdAt) { QuizPane(asset, chapterId, onOpenSettings) }        }
@@ -552,7 +566,7 @@ private fun SelfCheckCard(
 
 /** 记忆 Tab：记忆思路 + 串联，顶部 TTS 朗读（计划 M5 §3.4 记忆思路朗读；TTS 双模式同正文听书） */
 @Composable
-private fun MemoryPane(asset: ChapterAssetEntity, modifier: Modifier = Modifier) {
+private fun MemoryPane(asset: ChapterAssetEntity, onParaRef: (Int) -> Unit = {}, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val app = context.applicationContext as StudyApp
@@ -596,7 +610,7 @@ private fun MemoryPane(asset: ChapterAssetEntity, modifier: Modifier = Modifier)
         }
         MdText(asset.memoryMd)
         MdText("## 串联成一条线")
-        MdText(asset.chainMd)
+        MdText(asset.chainMd, onParaRef = onParaRef)
     }
 }
 

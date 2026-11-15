@@ -71,28 +71,31 @@ internal fun buildInline(text: String): AnnotatedString = buildAnnotatedString {
     }
 }
 
-/** 总结包 md 渲染（计划 M5 §3.3）：标题分三级加粗、列表带圆点、粗体/行内代码生效 */
+/** 总结包 md 渲染（计划 M5 §3.3）：标题分三级加粗、列表带圆点、粗体/行内代码生效；
+ *  P1-③ 引用溯源：onParaRef 非空时〔p编号〕渲染成可点胶囊（回调标记编号=段落 idx） */
 @Composable
-fun MdText(md: String, modifier: Modifier = Modifier) {
+fun MdText(md: String, modifier: Modifier = Modifier, onParaRef: ((Int) -> Unit)? = null) {
     val blocks = remember(md) { parseMdBlocks(md) }
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         blocks.forEach { block ->
             when (block) {
-                is MdBlock.Heading -> Text(
-                    buildInline(block.text),
-                    style = when (block.level) {
+                is MdBlock.Heading -> RefAwareText(
+                    block.text,
+                    when (block.level) {
                         1 -> MaterialTheme.typography.titleLarge
                         2 -> MaterialTheme.typography.titleMedium
                         else -> MaterialTheme.typography.titleSmall
                     },
+                    onParaRef,
                 )
                 is MdBlock.Bullet -> Row {
                     Text("• ", style = MaterialTheme.typography.bodyLarge)
-                    Text(buildInline(block.text), style = MaterialTheme.typography.bodyLarge)
+                    RefAwareText(block.text, MaterialTheme.typography.bodyLarge, onParaRef)
                 }
-                is MdBlock.Para -> Text(
-                    buildInline(block.text),
-                    style = MaterialTheme.typography.bodyLarge,
+                is MdBlock.Para -> RefAwareText(
+                    block.text,
+                    MaterialTheme.typography.bodyLarge,
+                    onParaRef,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

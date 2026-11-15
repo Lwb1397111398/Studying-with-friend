@@ -244,6 +244,8 @@ fun AppNav() {
                     onBack = { navController.popBackStack() },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                     onOpenChapter = { cid -> navController.navigate(Routes.read(cid)) },
+                    // P1-③ 引用溯源：总结/串联胶囊跳阅读页指定段（ReadScreen scrollParaId 消费）
+                    onOpenPara = { cid, pid -> navController.navigate(Routes.read(cid, paraId = pid)) },
                 )
             }
             composable(

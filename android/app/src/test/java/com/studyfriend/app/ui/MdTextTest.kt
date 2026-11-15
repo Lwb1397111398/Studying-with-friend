@@ -2,8 +2,11 @@ package com.studyfriend.app.ui
 
 import androidx.compose.ui.text.AnnotatedString
 import com.studyfriend.app.ui.components.MdBlock
+import com.studyfriend.app.ui.components.ParaRefSegment
 import com.studyfriend.app.ui.components.buildInline
+import com.studyfriend.app.ui.components.buildInlineWithRefs
 import com.studyfriend.app.ui.components.parseMdBlocks
+import com.studyfriend.app.ui.components.splitParaRefs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -45,5 +48,28 @@ class MdTextTest {
         assertEquals(2, code[0].start)
         assertEquals(3, code[0].end)
         assertTrue("无记号文本不加 span", buildInline("平平无奇").getStringAnnotations("b", 0, 4).isEmpty())
+    }
+
+    // ---------- P1-③ 引用溯源行内渲染 ----------
+
+    @Test
+    fun paraRefs_splitInterleavesPlainAndRef() {
+        val segs = splitParaRefs("前文〔p0〕中**粗**〔p12〕尾")
+        assertEquals(5, segs.size)
+        assertEquals(ParaRefSegment.Plain("前文"), segs[0])
+        assertEquals(ParaRefSegment.Ref(0), segs[1])
+        assertEquals(ParaRefSegment.Plain("中**粗**"), segs[2])
+        assertEquals(ParaRefSegment.Ref(12), segs[3])
+        assertEquals(ParaRefSegment.Plain("尾"), segs[4])
+        // 无标记整段单 Plain（渲染端据此走原路径）
+        assertEquals(listOf<ParaRefSegment>(ParaRefSegment.Plain("无标记")), splitParaRefs("无标记"))
+    }
+
+    @Test
+    fun paraRefs_inlineKeepsBoldAndPlaceholders() {
+        val s = buildInlineWithRefs("前〔p0〕**粗**")
+        assertEquals("前[段1]粗", s.text) // 占位 fallback 文本 [段N]，真实胶囊由 inlineContent 替换
+        val bold = s.getStringAnnotations("b", 0, s.length)
+        assertEquals(1, bold.size)
     }
 }
