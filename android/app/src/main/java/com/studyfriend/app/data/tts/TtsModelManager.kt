@@ -22,8 +22,13 @@ import java.net.URL
 /**
  * 离线朗读模型（kokoro-int8-multi-lang-v1_1，中英双语）下载/管理。
  * 经验来自「听的思维」项目同款清单 + 本项目 M7 更新下载器（.part 断点续传 + 200 自愈）：
- * - 源站 hf-mirror.com（HuggingFace 国内镜像），直连可达；
+ * - 源站 hf-mirror.com（HuggingFace 国内镜像），直连可达；2026-11 实测该仓库已迁 Xet 存储：
+ *   小文件 307 到 hf-mirror 自家 resolve-cache，大文件 302 到 cas-bridge.xethub.hf.co（CloudFront），
+ *   HttpURLConnection 均能自动跟随，Range 续传穿透整条链路有效（206 实测）；
+ * - 清单里的文件名必须逐段 URL 编码后再拼 URL（espeak-ng-data/voices/!v/Mr serious 带空格，
+ *   裸拼服务端回 400）；
  * - 单文件 .part 续传：中断后再点从已下字节继续（Range 头），服务端不认 Range 回 200 则弃 .part 重下；
+ *   单文件内部重试 3 次；失败文件不连坐整批——收集起来整批再试，最多 3 遍（期间 .part 全保留）；
  * - 下载挂在本 object 的 App 级 scope：离开设置页不中断，回页继续看进度。
  * 字节数兼作完整性下限：下载完尺寸不符报错、整文件作废。
  */
@@ -473,31 +478,86 @@ object TtsModelManager {
 
     private suspend fun downloadAll(context: Context) = withContext(Dispatchers.IO) {
         val dir = ttsDir(context)
-        val completed = java.util.concurrent.atomic.AtomicLong(0L)
-        // hf-mirror 每文件一次完整 HTTPS 往返（TLS+重定向，实测 10 秒级/个），espeak 300+ 小文件
-        // 串行要 40 分钟——8 路并发把小文件阶段压到 3~5 分钟；单文件内部重试/续传不受影响
+        // 平滑进度：counted = 已计入进度的累计字节（原子量，8 路并发下 CAS 累加）。
+        // 大文件（model 114MB）单文件就要下好几分钟，若只在整文件完成时推进进度，
+        // 中途进度条会长时间冻结，看起来像「卡住不下了」——所以按 256KB 粒度实时汇报。
+        val counted = java.util.concurrent.atomic.AtomicLong(0L)
+        fun report() {
+            _state.value = DownloadState.Running(minOf(counted.get(), TTS_TOTAL_BYTES), TTS_TOTAL_BYTES)
+        }
+
+        // 每文件已计入进度的高水位：续传从 .part 字节起步、200 自愈从头重下，
+        // 都不能重复计数或倒退；跨整批重试也复用同一份（keyed by relPath）
+        val highWaters = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+
+        suspend fun downloadOne(f: TtsFile) {
+            val dst = File(dir, f.relPath)
+            if (dst.length() >= f.bytes) { // 上次会话已下完
+                counted.addAndGet(f.bytes)
+                report()
+                return
+            }
+            val highWater = highWaters.computeIfAbsent(f.relPath) {
+                java.util.concurrent.atomic.AtomicLong(0L)
+            }
+            downloadFile(dir, f.relPath, encodeUrl(f.relPath), f.bytes) { absRead ->
+                while (true) {
+                    val prev = highWater.get()
+                    if (absRead <= prev) break
+                    if (highWater.compareAndSet(prev, absRead)) {
+                        counted.addAndGet(absRead - prev)
+                        break
+                    }
+                }
+                report()
+            }
+            // 收尾校平：本文件按清单字节数计满（服务端多给/少计都拉回准确值）
+            counted.addAndGet(f.bytes - highWater.get())
+            report()
+        }
+
         val sem = Semaphore(8)
-        coroutineScope {
-            for (f in TTS_FILES) {
-                launch {
-                    sem.withPermit {
-                        val dst = File(dir, f.relPath)
-                        if (dst.length() >= f.bytes) {
-                            completed.addAndGet(f.bytes)
-                            _state.value = DownloadState.Running(completed.get(), TTS_TOTAL_BYTES)
-                            return@withPermit
+        val failed = java.util.concurrent.ConcurrentHashMap<String, String>()
+        var pending = TTS_FILES
+        var pass = 0
+        // 整批最多 3 遍：单文件内部各有 3 次重试；一遍内任一文件失败不再连坐整批，
+        // 失败文件收集起来下一遍重试（.part 全保留，续传代价小）
+        while (pending.isNotEmpty() && pass < 3) {
+            if (pass > 0) delay(5000L * pass)
+            failed.clear()
+            coroutineScope {
+                for (f in pending) {
+                    launch {
+                        sem.withPermit {
+                            try {
+                                downloadOne(f)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                failed[f.relPath] = e.message ?: "下载失败"
+                            }
                         }
-                        // 并发下不逐字节汇报（进度粒度=每文件完成），完成后推进整体进度
-                        downloadFile(dir, f.relPath, "$TTS_REPO/${f.relPath}", f.bytes) { }
-                        completed.addAndGet(f.bytes)
-                        _state.value = DownloadState.Running(completed.get(), TTS_TOTAL_BYTES)
                     }
                 }
             }
+            pending = pending.filter { failed.containsKey(it.relPath) }
+            pass++
+        }
+        if (pending.isNotEmpty()) {
+            val sample = pending.take(3).joinToString("、") { "${it.relPath}：${failed[it.relPath]}" }
+            throw java.io.IOException("有 ${pending.size} 个文件反复下载仍失败：$sample")
         }
     }
 
-    /** 下载单个文件（.part 断点续传 + 200 自愈 + 3 次重试），完成后原子改名到位 */
+    /** 仓库相对路径 → 合法 URL：路径逐段编码。清单里有带空格的文件名（!v/Mr serious），
+     *  裸拼进请求行服务端回 400（2026-11-15 实测），必须编码 */
+    private fun encodeUrl(relPath: String): String =
+        relPath.split("/").joinToString("/", prefix = "$TTS_REPO/") { seg ->
+            java.net.URLEncoder.encode(seg, "UTF-8").replace("+", "%20")
+        }
+
+    /** 下载单个文件（.part 断点续传 + 200 自愈 + 3 次重试），完成后原子改名到位。
+     *  onProgress 收到文件内绝对字节数（含 .part 起始量），按 256KB 粒度回调 */
     private suspend fun downloadFile(
         dir: File,
         relPath: String,
@@ -522,9 +582,6 @@ object TtsModelManager {
                     if (!append) {
                         start = 0
                         if (part.exists()) part.delete()
-                    }
-                    val total = conn.contentLengthLong.let {
-                        if (it > 0) it + if (append) start else 0 else maxOf(start, minBytes)
                     }
                     conn.inputStream.use { input ->
                         FileOutputStream(part, append).use { fos ->
@@ -560,7 +617,7 @@ object TtsModelManager {
                 throw e
             } catch (e: Exception) {
                 lastError = e
-                if (attempt < 2) delay(1500L * (attempt + 1))
+                if (attempt < 2) delay(2000L * (attempt + 1))
             }
         }
         throw lastError ?: java.io.IOException("下载失败")
