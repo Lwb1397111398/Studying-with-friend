@@ -3,14 +3,13 @@
 import json
 import subprocess
 import sys
-from pathlib import Path
 
-KIT = Path(__file__).resolve().parent
+from kitpaths import JOBS, KIT
 
 
 def main() -> None:
     name = sys.argv[1]
-    job = KIT / "jobs" / name
+    job = JOBS / name
     m = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
     n = 0
     for bid, b in m["batches"].items():

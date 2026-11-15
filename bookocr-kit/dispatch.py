@@ -5,9 +5,8 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
 
-KIT = Path(__file__).resolve().parent
+from kitpaths import JOBS, KIT
 
 
 def prev_tail(name: str, bid: str) -> str:
@@ -16,11 +15,11 @@ def prev_tail(name: str, bid: str) -> str:
     if n <= 1:
         return ""
     try:
-        m = json.loads((KIT / "jobs" / name / "manifest.json").read_text(encoding="utf-8"))
+        m = json.loads((JOBS / name / "manifest.json").read_text(encoding="utf-8"))
         prev = m["batches"].get(f"b{n - 1:03d}")
         if not prev or prev.get("status") != "done":
             return ""
-        body = KIT / "jobs" / name / prev["body"]
+        body = JOBS / name / prev["body"]
         paras = [ln.strip() for ln in body.read_text(encoding="utf-8-sig").splitlines()
                  if ln.strip() and not re.match(r"^〔页\d+〕$", ln.strip())]
         if not paras:
@@ -69,7 +68,7 @@ def main() -> None:
             "最后只回报一行统计（格式见任务卡末行），不要回报其他内容。\n"
             "\n—— 任务卡 ——\n"
         )
-        pdir = KIT / "jobs" / name / "prompts"
+        pdir = JOBS / name / "prompts"
         pdir.mkdir(exist_ok=True)
         txt = header + o.strip() + "\n"
         tail = prev_tail(name, bid)

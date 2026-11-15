@@ -30,8 +30,7 @@ import threading
 import time
 from pathlib import Path
 
-KIT = Path(__file__).resolve().parent
-JOBS = KIT / "jobs"
+from kitpaths import JOBS, KIT, DONE
 
 # 与 bookocr.py 相同的协议正则（独立维护，避免 import bookocr 触发整份解析）
 PAGE_MARK = re.compile(r"^\s*〔页\s*(\d+)\s*〕\s*$", re.M)
@@ -73,7 +72,11 @@ def resolve_job(name_or_path: str) -> Path:
     cand = JOBS / name_or_path
     if cand.is_dir():
         return cand
-    die(f"找不到识别工程「{name_or_path}」（既不是目录，也不在 {JOBS} 下）")
+    # 归档工程也认（已识别/<书名>/工程/）：旧书重校对、视觉精补用
+    cand = DONE / name_or_path / "工程"
+    if cand.is_dir() and (cand / "manifest.json").exists():
+        return cand
+    die(f"找不到识别工程「{name_or_path}」（不在 {JOBS.name}/，也不在 {DONE.name}/<书名>/工程/ 下）")
 
 
 def load_manifest(job: Path) -> dict:
@@ -111,7 +114,22 @@ _HUAI_FIXES = {"淮确": "准确", "淮的": "准的", "淮据": "准据", "淮�
                "淮绳": "准绳", "淮时": "准时", "淮于": "准于"}
 
 # 垃圾符号（图示框线/坐标乱码里常见，正文几乎不用）
-_JUNK_CHARS = "勹＄竺叩＼｜｀〜｛｝�卩〓"
+_DEFAULT_JUNK = "勹＄竺叩＼｜｀〜｛｝�卩〓"
+
+
+def _load_junk_chars() -> str:
+    """垃圾字黑名单：内置清单打底，config.json 的 junk_chars 键可追加（新书出新字型不改代码）。
+    是「追加」不是「替换」——config 里只写新增字，内置清单永远生效。"""
+    try:
+        v = json.loads((KIT / "config.json").read_text(encoding="utf-8")).get("junk_chars")
+        if isinstance(v, str) and v:
+            return _DEFAULT_JUNK + v
+    except (json.JSONDecodeError, OSError, AttributeError):
+        pass
+    return _DEFAULT_JUNK
+
+
+_JUNK_CHARS = _load_junk_chars()
 
 _NOTE_TAIL_RE_A = re.compile(
     r"(?<=[。；：！？”）】》])([" + _NOTE_TAIL_CHARS + r"])(?=[\u4e00-\u9fff])(?![" + _NOTE_TAIL_GUARD + r"])")
@@ -364,7 +382,9 @@ def _ai_chat_prof(prof: dict, prompt: str, timeout: int = 90) -> str:
 def _ai_proofread_prompt(block: str) -> str:
     return (
         "你是书稿 OCR 校对员。以下是一本书某一页的 OCR 转写结果（每段前带【编号】），错误类型包括：\n"
-        "1) 形近错字（如「淮确」应为「准确」、「女子的」读不通时应按上下文改回正确字，如「好的」）；\n"
+        "1) 形近错字（如「淮确」应为「准确」）。判错的金标准是通读：读起来不通顺、意思讲不过去的字\n"
+        "   就是错字，例如「学刁了这个知识点」读不通，「刁」必是「习」之误——按上下文把读不通的字\n"
+        "   改成读得通的字，改完整句话必须通顺；\n"
         "2) 脚注序号残留（如「债之关系。专」中的「专」，是脚注①②③被误识别成汉字，应删除）；\n"
         "3) 外文单词内夹了汉字（如「cond兀tio」应为「condictio」）；\n"
         "4) 括号/引号配对错误；\n"
@@ -1017,6 +1037,18 @@ def cmd_proofread(a: argparse.Namespace, m: dict | None = None) -> None:
 
     # ---- 汇总报告 ----
     total_fixes = sum(len(v) for v in changes.values())
+    # 校对完成度台账：累积已校页号（pack 闸门按覆盖判定，增量跑也记账）+ 累计修复数
+    if not dry:
+        pr = m.setdefault("proofread", {"pages": [], "fixed": 0})
+        covered = set(pr.get("pages") or [])
+        for bid in bids:
+            b_meta = m["batches"][bid]
+            covered.update(b_meta["pages"] if pages_sel is None
+                           else [p for p in b_meta["pages"] if p in pages_sel])
+        pr["pages"] = sorted(covered)
+        pr["fixed"] = int(pr.get("fixed") or 0) + total_fixes
+        pr["at"] = time.strftime("%Y-%m-%d %H:%M")
+        save_manifest(job, m)
     if vision_mode:
         mode = "视觉对照精校（--vision）"
     elif not rules_only_flag:

@@ -19,7 +19,7 @@ import re
 import sys
 from pathlib import Path
 
-KIT = Path(__file__).resolve().parent
+from kitpaths import JOBS
 
 PAGE_MARK = re.compile(r"^\s*〔页\s*(\d+)\s*〕\s*$")
 # 标题/列表/表图题：出现在「下页首段」位置时几乎必然是新段起点，绝不拼
@@ -73,13 +73,32 @@ def load(job: Path) -> tuple[dict, dict[int, list[str]], dict[int, str]]:
     return m, pages, page_bid
 
 
+def merge_candidate(a: str, b: str) -> bool:
+    """四重护栏判据：上页末段 a 与下页首段 b 是否疑似同一被页界切断的段落。
+    dry 判定（不写盘），缝合 main 与 check 衔接体检共用同一套口径。"""
+    # 护栏①②：图占位/空白标记/标题/元数据行/短段不拼
+    if a.startswith("〔") or b.startswith("〔"):
+        return False
+    if HEAD_RE.match(a) or HEAD_RE.match(b) or META_RE.search(a):
+        return False
+    if len(a) < 12:
+        return False
+    # 护栏②续：末字符非汉字开头的段（数字页码/西文/标点收尾）多见于目录表行，不拼
+    if not MERGE_OK_TAIL.match(a[-1]) or not MERGE_OK_HEAD.match(b):
+        return False
+    # 护栏③：终止标点收尾 = 句子已完，不拼
+    if a[-1] in TERMINAL:
+        return False
+    return True
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if a != "--apply"]
     apply = "--apply" in sys.argv
     if not args:
         print("用法: python stitch.py <书名> [--apply]")
         sys.exit(1)
-    job = KIT / "jobs" / args[0]
+    job = JOBS / args[0]
     m, pages, page_bid = load(job)
     all_pages = sorted(pages)
     # 幂等标记：缝合过的页界记档，重跑跳过（多会话都会触发缝合，绝不能二次缝）
@@ -100,18 +119,7 @@ def main() -> None:
         if not prev_paras or not cur_paras:
             continue
         a, b = prev_paras[-1], cur_paras[0]
-        # 护栏①②：图占位/空白标记/标题/短段不拼
-        if a.startswith("〔") or b.startswith("〔"):
-            continue
-        if HEAD_RE.match(a) or HEAD_RE.match(b) or META_RE.search(a):
-            continue
-        if len(a) < 12:
-            continue
-        # 护栏②续：末字符非汉字开头的段（数字页码/西文/标点收尾）多见于目录表行，不拼
-        if not MERGE_OK_TAIL.match(a[-1]) or not MERGE_OK_HEAD.match(b):
-            continue
-        # 护栏③：终止标点收尾 = 句子已完，不拼
-        if a[-1] in TERMINAL:
+        if not merge_candidate(a, b):
             continue
         merges.append((n, a[-14:], b[:14]))
         pages[n][-1] = a + b

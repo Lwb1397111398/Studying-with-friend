@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 bookocr-kit 自测：合成一本 12 页假书，把 init→prep→next→check→retry→chapters→pack 全链路
-跑一遍并断言（含切章/目录对账/疑点裁决/KIT 元数据块）。不依赖任何真实样本，换电脑装好依赖即可回归。
+跑一遍并断言（含切章/目录对账/疑点裁决/KIT 元数据块/三文件夹调度/完成度闸门）。
+不依赖任何真实样本，换电脑装好依赖即可回归。
 
 跑法：python selftest.py   （全部通过输出 ALL PASS，任何失败退出码 1）
 """
@@ -17,10 +18,11 @@ import shlex
 import sys
 from pathlib import Path
 
-KIT = Path(__file__).resolve().parent
+from kitpaths import INBOX, JOBS, DONE, KIT
+
 PY = sys.executable
 CLI = str(KIT / "bookocr.py")
-JOB = KIT / "jobs" / "_selftest"
+JOB = JOBS / "_selftest"
 
 FAILS: list[str] = []
 
@@ -88,13 +90,40 @@ def write_empty(bid: str) -> None:
     (JOB / "batches" / f"{bid}_figures.json").write_text("[]", encoding="utf-8")
 
 
+def write_batch_in(job: Path, bid: str, pages: list[int]) -> None:
+    """在指定工程目录写一批合格正文（scan/auto/done 调度测试用，与主链夹具独立）。"""
+    body = "\n\n".join(f"〔页{p}〕\n{filler(p, 4)}" for p in pages)
+    (job / "batches").mkdir(exist_ok=True)
+    (job / "batches" / f"{bid}.txt").write_text(body, encoding="utf-8")
+    (job / "batches" / f"{bid}_notes.txt").write_text("", encoding="utf-8")
+    (job / "batches" / f"{bid}_figures.json").write_text("[]", encoding="utf-8")
+
+
 def main() -> None:
+    print("== 目录迁移（旧 jobs/ → 识别中/） ==")
+    import kitpaths
+    legacy = KIT / "jobs"
+    legacy.mkdir(exist_ok=True)
+    (legacy / "_migrate_probe").mkdir(exist_ok=True)
+    real_jobs = kitpaths.JOBS
+    kitpaths.JOBS = KIT / "识别中_迁移测试"  # 指向不存在的名字 → migrate 应执行改名
+    try:
+        msg = kitpaths.migrate_legacy_jobs()
+        check(msg is not None and "改名" in msg, "旧 jobs/ 自动改名迁移")
+        check((KIT / "识别中_迁移测试" / "_migrate_probe").exists(), "工程随目录整体迁移")
+        check(not legacy.exists(), "旧目录不再存在")
+    finally:
+        kitpaths.JOBS = real_jobs
+        shutil.rmtree(KIT / "识别中_迁移测试", ignore_errors=True)
+    check(kitpaths.migrate_legacy_jobs() is None, "识别中已存在时不迁移（幂等保护）")
+
     print("== 造样本书 ==")
     import pymupdf as fitz
-    src = KIT / "jobs" / "_selftest_src.pdf"
+    src = JOBS / "_selftest_src.pdf"
     JOB.parent.mkdir(exist_ok=True)
-    for stale in KIT.glob("jobs/_selftest*"):  # 上次异常退出可能残留工程，先清干净
-        shutil.rmtree(stale, ignore_errors=True) if stale.is_dir() else stale.unlink(missing_ok=True)
+    for stale_dir in (JOBS, DONE, INBOX):  # 上次异常退出可能残留夹具，先清干净
+        for stale in stale_dir.glob("_selftest*"):
+            shutil.rmtree(stale, ignore_errors=True) if stale.is_dir() else stale.unlink(missing_ok=True)
     doc = fitz.open()
     tiny = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)  # 8x8 深色小图，供第 11 页嵌图
     tiny.set_rect(tiny.irect, (90, 90, 90))
@@ -263,6 +292,14 @@ def main() -> None:
     check("命中 4" in o and "无疑点" in o, "目录 4 条目全部对账命中、无疑点")
     check(m.get("chapter_review_pending") is False, "无疑点时不需要裁决")
 
+    print("== pack 校对闸门 ==")
+    o = run("pack _selftest", expect_fail=True)
+    check("没过智能校对" in o, "pack 闸门：识别完没校对被拦（防老管线直出）")
+    m = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
+    m["proofread"] = {"pages": sorted(p for b in m["batches"].values() for p in b["pages"]),
+                      "fixed": 2, "at": "selftest"}
+    (JOB / "manifest.json").write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
+
     print("== pack 三产出（txt / 插图版 PDF / KIT 图包 zip） ==")
     o = run("pack _selftest")
     txt = JOB / "output" / "_selftest.txt"
@@ -304,7 +341,9 @@ def main() -> None:
           "元数据含 6 章章表（首章为前置）")
     mpk = json.loads((JOB / "manifest.json").read_text(encoding="utf-8"))
     check(mpk.get("packed") is True, "pack 后台账记 packed")
-    check("已打包" in run("status _selftest"), "status 显示已打包")
+    st = run("status _selftest")
+    check("打包✓" in st and "流水线" in st, "status 流水线显示打包✓")
+    check("校对✓" in st, "status 流水线显示校对✓")
 
     d = fitz.open(str(pdf))
     check(d.page_count >= 3, f"PDF 排版 {d.page_count} 页")
@@ -316,7 +355,7 @@ def main() -> None:
 
     print("== pull 文字层拔取（多批台账一致性回归） ==")
     run(f'init _selftest_pull --src "{src}" --batch 4')
-    JOB2 = KIT / "jobs" / "_selftest_pull"
+    JOB2 = JOBS / "_selftest_pull"
     run("prep _selftest_pull")
     o = run("pull _selftest_pull")
     mp = json.loads((JOB2 / "manifest.json").read_text(encoding="utf-8"))
@@ -361,7 +400,7 @@ def main() -> None:
 
     print("== init 免渲染直 pull（懒渲染路线） ==")
     run(f'init _selftest_pull2 --src "{src}" --batch 4')
-    JOB3 = KIT / "jobs" / "_selftest_pull2"
+    JOB3 = JOBS / "_selftest_pull2"
     run("pull _selftest_pull2")  # 不跑 prep，直接拔
     mp3 = json.loads((JOB3 / "manifest.json").read_text(encoding="utf-8"))
     check(all(b["status"] == "done" for b in mp3["batches"].values()),
@@ -388,7 +427,7 @@ def main() -> None:
 
     print("== chapters 疑点与裁决（toc_miss/gap/thin + --apply） ==")
     run(f'init _selftest_ch2 --src "{src}" --batch 12')
-    JOB4 = KIT / "jobs" / "_selftest_ch2"
+    JOB4 = JOBS / "_selftest_ch2"
     run("prep _selftest_ch2")
     run("next _selftest_ch2")
     parts = ["〔页1〕", "目录", "",
@@ -425,7 +464,7 @@ def main() -> None:
 
     print("== proofread 规则层 + AI Stub ==")
     run(f'init _selftest_pf --src "{src}" --batch 4')
-    JOBP = KIT / "jobs" / "_selftest_pf"
+    JOBP = JOBS / "_selftest_pf"
     run("prep _selftest_pf")
     # 直接种写批文件（不走 pull，聚焦校对层逻辑）
     junk = "勹无因管理仁覃言＄芦"
@@ -524,6 +563,79 @@ def main() -> None:
     ch_v = json.loads((JOBP / "proofread" / "changes.json").read_text(encoding="utf-8"))
     check(any(f.get("rule") == "vision" for v in ch_v.values() for f in v),
           "changes.json 记录 rule=vision")
+    m_pf2 = json.loads((JOBP / "manifest.json").read_text(encoding="utf-8"))
+    pr = m_pf2.get("proofread") or {}
+    check(sorted(pr.get("pages") or []) == [1, 2, 3, 4], "proofread 写完成度台账（pages 覆盖已校页）")
+    check(pr.get("fixed", 0) >= 1, "台账累计修复数")
+
+    print("== junk 黑名单外置（config.json junk_chars 追加） ==")
+    import proofread as pr_mod
+    real_kit = pr_mod.KIT
+    try:
+        pr_mod.KIT = JOBP  # 临时把夹具目录当 KIT，读夹具里的 config.json
+        (JOBP / "config.json").write_text(json.dumps({"junk_chars": "＠＃"}, ensure_ascii=False),
+                                          encoding="utf-8")
+        jc = pr_mod._load_junk_chars()
+        check(jc.startswith(pr_mod._DEFAULT_JUNK) and "＠＃" in jc, "junk_chars 追加到内置清单之后")
+        (JOBP / "config.json").unlink()
+        check(pr_mod._load_junk_chars() == pr_mod._DEFAULT_JUNK, "无 config 时用内置清单")
+    finally:
+        pr_mod.KIT = real_kit
+
+    print("== clean 清页图（dry 报大小 / --apply 真删 / prep 补渲染） ==")
+    o = run("clean _selftest")
+    check("--apply" in o and "MB" in o, "clean 缺省 dry 只报大小")
+    check((JOB / "images" / "0003.png").exists(), "dry 不删")
+    o = run("clean _selftest --apply")
+    check("已删页图" in o, "clean --apply 删除")
+    check(not (JOB / "images").exists(), "页图目录移除，批次/台账/成品不动")
+    check((JOB / "output" / "_selftest.txt").exists(), "成品不受 clean 影响")
+    run("prep _selftest")
+    check((JOB / "images" / "0003.png").exists(), "prep 幂等补渲染（重识别前提）")
+
+    print("== scan/auto/done 三文件夹调度 ==")
+    # scan：待识别/ 放 PDF → 登记建工程 + 渲染，不动源文件
+    shutil.copy2(src, INBOX / "selftest_auto_book.pdf")
+    o = run("scan")
+    AJOBJ = JOBS / "selftest_auto_book"
+    check(AJOBJ.exists() and (AJOBJ / "manifest.json").exists(), "scan 登记 INBOX 里的 PDF 建工程")
+    check((AJOBJ / "images" / "0001.png").exists(), "scan 顺带渲染页图")
+    check((INBOX / "selftest_auto_book.pdf").exists(), "scan 不动待识别里的源 PDF")
+    o = run("auto --peek")
+    check("selftest_auto_book" in o and "待识别" in o, "auto --peek 报告两边书况")
+    # auto：续跑识别中的书 → subagent 路线输出领批任务卡就停（等 agent 看图）
+    o = run("auto")
+    check("selftest_auto_book" in o and "批 b001" in o, "auto 取识别中的书输出领批任务卡")
+    ma = json.loads((AJOBJ / "manifest.json").read_text(encoding="utf-8"))
+    check(ma["batches"]["b001"]["status"] == "assigned", "auto 派出 b001（断点状态落台账）")
+    # 伪装识别完成：按台账真实分批写批（scan 默认 10 页/批），先派批再质检 → 写校对标记 → done 归档
+    ma = json.loads((AJOBJ / "manifest.json").read_text(encoding="utf-8"))
+    for bid, bmeta in ma["batches"].items():
+        if bmeta["status"] == "pending":
+            run("next selftest_auto_book")  # check 只认已派出的批
+        write_batch_in(AJOBJ, bid, bmeta["pages"])
+        run(f"check selftest_auto_book {bid} --force")
+    ma = json.loads((AJOBJ / "manifest.json").read_text(encoding="utf-8"))
+    ma["proofread"] = {"pages": list(range(1, 13)), "fixed": 1, "at": "selftest"}
+    (AJOBJ / "manifest.json").write_text(json.dumps(ma, ensure_ascii=False, indent=1), encoding="utf-8")
+    o = run("done selftest_auto_book")
+    ADONE = DONE / "selftest_auto_book"
+    check(ADONE.exists(), "done 归档建 已识别/<书名>/")
+    if ADONE.exists():
+        check((ADONE / "selftest_auto_book.txt").exists(), "成品 txt 拍平在书名文件夹根部")
+        check(any(p.name.startswith("导入这个_") and p.name.endswith(".zip") for p in ADONE.iterdir()),
+              "KIT 图包 zip 拍平在根部")
+        check((ADONE / "工程" / "manifest.json").exists(), "工程整体随书归档")
+        check((ADONE / "selftest_auto_book.pdf").exists(), "原书 PDF 跟书走（从 待识别/ 移入）")
+        check(not (ADONE / "工程" / "images").exists(), "归档前已清页图")
+        mp = json.loads((ADONE / "工程" / "manifest.json").read_text(encoding="utf-8"))
+        check(mp.get("rendered") == [], "归档台账 rendered 重置（prep 可重新渲染）")
+    check(not (INBOX / "selftest_auto_book.pdf").exists(), "待识别里源 PDF 已移走")
+    check(not AJOBJ.exists(), "识别中不再保留已归档工程")
+    o = run("status selftest_auto_book")  # 归档工程 resolve 兼容
+    check("流水线" in o, "归档工程也能 status（resolve_job 兼容 已识别/<书名>/工程）")
+    o = run("auto")
+    check("没有可做的活" in o, "auto：两边都空时明说收工")
 
     print("== 清理 ==")
 
@@ -537,6 +649,10 @@ def main() -> None:
     shutil.rmtree(JOB3, ignore_errors=True)
     shutil.rmtree(JOB4, ignore_errors=True)
     shutil.rmtree(JOBP, ignore_errors=True)
+    shutil.rmtree(DONE / "selftest_auto_book", ignore_errors=True)
+    for stale_dir in (JOBS, DONE, INBOX):  # 调度测试残留（含归档书、待识别 PDF）
+        for stale in stale_dir.glob("*selftest*"):
+            shutil.rmtree(stale, ignore_errors=True) if stale.is_dir() else stale.unlink(missing_ok=True)
     src.unlink(missing_ok=True)
     if FAILS:
         print(f"SELFTEST FAIL：{len(FAILS)} 项未过")

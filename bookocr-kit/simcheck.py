@@ -10,9 +10,8 @@ import difflib
 import json
 import re
 import sys
-from pathlib import Path
 
-KIT = Path(__file__).resolve().parent
+from kitpaths import JOBS
 
 
 def norm(t: str) -> str:
@@ -23,7 +22,7 @@ def norm(t: str) -> str:
 def main() -> None:
     import pymupdf
 
-    job = KIT / "jobs" / (sys.argv[1] if len(sys.argv) > 1 else die("用法: python simcheck.py <书名> [批号...]"))
+    job = JOBS / (sys.argv[1] if len(sys.argv) > 1 else die("用法: python simcheck.py <书名> [批号...]"))
     m = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
     doc = pymupdf.open(m["src_pdf"])
     mark = re.compile(r"〔页\s*(\d+)\s*〕")

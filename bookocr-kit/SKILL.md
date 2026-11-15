@@ -34,6 +34,18 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
 
 老板没说参数就全用 config 默认。
 
+## 三文件夹主线（多本书的首选玩法）
+
+kit 目录下三个文件夹：`待识别/`（老板丢 PDF）→ `识别中/`（进行中的工程）→ `已识别/`（成品归档）。老板说「识别待识别文件夹里的书」时走这条线：
+
+1. `python bookocr.py scan` ——登记 `待识别/` 全部 PDF（建工程+多进程渲染页图，不动源文件）。
+2. `python bookocr.py auto` ——调度器，**重复跑它就是断点续跑**：识别中有书就续跑（subagent 路线输出领批任务卡后停，等你派子代理；pull/aivision 路线自动跑完）；没有书就从 `待识别/` 取下一本；识别完的书自动走完 qa→reocr→proofread→chapters→pack→done，成品进 `已识别/<书名>/`。
+   - `auto --peek` 只报告两边书况不动手；`auto --book 书名` 点名续跑某本。
+   - auto 停在「章界疑点待裁决」时：读任务卡派裁决子代理 → `chapters --apply` → 再跑 `auto` 继续归档。
+3. 归档后的书：`status <书名>`、`proofread <书名> --pages …` 等命令照常用（程序自动认 `已识别/<书名>/工程/`）。
+
+单本书手动流程（下节）在 auto 内部就是同一套命令——手动跑同样有效，两不冲突。
+
 ## 标准流程
 
 1. **问清素材**：老板给 PDF 路径，书名默认用文件名。
@@ -97,12 +109,14 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
    产出 `jobs/<书名>/output/` 下三件：`书名.txt`（头部带章界元数据块——App 识别到即按电脑侧章表直入）、`书名_插图版.pdf`（没装 reportlab 则跳过）、**`导入这个_书名_Kit图包.zip`（手机导入就传它——文件名以「导入这个」开头的 zip 就是它**：kit.json 章表+图清单 + book.txt + 裁好的真图，App 一个文件直入、阅读页图文混排）。忘跑 chapters 会被拦（或 `pack --auto-chapters` 一条龙）；图版页没 patch 也会被拦（先 `patch`，确要占位打包加 `--force`）。
 9. **汇报**（人话，给老板）：总页数、总字数、图张数（含 figure-desc 补语义情况）、**章数与疑点裁决情况**、产出文件完整路径、一句「微信传 zip 图包到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章、插图原位显示」。附 token 粗账（pull 批零消耗；figure-desc 走识图 API、每图一次小图调用；aivision 批 10 页约 23 秒；子代理批约 50 万 token/10 页）。
 
-## 断点续转（会话中断/换会话/换 agent）
+## 断点续转（会话中断/换会话/换 agent/额度用完明天再战）
 
 ```
-python bookocr-kit/bookocr.py status <书名>
+python bookocr.py auto --peek        # 看识别中/待识别各有几本书、进行到哪
+python bookocr.py status <书名>      # 单本书细看：流水线 识别→校对→切章→打包 哪步没跑
 ```
-看进度 → 从对应步骤继续（转写循环 / 切章裁决 / 打包）。done 的批不重转，chapters 裁决持久在台账。**新会话先 status，别重 init。**
+- 续跑首选 `python bookocr.py auto`——台账状态机从断点接着来，done 的批、章节裁决、校对账都不重来。**新会话先 auto --peek，别重 init。**
+- 单本细修用标准流程的对应命令（书归档进 已识别/ 后命令照常认）。
 
 ## 故障处理
 
@@ -117,6 +131,9 @@ python bookocr-kit/bookocr.py status <书名>
 | qa 高分页越修越多 | 先看报告里是「图示区」还是「断段」：图示区/表格页交给 reocr；索引/目录页少数短行不算错，别追着 100% 修 |
 | chapters 疑点越裁越多 | 停：把疑点清单列给老板（多半目录页本身识别烂，或该书分册重编号） |
 | pack 报「还没切章」 | 先跑 chapters，或直接 pack --auto-chapters |
+| pack 报「还有 N 页没过智能校对」 | 防漏步闸门：先 `proofread <书名> --all` 再 pack；老工程确认校对过才用 --force |
+| auto 停在「章界疑点待裁决」 | 派裁决子代理读 chapters_review_task.txt → 写裁决 → chapters --apply → 重跑 auto |
+| 磁盘紧张（页图几百 MB） | `clean <书名> --apply` 删页图；归档 done 本来就会清 |
 
 ## 换电脑 / 换 agent
 

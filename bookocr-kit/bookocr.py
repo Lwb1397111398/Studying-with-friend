@@ -3,23 +3,36 @@
 """
 bookocr — 扫描版 PDF → txt / 插图版 PDF 识别台（agent 驱动，操作手册见 SKILL.md）
 
+三个工作目录（kit 目录下，名字可在 config.json 覆盖）：
+  待识别/  老板把扫描版 PDF 丢进来——auto/scan 从这里取书
+  识别中/  每本书一个识别工程（manifest.json 单文件状态机，断点续跑，换 agent 接着跑）
+  已识别/  打包归档完成的书（每书一个文件夹：成品三件套 + 原书 PDF + 工程/）
+
 子命令：
+  scan                                                         登记 待识别/ 里的全部 PDF（建工程+渲染），不开始识别
+  auto  [--book 书名] [--peek]                                 调度器：识别中有书就续跑，没有就从 待识别/ 取下一本；
+                                                               识别完自动 质检→校对→切章→打包→归档（需要 agent 派批时停）
   init   <书名> --src <PDF路径> [--batch 10] [--dpi 200] [--color]   建识别工程（直接建批，免渲染）
-  prep   <书名或工程路径> [--pages 521-530]                          渲染页图（可只渲染指定页）
+  prep   <书名或工程路径> [--pages 521-530]                          渲染页图（多进程并发）
   pull   <书名或工程路径> [--min 100]                                文字层拔取：自带文字层的书免视觉识别（分钟级）
   aivision <书名或工程路径> [--batch 批号] [--workers 4]              直连视觉 API 并发识图（绕开子代理并发限制，需 apis.json 或本机档案库）
   patch  <书名或工程路径> [--batch 批号]                              图版页任务卡：派视觉只补这几页的图描述
   figure-desc <书名或工程路径> [--workers 5] [--dry-run]             pull 图补语义：按 rect 裁小图→视觉 API 逐图补 title/desc/kind
   next   <书名或工程路径>                                            领下一批（输出子代理任务卡）
-  check  <书名或工程路径> <批号> [--force] [--min 100]               质检一批
+  check  <书名或工程路径> <批号> [--force] [--min 100]               质检一批（含跨页断段预警）
   retry  <书名或工程路径> <批号|--all-failed>                        重置一批待重转
+  qa     <书名或工程路径> [--fix] [--top 40]                         逐页体检；--fix 直接重识别可疑页
+  reocr  <书名或工程路径> --pages … [--exact]                        按页视觉重识别（修坏页）
+  proofread <书名或工程路径> --all                                   两层智能校对（写完成度台账，pack 前必跑）
   chapters <书名或工程路径> [--apply 裁决文件] [--no-review]          全书切章 + 目录对账（疑点出裁决任务卡）
-  status <书名或工程路径>                                            进度一览
+  status <书名或工程路径>                                            进度一览（含流水线四步完成度）
   pack   <书名或工程路径> [--no-pdf] [--force]                       打包 txt / 插图版 PDF / KIT 图包 zip（App 直入图文混排）
+  clean  <书名或工程路径> [--apply]                                  删页图释放磁盘（先报大小；重识别前 prep 会自动补渲染）
+  done   <书名或工程路径> [--force]                                  归档：未打包先打包 → 清页图 → 移入 已识别/<书名>/
 
 全局设置读 kit 目录 config.json（route 路线 / pages_per_batch / dpi / aivision_workers /
 chapter_review / output），init 时快照进台账；缺省值见 DEFAULT_CONFIG。
-台账在 jobs/<书名>/manifest.json（单文件状态机），所有命令可随时中断重跑。
+台账在 识别中/<书名>/manifest.json（单文件状态机），所有命令可随时中断重跑。
 设计要点：正文永远只落文件（batches/），台账里只存统计数字，不存正文。
 """
 from __future__ import annotations
@@ -29,15 +42,16 @@ import bisect
 import difflib
 import json
 import msvcrt
+import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-KIT = Path(__file__).resolve().parent
-JOBS = KIT / "jobs"
+from kitpaths import KIT, JOBS, INBOX, DONE, migrate_legacy_jobs, ensure_dirs
 
 
 # ---------------------------------------------------------------- 全局设置
@@ -119,7 +133,11 @@ def resolve_job(name_or_path: str) -> Path:
     cand = JOBS / name_or_path
     if cand.is_dir():
         return cand
-    die(f"找不到识别工程「{name_or_path}」（既不是目录，也不在 {JOBS} 下）")
+    # 归档工程也认（已识别/<书名>/工程/）：旧书重校对、重打包用
+    cand = DONE / name_or_path / "工程"
+    if cand.is_dir() and (cand / "manifest.json").exists():
+        return cand
+    die(f"找不到识别工程「{name_or_path}」（不在 {JOBS.name}/，也不在 {DONE.name}/<书名>/工程/ 下）")
 
 
 def load_manifest(job: Path) -> dict:
@@ -170,8 +188,9 @@ def batch_dir(job: Path) -> Path:
 
 # ---------------------------------------------------------------- init
 
-def cmd_init(a: argparse.Namespace) -> None:
-    src = Path(a.src).resolve()
+def _init_job(name: str, src: Path, batch: int | None, dpi: int | None, color: bool) -> tuple[Path, dict]:
+    """建识别工程（cmd_init / cmd_scan / cmd_auto 共用）。die 的错误由调用方决定是否捕获。"""
+    src = Path(src).resolve()
     if not src.exists():
         die(f"PDF 不存在：{src}")
     fitz = load_fit()
@@ -185,10 +204,10 @@ def cmd_init(a: argparse.Namespace) -> None:
         die("这个 PDF 没有页面")
 
     cfg = load_config()
-    bs = a.batch if a.batch is not None else cfg["pages_per_batch"]
-    dpi = a.dpi if a.dpi is not None else cfg["dpi"]
+    bs = batch if batch is not None else cfg["pages_per_batch"]
+    dpi = dpi if dpi is not None else cfg["dpi"]
 
-    name = re.sub(r'[\\/:*?"<>|]', "_", a.name).strip() or "未命名"
+    name = re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "未命名"
     job = JOBS / name
     if job.exists():
         die(f"工程已存在：{job}（换个书名，或删掉旧工程重来）")
@@ -200,7 +219,7 @@ def cmd_init(a: argparse.Namespace) -> None:
         "name": name,
         "src_pdf": str(src),
         "dpi": dpi,
-        "color": a.color,
+        "color": color,
         "batch_size": bs,
         "min_chars_per_page": 100,
         "spec": str(KIT / "spec.md"),
@@ -226,16 +245,48 @@ def cmd_init(a: argparse.Namespace) -> None:
     save_manifest(job, m)
     out(f"[ok] 工程 {job}")
     out(f"     书名「{name}」 PDF {src}（{npages} 页） dpi={dpi} 每批 {bs} 页 → 共 {len(m['batches'])} 批 路线={cfg['route']}")
+    return job, m
+
+
+def cmd_init(a: argparse.Namespace) -> None:
+    _job, _m = _init_job(a.name, Path(a.src), a.batch, a.dpi, a.color)
     tips = {
         "subagent": "下一步（AI 逐页看）：prep 渲染页图 → next 领批 → 派子代理看图转写",
         "aivision": "下一步（AI 逐页看·API 直连）：prep 渲染页图 → aivision 并发识别",
         "pull-first": "下一步（高效模式）：先 pull 试文字层拔取（分钟级），拔不动的批再走视觉",
         "pull-only": "下一步（只拔文字层）：pull；拔不动的批会标出来，由调度 agent 决定",
     }
-    out(tips[cfg["route"]])
+    out(tips[(_m["config"] or {}).get("route", "subagent")])
 
 
 # ---------------------------------------------------------------- prep
+
+def _render_span(task: tuple) -> tuple[list[int], list[tuple[int, str]]]:
+    """渲染子进程：独立打开 PDF 渲染一段页号。返回 (成功页号, [(页号, 错误摘要)])。
+    页级 try：单页失败不拖垮整段；错误摘要必须转 str——fitz 异常内嵌 swig 句柄，
+    原样跨进程 pickle 会炸掉整个 worker 的返回（实测 cannot pickle SwigPyObject）。"""
+    src, dpi, gray, outdir, mapping = task
+    try:
+        import pymupdf as _f
+    except ImportError:
+        import fitz as _f
+    doc = _f.open(src)
+    ok: list[int] = []
+    fails: list[tuple[int, str]] = []
+    for n, rel in sorted(mapping.items()):
+        try:
+            dst = Path(outdir) / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)  # clean/外部删除 images/ 后自动重建
+            pix = doc[n - 1].get_pixmap(dpi=dpi)
+            if gray and pix.colorspace and pix.colorspace.n > 1:
+                pix = _f.Pixmap(_f.csGRAY, pix)
+            pix.save(str(dst))
+            ok.append(n)
+        except Exception as e:
+            fails.append((n, f"{type(e).__name__}: {str(e)[:120]}"))
+    doc.close()
+    return ok, fails
+
 
 def _parse_pages_arg(s: str, npages: int) -> list[int]:
     """解析 '521-530,12' 形式的页参数为页号列表。"""
@@ -284,16 +335,41 @@ def cmd_prep(a: argparse.Namespace) -> None:
         out(f"[ok] 目标 {len(want)} 页均已渲染过，跳过（重复跑安全）")
         return
     dpi, gray = m["dpi"], not m["color"]
-    for k, n in enumerate(todo, 1):
-        page = doc[n - 1]
-        pix = page.get_pixmap(dpi=dpi)
-        if gray and pix.colorspace and pix.colorspace.n > 1:
-            pix = fitz.Pixmap(fitz.csGRAY, pix)
-        pix.save(str(job / m["pages"][n - 1]["image"]))
-        m["rendered"].append(n)
-        if k % 20 == 0 or k == len(todo):
-            out(f"  渲染 {k}/{len(todo)}")
-    doc.close()
+    # 多进程渲染：PyMuPDF 非线程安全（GIL 内竞争 doc 句柄），用进程隔离，每进程独立开 PDF。
+    # 页数少（<8）不值得付 spawn 开销，仍走串行。
+    nproc = min(4, os.cpu_count() or 1, len(todo))
+    if nproc > 1 and len(todo) >= 8:
+        doc.close()  # 子进程各自开，主进程这份用不上了
+        import concurrent.futures as futures
+        spans = [todo[i::nproc] for i in range(nproc)]
+        tasks = [(m["src_pdf"], dpi, gray, str(job), {n: m["pages"][n - 1]["image"] for n in span})
+                 for span in spans if span]
+        rendered_ok: list[int] = []
+        with futures.ProcessPoolExecutor(max_workers=nproc) as ex:
+            futs = {ex.submit(_render_span, t): t for t in tasks}
+            for fu in futures.as_completed(futs):
+                span_first = sorted(futs[fu][4])[0]
+                try:
+                    got, bad = fu.result()
+                except Exception as e:
+                    out(f"  [警告] 一段渲染失败（p{span_first} 起）：{type(e).__name__}: {str(e)[:80]}（下次 prep 自动补）")
+                    continue
+                rendered_ok.extend(got)
+                for n, err in bad:
+                    out(f"  [警告] p{n} 渲染失败：{err}（下次 prep 自动补）")
+                out(f"  渲染完成 {len(rendered_ok)}/{len(todo)}")
+        m["rendered"] = sorted(set(m.get("rendered") or []) | set(rendered_ok))
+    else:
+        for k, n in enumerate(todo, 1):
+            page = doc[n - 1]
+            pix = page.get_pixmap(dpi=dpi)
+            if gray and pix.colorspace and pix.colorspace.n > 1:
+                pix = fitz.Pixmap(fitz.csGRAY, pix)
+            pix.save(str(job / m["pages"][n - 1]["image"]))
+            m["rendered"].append(n)
+            if k % 20 == 0 or k == len(todo):
+                out(f"  渲染 {k}/{len(todo)}")
+        doc.close()
     save_manifest(job, m)
     out(f"[ok] 本次渲染 {len(todo)} 页（累计 {len(m['rendered'])}/{len(m['pages'])}）")
     out("下一步：pull 若已全 done 可直接 pack；否则 next 领批/aivision/patch 走视觉")
@@ -1644,6 +1720,34 @@ def read_text(p: Path) -> str:
     return p.read_text(encoding="utf-8-sig") if p.exists() else ""
 
 
+def _check_stitch_hints(job: Path, m: dict, bid: str) -> None:
+    """质检通过后的跨页衔接体检（只报告不写盘）：本批内各页界 + 与前一批（若已 done）
+    的交界处，用 stitch 同款四重护栏判据找「疑似被页界切断的段落」。
+    收尾 chapters 会自动缝合；这里在识别过程中就提前暴露，不用等全书转完才发现。"""
+    try:
+        import stitch
+    except Exception:
+        return
+    bids = [k for k in sorted(m["batches"]) if m["batches"][k]["status"] == "done"]
+    scope = bids[-2:]  # 本批（刚置 done）+ 紧邻前一批：覆盖批内各页界与两批交界
+    allp: dict[int, list[str]] = {}
+    for k in scope:
+        allp.update(stitch.split_pages(read_text(job / m["batches"][k]["body"])))
+    hints = []
+    for p in sorted(allp):
+        if p + 1 not in allp:
+            continue
+        pa, pb = allp[p], allp[p + 1]
+        if not pa or not pb:
+            continue
+        if stitch.merge_candidate(pa[-1], pb[0]):
+            hints.append((p, pa[-1][-14:], pb[0][:14]))
+    if hints:
+        out(f"  [衔接] 疑似跨页断段 {len(hints)} 处（收尾 chapters 自动缝合；若属漏句请让子代理补转）：")
+        for p, ta, tb in hints[:5]:
+            out(f"    页{p}→{p + 1}: …{ta}｜{tb}…")
+
+
 def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
     # m 可选共享台账：调用方（pull 循环）传入时直接在其上改状态并落盘，
     # 避免内部另开副本、下一轮被调用方的旧台账把 done 覆盖回 assigned
@@ -1788,6 +1892,7 @@ def cmd_check(a: argparse.Namespace, m: dict | None = None) -> None:
     b["stats"] = {"chars": chars, "notes": n_notes, "figures": len(figs)}
     save_manifest(job, m)
     out(f"[ok] {bid} 质检通过：正文 {chars} 字（页均 {per_page:.0f}） 脚注 {n_notes} 条 图 {len(figs)} 张")
+    _check_stitch_hints(job, m, bid)
 
 
 def normalize_bid(m: dict, s: str) -> str:
@@ -1818,7 +1923,7 @@ def cmd_retry(a: argparse.Namespace) -> None:
 
 def cmd_qa(a: argparse.Namespace) -> None:
     """逐页质量体检：揪出 OCR 文字层烂页（图示乱码/系统性误字/引号乱序），
-    产出 qa_report.json + qa_report.md。只读正文与 PDF，不改批文件。"""
+    产出 qa_report.json + qa_report.md。--fix 时顺手重识别可疑页（会改批文件）。"""
     job = resolve_job(a.job)
     m = load_manifest(job)
     book, _ = collect_book(job, m)
@@ -1881,12 +1986,21 @@ def cmd_qa(a: argparse.Namespace) -> None:
     rp_md = job / "qa_report.md"
     rp_md.write_text("\n".join(md) + "\n", encoding="utf-8")
     out(f"[ok] 报告 → {rp_md}")
+    route = (m.get("config") or {}).get("route", "subagent")
     if bad_pages:
         pages = sorted(r["page"] for r in recs if r["score"] >= 6)
-        exact = " --exact" if m.get("route") == "pull" else ""
+        exact = " --exact" if route.startswith("pull") else ""
         out(f"    建议：python bookocr.py reocr {job.name}{exact} --pages "
             f"{','.join(str(x) for x in pages[:80])}"
             + (f"（共 {len(pages)} 页，超出部分见 qa_report.json）" if len(pages) > 80 else ""))
+        if getattr(a, "fix", False):
+            out(f"[i] --fix：自动重识别以上 {len(pages)} 页（视觉 API，pull 书只动点名页）…")
+            cmd_reocr(argparse.Namespace(job=job.name, pages=",".join(map(str, pages)),
+                                         batch=None, all=False, needs_vision=False,
+                                         exact=route.startswith("pull"), workers=None,
+                                         force=False, min=100, no_backup=False))
+    elif getattr(a, "fix", False):
+        out("[i] --fix：没有可疑页，无需修复")
 
 
 def cmd_status(a: argparse.Namespace) -> None:
@@ -1907,13 +2021,22 @@ def cmd_status(a: argparse.Namespace) -> None:
         tail = f" {s['chars']}字/{s['figures']}图" if s else (f" ✗ {b['fail_reason']}" if b["fail_reason"] else "")
         mark = {"done": "✓", "assigned": "…", "pending": "·", "failed": "✗"}[b["status"]]
         out(f"  {mark} {bid} p{b['pages'][0]}–{b['pages'][-1]}{tail}")
-    ch = m.get("chapters")
-    if ch:
-        extra = f"切章 {len(ch)} 章"
-        if m.get("chapter_review_pending"):
-            extra += f"（{len(m.get('chapter_warnings') or [])} 疑点待裁决）"
-        extra += " | 已打包" if m.get("packed") else " | 未打包"
-        out(f"  ◆ {extra}")
+    # 流水线四步完成度（识别→校对→切章→打包），漏哪步一目了然
+    pr = m.get("proofread")
+    if pr:
+        pr_txt = f"校对✓({pr.get('fixed', 0)}处修复)"
+    elif (job / "proofread" / "changes.json").exists():
+        pr_txt = "校对✓(旧账)"  # 老版校对只落盘 changes.json、没写台账的工程
+    else:
+        pr_txt = "校对✗"
+    if m.get("chapters"):
+        w = f"，{len(m.get('chapter_warnings') or [])} 疑点待裁决" if m.get("chapter_review_pending") else ""
+        ch_txt = f"切章✓({len(m['chapters'])}章{w})"
+    else:
+        ch_txt = "切章✗"
+    pk_txt = "打包✓" if m.get("packed") else "打包✗"
+    out(f"  ◆ 流水线：识别 {cnt['done']}/{len(m['batches'])} → {pr_txt} → {ch_txt} → {pk_txt}"
+        + ("（✗=还没跑，按序补）" if "✗" in (pr_txt + ch_txt + pk_txt) else ""))
 
 
 # ---------------------------------------------------------------- chapters（全书切章 + 目录对账）
@@ -2275,6 +2398,17 @@ def split_pages(text: str) -> dict[int, list[str]]:
     return pages
 
 
+def _proofread_coverage(job: Path, m: dict) -> tuple[bool, int]:
+    """校对完成度：proofread 台账页集是否覆盖全部 done 批页。返回 (覆盖?, 未覆盖页数)。
+    旧工程兼容：老版校对只落盘 proofread/changes.json、不写台账——存在即视为已校对。"""
+    pr = m.get("proofread")
+    if pr is None:
+        return (job / "proofread" / "changes.json").exists(), 0
+    done_pages = {p for b in m["batches"].values() if b["status"] == "done" for p in b["pages"]}
+    missing = done_pages - set(pr.get("pages") or [])
+    return not missing, len(missing)
+
+
 def cmd_pack(a: argparse.Namespace) -> None:
     job = resolve_job(a.job)
     m = load_manifest(job)
@@ -2303,6 +2437,12 @@ def cmd_pack(a: argparse.Namespace) -> None:
         pages = sorted({f["page"] for f in placeholder_figs})
         die(f"有 {len(placeholder_figs)} 张图还没补语义（第 {pages[:8]}{'…' if len(pages) > 8 else ''} 页）："
             f"先跑 figure-desc {a.job}，再 pack；确要带「第N页插图」占位打包加 --force")
+    # 校对闸门：识别完的页必须过智能校对（规则层+AI 层）——防「识别完直接打包」的老管线直出
+    #（《民法物权》教训：10-24 识别完直接 pack，校对/章裁决全跳过，没人拦）
+    ok_pr, n_missing = _proofread_coverage(job, m)
+    if not ok_pr and not a.force:
+        die(f"还有 {n_missing} 页没过智能校对：先跑 python bookocr.py proofread {a.job} --all，再 pack；"
+            f"老工程确认校对过、只想补打包可加 --force")
 
     if not m.get("chapters") and not a.no_chapters:
         if a.auto_chapters:
@@ -2700,9 +2840,266 @@ def _cmd_proofread_bridge(a: argparse.Namespace) -> None:
     proofread.cmd_proofread(a)
 
 
+# ------------------------------------------------- 三文件夹调度（scan / auto / done / clean）
+
+def _inbox_pdfs() -> list[Path]:
+    return sorted(p for p in INBOX.glob("*.pdf") if p.is_file())
+
+
+def _job_states() -> list[tuple[Path, dict]]:
+    """识别中/ 的全部用户工程（_ 开头的测试/探针工程不算），按书名序。"""
+    jobs: list[tuple[Path, dict]] = []
+    if JOBS.is_dir():
+        for d in sorted(JOBS.iterdir()):
+            if d.is_dir() and not d.name.startswith("_") and (d / "manifest.json").exists():
+                try:
+                    jobs.append((d, load_manifest(d)))
+                except (json.JSONDecodeError, OSError) as e:
+                    out(f"  [警告] 「{d.name}」台账读不了（{e}），跳过")
+    return jobs
+
+
+def _undone_count(m: dict) -> int:
+    return sum(1 for b in m["batches"].values() if b["status"] != "done")
+
+
+def cmd_scan(a: argparse.Namespace) -> None:
+    """登记 待识别/ 里全部 PDF：逐本建工程 + 渲染页图（pull-only 路线免渲染）。不开始识别。"""
+    ensure_dirs()
+    pdfs = _inbox_pdfs()
+    if not pdfs:
+        out(f"[ok] 待识别文件夹（{INBOX.name}/）里没有 PDF——把扫描版 PDF 放进来再跑")
+        return
+    pull_only = load_config()["route"] == "pull-only"
+    registered, skipped = [], 0
+    for pdf in pdfs:
+        if (JOBS / pdf.stem).exists():
+            skipped += 1
+            out(f"  · 「{pdf.stem}」已有工程，跳过")
+            continue
+        try:
+            _init_job(pdf.stem, pdf, None, None, a.color)
+        except SystemExit:
+            out(f"  · 「{pdf.stem}」登记失败（见上方错误），跳过")
+            continue
+        if not pull_only:
+            cmd_prep(argparse.Namespace(job=pdf.stem, pages=None))
+        registered.append(pdf.stem)
+    out(f"[ok] 新登记 {len(registered)} 本：{'、'.join(registered) if registered else '(无)'}"
+        + (f"；跳过已有工程 {skipped} 本" if skipped else ""))
+    out("下一步：python bookocr.py auto —— 自动从第一本开始识别")
+
+
+def _finish_pipeline(job: Path, m: dict, a: argparse.Namespace) -> None:
+    """识别全 done 后的自动链：qa→reocr 修坏页 → proofread → chapters → pack → done。
+    任何闸门不过就停下汇报，下次 auto 从台账状态机接着来（全程幂等）。"""
+    name = job.name
+    if _undone_count(m):
+        out(f"[!] 「{name}」还有 {_undone_count(m)} 批未完成，自动链暂停——处理完再跑 auto")
+        return
+    import proofread as pf_mod
+    out("[i] 流水线 1/5：qa 逐页体检（--fix 自动修坏页）…")
+    cmd_qa(argparse.Namespace(job=name, pages=None, top=20, fix=True))
+    m = load_manifest(job)
+    if _undone_count(m):
+        out(f"[!] qa/reocr 后仍有 {_undone_count(m)} 批未完成，自动链暂停（看上方失败原因）")
+        return
+    out("[i] 流水线 2/5：proofread 两层智能校对（无 API 自动降级规则层）…")
+    pf_mod.cmd_proofread(argparse.Namespace(job=name, pages=None, batch=None, all=True,
+                                            rules_only=False, no_ai=False, vision=False,
+                                            dry_run=False, workers=3, no_backup=False), None)
+    m = load_manifest(job)
+    nv = sorted({p for b in m["batches"].values() for p in (b.get("needs_vision") or [])})
+    if nv:
+        out(f"[i] 校对标记 {len(nv)} 页需视觉复核，自动 reocr …")
+        cmd_reocr(argparse.Namespace(job=name, pages=",".join(map(str, nv)), batch=None,
+                                     all=False, needs_vision=False, exact=False,
+                                     workers=None, force=False, min=100, no_backup=False))
+        m = load_manifest(job)
+        # 重识别的页内容已换新，把这些页的校对账清掉，点名补一轮校对
+        pr = m.get("proofread") or {}
+        pr["pages"] = sorted(set(pr.get("pages") or []) - set(nv))
+        m["proofread"] = pr
+        save_manifest(job, m)
+        pf_mod.cmd_proofread(argparse.Namespace(job=name, pages=",".join(map(str, nv)),
+                                                batch=None, all=False, rules_only=False,
+                                                no_ai=False, vision=False, dry_run=False,
+                                                workers=3, no_backup=False), None)
+        m = load_manifest(job)
+    out("[i] 流水线 3/5：chapters 切章对账（自动跨页缝合）…")
+    cmd_chapters(argparse.Namespace(job=name, apply=None, no_review=False))
+    m = load_manifest(job)
+    if m.get("chapter_review_pending"):
+        out(f"[!] 章界疑点 {len(m.get('chapter_warnings') or [])} 条待裁决：读 {job / 'chapters_review_task.txt'}"
+            f"→ 裁决写 chapters_review.txt → chapters {name} --apply …，然后重跑 auto 继续归档")
+        return
+    out("[i] 流水线 4/5：pack 打包三件套 …")
+    cmd_pack(argparse.Namespace(job=name, no_pdf=False, force=False, auto_chapters=True, no_chapters=False))
+    out("[i] 流水线 5/5：done 归档到 已识别/ …")
+    cmd_done(argparse.Namespace(job=name, force=False))
+
+
+def _advance(job: Path, m: dict, a: argparse.Namespace) -> None:
+    """把一本书推进到下一个需要人的点（subagent 派批）或走完自动链。"""
+    route = (m.get("config") or {}).get("route", "subagent")
+    failed = [k for k, v in m["batches"].items() if v["status"] == "failed"]
+    if failed:
+        out(f"[i] {len(failed)} 批失败，先重置：{failed[:5]}{'…' if len(failed) > 5 else ''}")
+        cmd_retry(argparse.Namespace(job=job.name, batch=None, all_failed=True))
+        m = load_manifest(job)
+    undone = [k for k, v in m["batches"].items() if v["status"] == "pending"]
+    if undone or _undone_count(m):
+        if route in ("pull-first", "pull-only"):
+            out("[i] 高效路线：自动拔取文字层（分钟级、零 AI 费用）…")
+            cmd_pull(argparse.Namespace(job=job.name, force=False, min=100))
+            _finish_pipeline(job, load_manifest(job), a)
+        elif route == "aivision":
+            out("[i] 视觉 API 直连路线：并发识图 …")
+            cmd_aivision(argparse.Namespace(job=job.name, batch=None, workers=None, force=False, min=100))
+            _finish_pipeline(job, load_manifest(job), a)
+        else:  # subagent：AI 看图必须 agent 派批，输出任务卡就停
+            assigned = [k for k, v in m["batches"].items() if v["status"] == "assigned"]
+            if assigned:
+                out(f"[i] 「{job.name}」有 {len(assigned)} 批已派出待写待检（{assigned[:5]}…）。")
+                out(f"    子代理写完批文件后跑：python check_ready.py {job.name}（幂等批量质检）")
+            else:
+                out(f"[i] 「{job.name}」待识别 {len(undone)} 批——子代理路线需要 AI 看图，领批开始：")
+                cmd_next(argparse.Namespace(job=job.name))
+                out(f"    （批量领批更高效：python dispatch.py {job.name} 3 ——领 3 批各生成一张任务卡）")
+        return
+    _finish_pipeline(job, m, a)
+
+
+def cmd_auto(a: argparse.Namespace) -> None:
+    """调度器：识别中有书就续跑（断点接续，换 agent/换电脑不重头来），没有就从
+    待识别/ 取下一本；识别完自动走完 校对→切章→打包→归档。--peek 只报告不动手。"""
+    ensure_dirs()
+    if a.peek:
+        for d, m in _job_states():
+            st = (f"识别中（{_undone_count(m)} 批未完成）" if _undone_count(m)
+                  else "已打包待归档" if m.get("packed") else "识别完待校对/打包")
+            out(f"  · {d.name}：{st}")
+        pdfs = _inbox_pdfs()
+        out(f"待识别：{len(pdfs)} 本" + (f"，下一本「{pdfs[0].stem}」" if pdfs else "（空）"))
+        return
+    # 上次在归档前中断的（已打包还在识别中/）：先归档
+    for d, m in _job_states():
+        if m.get("packed"):
+            out(f"[i] 「{d.name}」已打包，先归档 …")
+            cmd_done(argparse.Namespace(job=d.name, force=False))
+    states = _job_states()
+    if a.book:
+        target = next(((d, m) for d, m in states if d.name == a.book), None)
+        if target is None:
+            die(f"识别中没有这本书：{a.book}")
+    else:
+        target = next(((d, m) for d, m in states if _undone_count(m)), None)
+    if target:
+        out(f"[i] 续跑识别中的书：「{target[0].name}」")
+        _advance(target[0], target[1], a)
+        return
+    pdfs = _inbox_pdfs()
+    if not pdfs:
+        out("[ok] 识别中没有进行中的书、待识别也没有 PDF——没有可做的活")
+        return
+    pdf = pdfs[0]
+    out(f"[i] 待识别没有进行中的书，从 待识别/ 取新书：「{pdf.stem}」")
+    job, _m = _init_job(pdf.stem, pdf, None, None, False)
+    if load_config()["route"] != "pull-only":
+        cmd_prep(argparse.Namespace(job=job.name, pages=None))
+    _advance(job, load_manifest(job), a)
+
+
+def cmd_done(a: argparse.Namespace) -> None:
+    """归档：未打包先补打包 → 清页图 → 工程整体移入 已识别/<书名>/（成品拍平在根部）。"""
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    if m.get("chapter_review_pending") and not a.force:
+        die(f"章界疑点 {len(m.get('chapter_warnings') or [])} 条待裁决——先裁决 --apply（成品章表要对得上网点）；"
+            f"确认带着疑点归档加 --force")
+    if not m.get("packed"):
+        out("[i] 还没打包，先 pack …")
+        cmd_pack(argparse.Namespace(job=job.name, no_pdf=False, force=bool(a.force),
+                                    auto_chapters=True, no_chapters=False))
+        m = load_manifest(job)
+    imgs = job / "images"
+    if imgs.is_dir():
+        freed = sum(f.stat().st_size for f in imgs.rglob("*") if f.is_file())
+        shutil.rmtree(imgs)
+        m["rendered"] = []
+        out(f"[i] 已清页图，释放 {freed / 1e6:.1f} MB（要重识别先 prep --pages 补渲染）")
+    dest = DONE / m["name"]
+    if dest.exists():
+        die(f"归档目标已存在：{dest}（先处理旧文件夹，或改书名）")
+    dest.mkdir(parents=True)
+    # 原 PDF 跟书走：在 待识别/ 里就移动（源头已不需要），别处的拷贝一份
+    src = Path(m["src_pdf"])
+    if src.exists() and src.resolve().parent == INBOX.resolve():
+        shutil.move(str(src), str(dest / src.name))
+        m["src_pdf"] = str(dest / src.name)
+    elif src.exists():
+        shutil.copy2(src, dest / src.name)
+        m["src_pdf"] = str(dest / src.name)
+    else:
+        out(f"[警告] 原 PDF 已不在（{src}）：成品照常归档，但以后重识别/重打包没有原图可用")
+    m["archived"] = time.strftime("%Y-%m-%d %H:%M")
+    save_manifest(job, m)
+    eng = dest / "工程"
+    shutil.move(str(job), str(eng))
+    for f in sorted((eng / "output").iterdir()):
+        shutil.move(str(f), str(dest / f.name))
+    (eng / "output").rmdir()
+    out(f"[ok] 已归档：{dest}")
+    out("     成品在文件夹根部（txt / 插图版 PDF / 导这个_*Kit图包.zip / 抽检报告），原书 PDF 与 工程/ 也都在")
+
+
+def cmd_clean(a: argparse.Namespace) -> None:
+    """删页图释放磁盘：缺省只报大小（dry），--apply 才删。
+    页图只服务识别阶段的看图（pack 裁图现场从原 PDF 渲染），正文/台账/成品/裁图全保留。"""
+    job = resolve_job(a.job)
+    m = load_manifest(job)
+    imgs = job / "images"
+    if not imgs.is_dir():
+        out("[ok] 没有页图目录（pull 懒渲染路线本来就不渲染）")
+        return
+    files = [f for f in imgs.rglob("*") if f.is_file()]
+    if not files:
+        imgs.rmdir()
+        out("[ok] 页图目录已空，顺手删掉")
+        return
+    size = sum(f.stat().st_size for f in files)
+    if not a.apply:
+        out(f"[i] 页图 {len(files)} 张，共 {size / 1e6:.1f} MB。加 --apply 删除"
+            f"（正文/台账/成品/裁图不动；以后重识别前 prep --pages 会自动补渲染）")
+        return
+    shutil.rmtree(imgs)
+    m["rendered"] = []  # 台账同步重置：prep 才会知道页图没了、重新渲染
+    save_manifest(job, m)
+    out(f"[ok] 已删页图 {len(files)} 张，释放 {size / 1e6:.1f} MB（台账 rendered 已重置，prep 可重新渲染）")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="扫描版 PDF 识别台（agent 驱动）")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("scan", help="登记 待识别/ 里全部 PDF（建工程+渲染），不开始识别")
+    p.add_argument("--color", action="store_true")
+    p.set_defaults(fn=cmd_scan)
+
+    p = sub.add_parser("auto", help="调度器：识别中有书续跑、没有就取 待识别/ 下一本；识别完自动校对→切章→打包→归档")
+    p.add_argument("--book", default=None, help="点名续跑识别中的某本书")
+    p.add_argument("--peek", action="store_true", help="只报告两边各有几本书，不动手")
+    p.set_defaults(fn=cmd_auto)
+
+    p = sub.add_parser("done", help="归档：未打包先补打包 → 清页图 → 移入 已识别/<书名>/")
+    p.add_argument("job")
+    p.add_argument("--force", action="store_true", help="带章界疑点也归档")
+    p.set_defaults(fn=cmd_done)
+
+    p = sub.add_parser("clean", help="删页图释放磁盘（缺省只报大小，--apply 才删）")
+    p.add_argument("job")
+    p.add_argument("--apply", action="store_true", help="真删（缺省 dry 只报大小）")
+    p.set_defaults(fn=cmd_clean)
 
     p = sub.add_parser("init")
     p.add_argument("name")
@@ -2758,6 +3155,7 @@ def main() -> None:
     p.add_argument("job")
     p.add_argument("--pages", default=None, help="只查指定页，如 31,100-120（缺省=全书）")
     p.add_argument("--top", type=int, default=40, help="打印最可疑的前 N 页（默认 40）")
+    p.add_argument("--fix", action="store_true", help="体检后直接重识别可疑页（视觉 API，先打印页清单再动手）")
     p.set_defaults(fn=cmd_qa)
 
     p = sub.add_parser("reocr")
@@ -2814,6 +3212,10 @@ def main() -> None:
     a = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    _migrated = migrate_legacy_jobs()
+    ensure_dirs()
+    if _migrated:
+        out(f"[i] {_migrated}")
     if a.cmd == "status":  # 只读命令不占锁
         a.fn(a)
     else:
