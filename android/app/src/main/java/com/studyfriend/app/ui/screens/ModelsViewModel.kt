@@ -7,6 +7,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyfriend.app.StudyApp
+import com.studyfriend.app.data.LlmAssign
+import com.studyfriend.app.data.LlmProfile
+import com.studyfriend.app.data.LlmRole
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
@@ -15,51 +18,63 @@ import com.studyfriend.app.data.ai.ChatRequest
 import com.studyfriend.app.data.importer.ocr.OcrModelDownloader
 import com.studyfriend.app.data.importer.ocr.OcrModelStore
 import com.studyfriend.app.data.vision.VisionScheduler
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** 「查找模型」弹窗目标：点哪个字段的查找按钮，选中后回填谁 */
-enum class ModelPickerTarget { MAIN, NOTE, VISION, VISION2 }
-
 /**
- * 模型页（按用途选模型）：主力模型 + 讲解模型 + 视觉转写 + 备用视觉 + 本地 OCR，
- * 全部 AI 模型配置收拢在一页。「查找模型」调服务商 GET /models 拉列表供选择，
- * 拉取失败仍可手填。
+ * 模型页（2026-11-15 多模型轮）：档案（一家服务商一套地址/Key/模型）+ 按任务指派 +
+ * 本地 OCR。档案可建多个，四个任务角色（主力/讲解/视觉/备用视觉）各自指派档案；
+ * 讲解/视觉未指派跟随主力，备用视觉未指派不启用。
  */
 class ModelsViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = SettingsRepository((app as StudyApp).database, (app as StudyApp).secretStore)
 
-    // ---- 主力模型：粗读批注（章级合并）、章末总结、全书总览、思维导图、测试连接 ----
-    var baseUrl by mutableStateOf(SettingsRepository.DEFAULT_BASE)
-    var model by mutableStateOf(SettingsRepository.DEFAULT_MODEL)
-    var tempText by mutableStateOf("0.3")
-    var keyInput by mutableStateOf("")
-    var hasKey by mutableStateOf(false)
+    // ---- 档案列表与分配（loadLlm 快照）----
+    var profiles by mutableStateOf<List<LlmProfile>>(emptyList())
+        private set
+    var keyIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+    var assign by mutableStateOf(LlmAssign())
         private set
 
-    // ---- 讲解模型（可选低成本）：段落讲解 + 粗读批注逐块调用；空 = 跟随主力 ----
-    var noteFollowMain by mutableStateOf(true)
+    // ---- 档案编辑弹层：null = 关闭 ----
+    var editor by mutableStateOf<ProfileEditor?>(null)
         private set
-    var noteModel by mutableStateOf("")
+    var editorBusy by mutableStateOf(false)
+        private set
+    var editorTesting by mutableStateOf(false)
+        private set
+    var editorLiveDelta by mutableStateOf("")
+        private set
+    var editorError by mutableStateOf<String?>(null)
+        private set
 
-    // ---- 视觉转写（OPT-E）：扫描页/坏字页整页转写；开关即点即存，其余随"保存" ----
+    // ---- 「查找模型」弹窗（编辑器内）：非 null = 弹选择框 ----
+    var pickerModels by mutableStateOf<List<String>?>(null)
+        private set
+    var pickerQuery by mutableStateOf("")
+    var fetchingModels by mutableStateOf(false)
+        private set
+
+    // ---- 指派选择弹窗：非 null = 正在为该角色选档案 ----
+    var rolePicker by mutableStateOf<LlmRole?>(null)
+        private set
+
+    fun openRolePicker(role: LlmRole) {
+        rolePicker = role
+    }
+
+    fun closeRolePicker() {
+        rolePicker = null
+    }
+
+    // ---- 视觉转写开关（即点即存）----
     var visionEnabled by mutableStateOf(true)
-        private set
-    var visionModel by mutableStateOf(SettingsRepository.DEFAULT_VISION_MODEL)
-    var visionBaseUrl by mutableStateOf("")
-    var visionKeyInput by mutableStateOf("")
-    var hasVisionKey by mutableStateOf(false)
-        private set
-
-    // ---- 备用视觉（R3 多模型轮转）：三键齐才参与轮转；不回退主 Key ----
-    var vision2BaseUrl by mutableStateOf("")
-    var vision2Model by mutableStateOf("")
-    var vision2KeyInput by mutableStateOf("")
-    var hasVision2Key by mutableStateOf(false)
         private set
 
     // ---- 扫描书本地识别（P6b）：开关即点即存；模型就绪与否只读展示 ----
@@ -73,130 +88,206 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
     // ---- 通用状态 ----
     var busy by mutableStateOf(false)
         private set
-    var testing by mutableStateOf(false)
-        private set
     var message by mutableStateOf<String?>(null)
         private set
     var error by mutableStateOf<String?>(null)
-        private set
-    var liveDelta by mutableStateOf("")
-        private set
-
-    // ---- 查找模型：非 null = 弹选择框 ----
-    var pickerModels by mutableStateOf<List<String>?>(null)
-        private set
-    var pickerTitle by mutableStateOf("")
-        private set
-    var pickerTarget by mutableStateOf(ModelPickerTarget.MAIN)
-        private set
-    var pickerQuery by mutableStateOf("")
-    var fetchingModels by mutableStateOf(false)
         private set
 
     private var testJob: Job? = null
 
     init {
-        viewModelScope.launch {
-            val s = repo.load()
-            baseUrl = s.baseUrl
-            model = s.model
-            tempText = s.temperature.toString()
-            hasKey = s.hasKey
-            noteFollowMain = s.noteModel.isBlank()
-            noteModel = s.noteModel
-            visionEnabled = s.visionEnabled
-            visionModel = s.visionModel
-            visionBaseUrl = s.visionBaseUrl
-            hasVisionKey = s.hasVisionKey
-            vision2BaseUrl = s.vision2BaseUrl
-            vision2Model = s.vision2Model
-            hasVision2Key = s.hasVision2Key
-            ocrEnabled = s.ocrEnabled
-            ocrModelsReady = OcrModelStore.modelsPresent(getApplication<StudyApp>())
-        }
+        refresh()
     }
 
-    /** 保存主力 + 讲解 + 视觉三组配置（开关类即点即存不在此列） */
-    fun save() {
-        if (busy || testing) return
+    /** 重新读库（档案保存/删除/指派后调用；进页 init 也走这里） */
+    fun refresh() {
         viewModelScope.launch {
-            busy = true
-            error = null
-            message = null
             try {
-                val temp = AiClient.parseTemperature(tempText)
-                repo.save(baseUrl, model, temp, keyInput.takeIf { it.isNotBlank() })
-                repo.saveNoteModel(if (noteFollowMain) null else noteModel)
-                repo.saveVision(visionEnabled, visionModel, visionBaseUrl, visionKeyInput.takeIf { it.isNotBlank() })
-                repo.saveVision2(vision2BaseUrl, vision2Model, vision2KeyInput.takeIf { it.isNotBlank() })
-                if (keyInput.isNotBlank()) {
-                    hasKey = true
-                    keyInput = ""
-                }
-                if (visionKeyInput.isNotBlank()) {
-                    hasVisionKey = true
-                    visionKeyInput = ""
-                }
-                if (vision2KeyInput.isNotBlank()) {
-                    hasVision2Key = true
-                    vision2KeyInput = ""
-                }
-                tempText = temp.toString()
-                // OPT-F：视觉配置变了（开关/Key/模型），队列里有待转写页的书立即重调度
-                val appCtx = getApplication<StudyApp>()
-                VisionScheduler.reenqueueAllPending(appCtx.database, appCtx)
-                message = "已保存"
+                val s = repo.loadLlm()
+                profiles = s.profiles
+                keyIds = s.keyIds
+                assign = s.assign
+                visionEnabled = repo.load().visionEnabled
+                ocrEnabled = repo.load().ocrEnabled
+                ocrModelsReady = OcrModelStore.modelsPresent(getApplication<StudyApp>())
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = "保存失败：${e.message ?: "未知错误"}"
-            } finally {
-                busy = false
+                error = "读取模型配置失败：${e.message ?: "未知错误"}"
             }
         }
     }
 
-    /** 测试主力模型连通（流式 ping，实时预览） */
-    fun testConnection() {
-        if (testing || busy) return
-        testJob = viewModelScope.launch {
-            testing = true
-            error = null
-            message = null
-            liveDelta = ""
+    // ============ 档案编辑 ============
+
+    /** 打开编辑弹层：p = null 新建（预填默认地址/模型），否则编辑既有档案 */
+    fun openEditor(p: LlmProfile?) {
+        editorError = null
+        editorLiveDelta = ""
+        editor = if (p == null) {
+            ProfileEditor(
+                id = "",
+                name = "档案 ${profiles.size + 1}",
+                baseUrl = SettingsRepository.DEFAULT_BASE,
+                model = SettingsRepository.DEFAULT_MODEL,
+                tempText = "0.3",
+                keyInput = "",
+                hasKey = false,
+                isNew = true,
+            )
+        } else {
+            ProfileEditor(
+                id = p.id,
+                name = p.name,
+                baseUrl = p.baseUrl,
+                model = p.model,
+                tempText = p.temperature.toString(),
+                keyInput = "",
+                hasKey = keyIds.contains(p.id),
+                isNew = false,
+            )
+        }
+    }
+
+    fun closeEditor() {
+        if (editorTesting) testJob?.cancel()
+        editor = null
+        editorError = null
+        editorLiveDelta = ""
+    }
+
+    /** 编辑器字段统一更新入口（UI 输入框走这里） */
+    fun updateEditor(transform: (ProfileEditor) -> ProfileEditor) {
+        editor = editor?.let(transform)
+    }
+
+    /** 保存档案（新建或覆盖；Key 只在输入框非空时更新，不清旧值） */
+    fun saveEditor() {
+        val ed = editor ?: return
+        if (editorBusy) return
+        val base = ed.baseUrl.trim()
+        val model = ed.model.trim()
+        if (base.isBlank()) {
+            editorError = "API 地址还没填"
+            return
+        }
+        if (model.isBlank()) {
+            editorError = "模型名还没填（可点「查找」从服务商拉列表）"
+            return
+        }
+        viewModelScope.launch {
+            editorBusy = true
+            editorError = null
             try {
-                // 用户改了 Key 还没保存时，优先用输入框里的新 Key 测试，避免拿旧 Key 配新地址误导
-                val key = keyInput.takeIf { it.isNotBlank() } ?: repo.decryptKeyOrNull()
+                val temp = AiClient.parseTemperature(ed.tempText)
+                val profile = LlmProfile(
+                    id = ed.id.ifBlank { UUID.randomUUID().toString().substring(0, 8) },
+                    name = ed.name.trim().ifBlank { "档案" },
+                    baseUrl = base,
+                    model = model,
+                    temperature = temp,
+                )
+                repo.saveProfile(profile, ed.keyInput.takeIf { it.isNotBlank() })
+                editor = null
+                refresh()
+                message = if (ed.isNew) "已添加档案「${profile.name}」" else "已保存「${profile.name}」"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                editorError = "保存失败：${e.message ?: "未知错误"}"
+            } finally {
+                editorBusy = false
+            }
+        }
+    }
+
+    /** 删除档案（分配自动回收：主力回退第一档，讲解/视觉回跟主力，备用回不启用） */
+    fun deleteEditorProfile() {
+        val ed = editor ?: return
+        if (editorBusy || ed.isNew) return
+        if (profiles.size <= 1) {
+            editorError = "至少保留一个档案"
+            return
+        }
+        viewModelScope.launch {
+            editorBusy = true
+            try {
+                repo.deleteProfile(ed.id)
+                editor = null
+                refresh()
+                message = "已删除「${ed.name}」，原指派任务已回退默认"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                editorError = "删除失败：${e.message ?: "未知错误"}"
+            } finally {
+                editorBusy = false
+            }
+        }
+    }
+
+    /** 清除档案已存的 Key（该档案的 AI 任务会提示未配置） */
+    fun clearEditorKey() {
+        val ed = editor ?: return
+        if (editorBusy || !ed.hasKey) return
+        viewModelScope.launch {
+            try {
+                repo.clearProfileKey(ed.id)
+                updateEditor { it.copy(hasKey = false, keyInput = "") }
+                refresh()
+                message = "已清除「${ed.name}」的 Key"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                editorError = "清除 Key 失败：${e.message ?: "未知错误"}"
+            }
+        }
+    }
+
+    /**
+     * 编辑器内测试连接（流式 ping，实时预览）：优先用输入框里未保存的新 Key，
+     * 避免拿旧 Key 配新地址误导。
+     */
+    fun testEditorConnection() {
+        val ed = editor ?: return
+        if (editorTesting || editorBusy) return
+        testJob = viewModelScope.launch {
+            editorTesting = true
+            editorError = null
+            editorLiveDelta = ""
+            try {
+                val key = ed.keyInput.takeIf { it.isNotBlank() }
+                    ?: repo.decryptProfileKeyOrNull(ed.id).also { if (it == null) updateEditor { it.copy(hasKey = false) } }
                 if (key == null) {
-                    hasKey = false
-                    error = "API Key 已失效或未保存，请重新填写并保存"
+                    editorError = "API Key 已失效或还没保存，请填写后再测试"
                     return@launch
                 }
                 val start = System.currentTimeMillis()
                 val reply = AiClient.chat(
                     ChatRequest(
-                        baseUrl = baseUrl,
+                        baseUrl = ed.baseUrl.trim(),
                         apiKey = key,
-                        model = model,
-                        temperature = AiClient.parseTemperature(tempText),
+                        model = ed.model.trim(),
+                        temperature = AiClient.parseTemperature(ed.tempText),
                         // 推理型模型会先输出思考 token：预算太小只能收到空正文
                         maxTokens = 2048,
                         messages = listOf(AiMessage("user", "ping")),
                     ),
-                ) { delta -> liveDelta += delta }
+                ) { delta -> editorLiveDelta += delta }
+                editorError = null
                 message = if (reply.isBlank()) {
-                    "连接成功，但模型未返回正文（思考可能尚未结束），可正常使用 · ${System.currentTimeMillis() - start} ms"
+                    "「${ed.name}」连接成功，但模型未返回正文（思考可能尚未结束）· ${System.currentTimeMillis() - start} ms"
                 } else {
-                    "连接成功 · ${reply.length} 字 · ${System.currentTimeMillis() - start} ms"
+                    "「${ed.name}」连接成功 · ${reply.length} 字 · ${System.currentTimeMillis() - start} ms"
                 }
             } catch (e: AiException) {
-                error = e.message
+                editorError = e.message
             } catch (e: CancellationException) {
                 // 用户取消，不算错误
             } catch (e: Exception) {
-                error = "测试失败：${e.message ?: "未知错误"}"
+                editorError = "测试失败：${e.message ?: "未知错误"}"
             } finally {
-                testing = false
+                editorTesting = false
             }
         }
     }
@@ -205,76 +296,48 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
         testJob?.cancel()
     }
 
-    /**
-     * 查找模型（按目标字段）：调服务商 GET /models，成功弹选择框，失败报人话
-     * （仍可手填）。地址/Key 取各目标的生效值——输入框里没保存的新值优先。
-     */
-    fun fetchModels(target: ModelPickerTarget) {
-        if (fetchingModels || busy || testing) return
+    // ============ 查找模型（编辑器内） ============
+
+    /** 调服务商 GET /models 拉列表（地址/Key 用编辑器当前值，未保存的新 Key 优先），失败仍可手填 */
+    fun fetchModels() {
+        val ed = editor ?: return
+        if (fetchingModels || editorBusy || editorTesting) return
         viewModelScope.launch {
             fetchingModels = true
-            error = null
+            editorError = null
             try {
-                val (base, key) = resolveEndpoint(target)
+                val base = ed.baseUrl.trim()
                 if (base.isBlank()) {
-                    error = "API 地址还没填"
+                    editorError = "API 地址还没填"
                     return@launch
                 }
+                val key = ed.keyInput.takeIf { it.isNotBlank() } ?: repo.decryptProfileKeyOrNull(ed.id)
                 if (key == null) {
-                    error = "API Key 还没保存，先填好 Key 点保存，或直接在输入框里填 Key"
+                    editorError = "API Key 还没保存，先填好 Key 点「保存」，或直接在输入框里填 Key"
                     return@launch
                 }
                 val models = AiClient.listModels(base, key)
                 if (models.isEmpty()) {
-                    error = "服务商没返回模型列表（可能不支持该接口），直接手填模型名即可"
+                    editorError = "服务商没返回模型列表（可能不支持该接口），直接手填模型名即可"
                     return@launch
                 }
-                pickerTitle = when (target) {
-                    ModelPickerTarget.MAIN -> "选择主力模型"
-                    ModelPickerTarget.NOTE -> "选择讲解模型"
-                    ModelPickerTarget.VISION -> "选择视觉模型"
-                    ModelPickerTarget.VISION2 -> "选择备用视觉模型"
-                }
-                pickerTarget = target
                 pickerQuery = ""
                 pickerModels = models
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AiException) {
-                error = "${e.message}（也可以直接手填模型名）"
+                editorError = "${e.message}（也可以直接手填模型名）"
             } catch (e: Exception) {
-                error = "拉取模型列表失败：${e.message ?: "未知错误"}"
+                editorError = "拉取模型列表失败：${e.message ?: "未知错误"}"
             } finally {
                 fetchingModels = false
             }
         }
     }
 
-    /** 查找目标生效的地址与 Key：输入框未保存的新值优先，其次已存密文 */
-    private suspend fun resolveEndpoint(target: ModelPickerTarget): Pair<String, String?> = when (target) {
-        ModelPickerTarget.MAIN, ModelPickerTarget.NOTE ->
-            baseUrl to (keyInput.takeIf { it.isNotBlank() } ?: repo.decryptKeyOrNull())
-        ModelPickerTarget.VISION ->
-            (visionBaseUrl.ifBlank { baseUrl }) to when {
-                visionKeyInput.isNotBlank() -> visionKeyInput
-                else -> repo.resolveVisionKeyOrNull() // 专属 Key 优先，其次主力 Key
-            }
-        ModelPickerTarget.VISION2 ->
-            vision2BaseUrl to (vision2KeyInput.takeIf { it.isNotBlank() }
-                ?: repo.decryptVision2KeyOrNull())
-    }
-
-    /** 选择框点选后回填目标字段并关闭 */
+    /** 选择框点选后回填编辑器模型名并关闭 */
     fun pickModel(name: String) {
-        when (pickerTarget) {
-            ModelPickerTarget.MAIN -> model = name
-            ModelPickerTarget.NOTE -> {
-                noteModel = name
-                noteFollowMain = false
-            }
-            ModelPickerTarget.VISION -> visionModel = name
-            ModelPickerTarget.VISION2 -> vision2Model = name
-        }
+        updateEditor { it.copy(model = name) }
         pickerModels = null
         message = "已选择「$name」，记得点保存"
     }
@@ -283,61 +346,38 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
         pickerModels = null
     }
 
-    /** 讲解模型开关：开=跟随主力（清掉专属模型），关=启用下方专属输入框 */
-    fun changeNoteFollowMain(follow: Boolean) {
-        noteFollowMain = follow
-        if (follow) noteModel = ""
-    }
+    // ============ 按任务指派（即点即存） ============
 
-    fun clearKey() {
-        if (busy || testing) return
+    /**
+     * 指派档案给任务角色：profileId = null 表示「跟随主力」（VISION2 时 = 不启用）。
+     * MAIN 不接受 null（回退第一个档案语义由 resolveLlm 兜底）。
+     */
+    fun assignRole(role: LlmRole, profileId: String?) {
+        val newAssign = when (role) {
+            LlmRole.MAIN -> assign.copy(main = profileId ?: "")
+            LlmRole.NOTE -> assign.copy(note = profileId ?: "")
+            LlmRole.VISION -> assign.copy(vision = profileId ?: "")
+            LlmRole.VISION2 -> assign.copy(vision2 = profileId ?: "")
+        }
+        assign = newAssign
         viewModelScope.launch {
             try {
-                repo.clearKey()
-                hasKey = false
-                keyInput = ""
-                message = "已清除 API Key"
+                repo.saveAssign(newAssign)
+                message = "已更新指派，下次任务即生效"
+                // 视觉指派变了：队列里待转写页立即按新配置重调度
+                if (role == LlmRole.VISION || role == LlmRole.VISION2) {
+                    val app = getApplication<StudyApp>()
+                    VisionScheduler.reenqueueAllPending(app.database, app)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                error = "清除失败：${e.message ?: "未知错误"}"
+                error = "保存指派失败：${e.message ?: "未知错误"}"
             }
         }
     }
 
-    /** 清除视觉专属 Key（之后视觉回退用主力 Key） */
-    fun clearVisionKey() {
-        if (busy || testing) return
-        viewModelScope.launch {
-            try {
-                repo.clearVisionKey()
-                hasVisionKey = false
-                visionKeyInput = ""
-                message = "已清除视觉专属 Key，视觉转写回退用主力 Key"
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "清除视觉 Key 失败：" + (e.message ?: "未知错误")
-            }
-        }
-    }
-
-    /** 清除备用视觉 Key（三键缺一即退出轮转） */
-    fun clearVision2Key() {
-        if (busy || testing) return
-        viewModelScope.launch {
-            try {
-                repo.clearVision2Key()
-                hasVision2Key = false
-                vision2KeyInput = ""
-                message = "已清除备用视觉 Key，备用组退出轮转"
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "清除备用视觉 Key 失败：" + (e.message ?: "未知错误")
-            }
-        }
-    }
+    // ============ 视觉开关 / 本地 OCR ============
 
     /** 视觉转写开关（即点即存）：开了→队列立即拿到配置开跑；关了→Worker 空转退避，不烧钱 */
     fun changeVisionEnabled(enabled: Boolean) {
@@ -345,7 +385,7 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
         visionEnabled = enabled
         viewModelScope.launch {
             try {
-                repo.saveVision(enabled)
+                repo.saveVisionEnabled(enabled)
                 val app = getApplication<StudyApp>()
                 VisionScheduler.reenqueueAllPending(app.database, app)
             } catch (e: CancellationException) {
@@ -400,5 +440,43 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
                 error = "保存扫描识别开关失败：${e.message ?: "未知错误"}"
             }
         }
+    }
+}
+
+/**
+ * 档案编辑弹层状态（id 空 = 新建）。字段逐项 copy 更新（updateEditor），
+ * keyInput 是输入框明文，只随「保存」加密落库。
+ */
+data class ProfileEditor(
+    val id: String,
+    val name: String,
+    val baseUrl: String,
+    val model: String,
+    val tempText: String,
+    val keyInput: String,
+    val hasKey: Boolean,
+    val isNew: Boolean,
+)
+
+/** 角色中文标签（档案行徽标 + 指派弹层共用） */
+fun LlmRole.label(): String = when (this) {
+    LlmRole.MAIN -> "主力"
+    LlmRole.NOTE -> "讲解"
+    LlmRole.VISION -> "视觉"
+    LlmRole.VISION2 -> "备用"
+}
+
+/**
+ * 某档案当前被哪些角色使用（档案行徽标）：
+ * MAIN 按「生效主力」算——assign.main 空/失效时第一档就是主力。
+ */
+fun rolesUsing(a: LlmAssign, profiles: List<LlmProfile>, profileId: String): List<LlmRole> {
+    val mainEffective = a.main.takeIf { it.isNotBlank() && profiles.any { p -> p.id == it } }
+        ?: profiles.firstOrNull()?.id
+    return buildList {
+        if (profileId == mainEffective) add(LlmRole.MAIN)
+        if (a.note == profileId) add(LlmRole.NOTE)
+        if (a.vision == profileId) add(LlmRole.VISION)
+        if (a.vision2 == profileId) add(LlmRole.VISION2)
     }
 }

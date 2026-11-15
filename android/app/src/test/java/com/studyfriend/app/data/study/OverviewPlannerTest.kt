@@ -44,7 +44,7 @@ class OverviewPlannerTest {
             StudyDatabase::class.java,
         ).allowMainThreadQueries().build()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        SettingsRepository(db, FakeSecretStore()).save("https://api.test/v1", "test-model", 0.3, "sk-test")
+        SettingsRepository(db, FakeSecretStore()).seedMainProfile("https://api.test/v1", "test-model", 0.3, "sk-test")
     }
 
     @After

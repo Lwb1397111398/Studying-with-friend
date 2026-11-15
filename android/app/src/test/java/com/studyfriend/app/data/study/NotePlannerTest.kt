@@ -74,7 +74,7 @@ class NotePlannerTest {
 
     private suspend fun settings(db: StudyDatabase): SettingsRepository =
         SettingsRepository(db, FakeSecretStore()).apply {
-            save("https://api.test/v1", "test-model", 0.3, "sk-test")
+            seedMainProfile("https://api.test/v1", "test-model", 0.3, "sk-test")
         }
 
     private fun planner(db: StudyDatabase, fn: ChatTextFn) = NotePlanner(
@@ -370,7 +370,13 @@ class NotePlannerTest {
         val ch = seed(db, listOf(Triple(0, "EXPLAIN", null)))
         planner(db, fake1).run(ch)
 
-        settings(db).saveNoteModel("other-model")
+        // 换讲解档案（2026-11-15 多模型轮）：另立档案指派给讲解角色
+        val repo = settings(db)
+        repo.saveProfile(
+            com.studyfriend.app.data.LlmProfile("note-prof", "讲解", "https://api.test/v1", "other-model"),
+            "sk-test",
+        )
+        repo.saveAssign(repo.loadLlm().assign.copy(note = "note-prof"))
         val fake2 = FakeChat().apply { onNote = { _, _ -> noteTagged() } }
         val outcome = planner(db, fake2).run(ch)
 

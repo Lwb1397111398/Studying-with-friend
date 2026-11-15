@@ -98,7 +98,7 @@ class RoughReadPlannerTest {
     )
 
     private suspend fun withKey(db: StudyDatabase) = settings(db).apply {
-        save("https://api.test/v1", "test-model", 0.3, "sk-test")
+        seedMainProfile("https://api.test/v1", "test-model", 0.3, "sk-test")
     }
 
     // planner 内 settings 是构造传入的；为让"无 Key"用例复用，直接构造带 Key 的 Planner

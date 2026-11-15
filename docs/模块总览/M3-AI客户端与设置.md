@@ -1,26 +1,23 @@
 # M3 AI客户端与设置 · 模块总览
 
-> 状态：✅ 完成（M3 原始 91 分质检通过；2026-10-11 模型页重构收口）
-> 验证：全项目单测全绿（AiClientTest 14、SettingsRepoTest 9），assembleDebug 通过
+> 状态：✅ 完成（M3 原始 91 分质检通过；2026-11-15 档案体系多模型轮收口）
+> 验证：全项目单测全绿，assembleDebug 通过
 
 ## 模块职责
 
-一句话：管 AI 的「连接」（OpenAI 兼容端点、Key 加密、SSE 流式、错误文案）和「配置面」（模型页 + 设置页）。
+一句话：管 AI 的「连接」（OpenAI 兼容端点、Key 加密、SSE 流式、错误文案）和「配置面」（模型页 + 设置页）；2026-11-15 起配置面升级为**档案体系**——多个服务商档案 + 四个任务角色各自指派。
 
-## 功能清单（2026-10-11 模型页重构后）
+## 功能清单（2026-11-15 档案体系后）
 
 | 功能 | 所在页面 | 说明 |
 | --- | --- | --- |
-| 模型页（新） | ModelsScreen（设置页入口的二级页，Routes.MODELS） | 全部 AI 模型配置收拢一页：主力模型 / 讲解模型 / 视觉转写 + 备用视觉 / 本地 OCR。区块化展示，各区块 HorizontalDivider 分隔 |
-| 主力模型 | 模型页 | API 地址 / Key（加密）/ 模型名 / 温度 / 测试连接（流式 ping + 实时预览）。用于章末总结、全书总览、思维导图、粗读章级合并 |
-| 「查找模型」（新） | 模型页各模型输入框旁 | `AiClient.listModels`：GET `{base}/models`（Bearer）拉服务商模型列表 → 搜索弹窗点选回填。宽松解析 `data[].id`（兜底 `model`/`name` 字段、裸数组、只认字符串值），排序去重；解析不动返回空列表、401/404 等抛人话 AiException。**拉取失败仍可手填** |
-| 讲解模型（新，按用途选模型） | 模型页 | 开关「讲解单独用低成本模型」+ 专属模型名（可查找）。**只有模型名，地址/Key 永远跟主力服务商**；空 = 跟随主力。生效点：NotePlanner 段落讲解 + RoughReadPlanner 逐块批注（两个逐段高频任务）；章级合并/总结/总览始终主力（出题质量要求高）。落库 `ParaNoteEntity.model` 记实际用的模型 |
-| 视觉转写（OPT-E） | 模型页 | 开关即点即存 + 视觉模型名（可查找）+ 视觉专属地址/Key（留空回退主力）。扫描页/坏字页整页转写 |
-| 备用视觉（R3 轮转） | 模型页 | 地址/模型名/Key 三键齐才入轮转列表；不回退主力 Key（异家 Key 打异家 URL 无意义） |
-| 扫描书本地识别（P6b） | 模型页 | 从设置页迁入：开关 + 模型就绪态 + 「下载识别模型」按钮（~21MB，GitHub 令牌下载，进度条防重入） |
-| 设置页（瘦身） | SettingsScreen | 只剩：模型入口卡片（主力模型名 + Key 状态 + 讲解/视觉摘要，LaunchedEffect 每次进入刷新）、讲解详略三档、应用更新（M7）。**「快速填入」预设与平铺的视觉三组已删除（老板 2026-10-11 反馈：太乱）** |
-| Key 加密存储 | — | AndroidKeyStore AES-256 + SecretCrypto 协议（12B IV + 128 位 GCM tag，`Base64(iv||ct)`），明文 Key 永不落库 |
-| 密钥失效自愈 | — | 解密异常保留密文（keystore 可能暂时故障）；仅「结构性损坏」（k1:/s1: 标记但非合法 Base64）删除重填 |
+| 模型页（三张书房卡） | ModelsScreen（设置页入口二级页，Routes.MODELS） | ①模型档案（列表+新建+编辑弹层）②按任务指派（四行任务各挂档案胶囊+视觉开关）③本地识别（OCR） |
+| 模型档案（LlmProfile） | 模型页 | 一个档案 = 一家服务商：名称 + API 地址 + Key（每档独立加密）+ 默认模型名 + 温度。档案列表永不为空（无配置自动建「主力」默认档）。编辑弹层含查找模型、测试连接（流式 ping）、删除（至少留一档；删除自动回收指派） |
+| 按任务指派（LlmAssign） | 模型页 | 四角色各自指派档案，**即点即存**：主力（总结/总览/导图/粗读章级合并）、讲解（段落讲解/粗读批注/随手问/换个讲法/判卷——未指派跟随主力）、视觉转写（扫描页整页转写——未指派跟随主力）、备用视觉接力（主视觉限流时自动接力——未指派不启用，不回退主力 Key） |
+| 「查找模型」 | 模型页编辑弹层 | `AiClient.listModels`：GET `{base}/models`（Bearer）拉服务商模型列表 → 搜索弹窗点选回填。宽松解析 `data[].id`（兜底 `model`/`name` 字段、裸数组、只认字符串值），排序去重；解析不动返回空列表、401/404 等抛人话 AiException。**拉取失败仍可手填**。地址/Key 用编辑器当前值（未保存的新 Key 优先） |
+| Key 加密存储 | — | AndroidKeyStore AES-256 + SecretCrypto 协议（12B IV + 128 位 GCM tag，`Base64(iv||ct)`），明文 Key 永不落库。每档案独立密文 `llm_key_<id>_enc`（`_enc` 后缀=备份导出自动排除、恢复不碰） |
+| 密钥失效自愈 | — | 解密异常保留密文（keystore 可能暂时故障）；仅「结构性损坏」（k1:/s1: 标记但非合法 Base64）删除重填（decryptProfileKeyOrNull） |
+| 旧配置迁移 | — | 首次 loadLlm 一次性迁移：主力→「主力」档；讲解模型名≠主力模型→「讲解」档；视觉组→「视觉转写」档（保持旧默认 LongCat 行为）；备用视觉三键齐→「备用视觉」档。Key 密文原值平移（同一 SecretStore 格式）。旧键不删（降级安全），幂等（llm_profiles 键存在即跳过） |
 | URL 规范化 | — | trim → 去尾 / → 非 `/chat/completions` 结尾自动拼上；`normalizeModelsUrl` 同理拼 `/models` |
 | SSE 流式 | — | OpenAI 兼容 `/chat/completions`，`stream:true`，onDelta 逐块回调 |
 | 取消 | — | 哨兵子协程 `awaitCancellation()` + finally disconnect；取消型 IOException 还原 CancellationException |
@@ -30,51 +27,67 @@
 ## 关键文件
 
 ```
-data/ai/AiClient.kt            SSE 客户端 + listModels/normalizeModelsUrl/parseModelIds（查找模型底层）
+data/LlmProfiles.kt            （新）LlmProfile/LlmAssign/LlmRole/ResolvedLlm/LlmSettings 数据类
+data/SettingsRepository.kt     loadLlm/saveProfile/deleteProfile/saveAssign/resolveLlm/seedMainProfile（测试）
+                               + migrateLegacyLlmIfNeeded（一次性迁移）+ buildVisionTranscribers（改档案源）
+data/ai/AiClient.kt            SSE 客户端 + listModels/normalizeModelsUrl（查找模型底层）
 data/ai/SecretCrypto.kt        AES/GCM 协议（纯 JVM object）
-data/ai/JsonSlicer.kt          JSON 剥壳（配平扫描）
 data/ai/SecretStore.kt         接口 + KeyStoreSecretStore + FakeSecretStore（测试）
-data/SettingsRepository.kt     load/save/saveVision/saveVision2/saveNoteModel（新）/clear* /decrypt* /buildVisionTranscribers
-ui/screens/ModelsViewModel.kt  （新）模型页状态机：三组配置 + 查找模型弹窗（ModelPickerTarget 四目标）+ OCR 下载 + 测试连接
-ui/screens/ModelsScreen.kt     （新）模型页 UI：区块化 + ModelField（输入框+查找按钮）+ 搜索选择 AlertDialog
-ui/screens/SettingsViewModel.kt（瘦身）只剩讲解详略 + refreshSummary（模型入口摘要）
-ui/screens/SettingsScreen.kt   （瘦身）模型入口卡片 + 讲解详略 + 应用更新
-ui/nav/AppNav.kt               Routes.MODELS + composable 接线（modelsVm）
-data/study/NotePlanner.kt      讲解请求 model = cfg.noteModel.ifBlank { cfg.model }（落库同步记实际模型）
-data/study/RoughReadPlanner.kt runBlockOnce（逐块批注）用讲解模型；mergeOverview（章级）用主力
-test/.../MiniHttpServer.kt     迷你 HTTP（新增 MiniResponse.json() 供 listModels 用例）
-test/.../AiClientTest.kt       14 用例（+4：listModels 解析/裸数组容错/脏 body/401）
-test/.../SettingsRepoTest.kt   9 用例（-presets 用例，+noteModel 往返与清空回主力）
+ui/screens/ModelsViewModel.kt  （重写）档案列表/编辑弹层状态机（ProfileEditor）/指派/查找/测试连接/OCR
+ui/screens/ModelsScreen.kt     （重写）三张书房卡 + 编辑弹层（12dp 圆角输入）+ 指派选择弹层 + 模型选择弹层
+ui/components/SectionCard.kt   （新）书房分区卡共用组件（设置页/模型页）
+ui/screens/SettingsViewModel.kt refreshSummary 改读 loadLlm（主力模型名/Key 状态/讲解/视觉摘要）
+data/study/NotePlanner.kt      resolveLlm(NOTE)（讲解档案；落库记实际模型供缓存判定）
+data/study/RoughReadPlanner.kt 逐块批注 resolveLlm(NOTE)；章级归并 resolveLlm(MAIN)
+data/study/SummaryPlanner.kt   resolveLlm(MAIN)（落库 ChapterAssetEntity.model）
+data/study/OverviewPlanner.kt  resolveLlm(MAIN)
+data/study/QuizJudge.kt        resolveLlm(NOTE)（判卷跟讲解）
+ui/screens/QuickQaSheet.kt     resolveLlm(NOTE)（随手问）
+ui/screens/ReNoteSheet.kt      resolveLlm(NOTE)（换个讲法）
+test/.../SettingsRepoTest.kt   档案 CRUD/回退/迁移 9 用例（重写 AI 部分）
+test/.../MiniHttpServer.kt     迷你 HTTP（listModels 用例）
+test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏 body/401）
 ```
 
-## 设计决策（新增部分）
+## 设计决策
 
-10. **按用途拆模型，只拆一个角色**：盘点全项目 AI 任务——逐段类（段落讲解、粗读批注）量大、质量要求相对低；总结/总览/出题类量小、质量要求高（复习题源自章末总结）。故只拆「讲解模型」一个角色（note_model），总结/总览/章级合并固定主力，不再加复习专用模型（复习中心本身无 AI 调用，出题在 M5）。UI 开关默认关（跟随主力），老用户零感知。
-11. **查找模型用 GET /models 宽松解析**：OpenAI 兼容端点理论上都实现该接口，但中转站形状不一（裸数组、model/name 字段、数字 id）。策略：字符串值才收、排序去重、解析失败给空列表（VM 层转「服务商没返回模型列表，直接手填」）；HTTP 错误走 friendlyHttp 人话。**手填永远保留**——模型列表接口不是所有网关都有。
-12. **讲解模型只配模型名，不配地址/Key**：讲解跑在主力服务商端点上（cfg.baseUrl + decryptKeyOrNull）。拆独立服务商会让「服务商」升级为实体、需要迁移现有键，收益配不上复杂度；真要多服务商时再升级。
-13. **查找的 Key 取值优先级**：输入框里未保存的新 Key > 已存密文（主组）；视觉组专属 Key > 主力 Key（复用 resolveVisionKeyOrNull）；备用组只认自己的 Key（与轮转语义一致）。
-14. **picker 状态机**：`ModelPickerTarget` 四目标（MAIN/NOTE/VISION/VISION2），fetchModels 按目标解析端点、成功后 pickerModels 非空弹 AlertDialog（搜索框 + LazyColumn 380dp），pickModel 回填目标字段并提示「记得点保存」。NOTE 目标点选同时把 noteFollowMain 置 false。
+10. **（已由 15 取代）按用途拆模型只拆一个角色** → 15 扩为四角色档案指派。
+11. **查找模型用 GET /models 宽松解析**：OpenAI 兼容端点理论上都实现该接口，但中转站形状不一（裸数组、model/name 字段、数字 id）。策略：字符串值才收、排序去重、解析失败给空列表（VM 层转「服务商没返回模型列表，直接手填」）；HTTP 错误走 friendlyHttp 人话。**手填永远保留**。
+12. **（已由 15 取代）讲解只配模型名跟主力端点** → 15 升级为完整档案。
+13. **Key 无跨档回退**：resolveLlm 对指派档案只用自己的 Key，没 Key 即该角色不可用（UI 显示「还没填 Key」）——不做「回退主力 Key」：异家 Key 打异家 URL 无意义，且配置错误该直接暴露。
+14. **旧配置迁移平移不重加密**：迁移把旧 `api_key_enc` 密文**原值**拷到新档案键（同一 SecretStore 加解密格式，无需重加密）；旧键不删（降级/回滚安全）；迁移读在事务内做存在性检查防并发双跑。
+15. **档案体系（2026-11-15）**：档案 = 服务商连接单元（名称/地址/Key/模型/温度，存 settings KV JSON），四角色指派即点即存。盘点全项目 AI 任务挂到角色：总结/总览/导图/粗读归并 → MAIN；讲解/粗读批注/随手问/换个讲法/判卷 → NOTE；扫描页转写/目录探针/前置探针 → VISION；备用轮转 → VISION2。**档案列表永不为空**（首次自动建默认档），MAIN 指派失效回退第一档、NOTE/VISION 失效或未指派跟随主力、VISION2 未指派不启用。
+16. **模型页信息架构**：三张卡——档案（是什么）/指派（怎么用）/本地识别（OCR 独立）。档案行首字圆徽 + 角色徽标（secondaryContainer 4dp 小矩形）+ 缺 Key 红字提示；指派行=任务名+说明+描边胶囊（当前档案名）；编辑弹层 12dp 圆角输入框（DESIGN.md 输入规范），测试连接与查找模型内聚在弹层里。
 
-## 测试矩阵（本轮新增）
+## 测试矩阵（档案体系部分）
 
-- AiClient +4：listModels 正常解析（断言 GET path=/v1/models + Bearer 头 + 排序）/ 裸数组+model/name 字段+数字 id 不收 / HTML 脏 body 空列表不崩 / 401 人话
-- SettingsRepo +1：noteModel 默认空、save→load 往返、trim、空串/null 清空回主力
+- SettingsRepo 重写 AI 部分 9 用例：全新安装自动建默认档+幂等 / saveProfile 往返+明文不落库+不传 Key 不清旧 / resolveLlm 四角色回退+没 Key 不跨档回退 / deleteProfile 回收指派与 Key / 解密失败保留+结构性损坏删除 / clearProfileKey / 完整旧配置迁移 4 档案 / 讲解=主力模型不立档 / 仅主力的迁移仍有默认视觉档
+- Planner/Runner 测试播种改 `seedMainProfile`（8 处），NotePlannerTest 换讲解模型用例改「另立档案+指派」
 
 ## 已知坑与约束
 
 - MiniHttpServer 仅支持单请求短连接；listModels 用例沿用该设施（AGP --release 无 jdk.httpserver）。
-- 「查找模型」对未保存的地址也生效（fetchModels 直接用输入框值），用户可不保存先看列表；但模型选择后仍须点「保存」落库。
-- 视觉开关即点即存会触发 VisionScheduler.reenqueueAllPending（OPT-F）；讲解模型变更不影响队列（讲解是按需同步调用）。
-- 设置页入口摘要（refreshSummary）只在进入设置页时刷新；模型页改完 popBack 回来 LaunchedEffect 会重跑，无需额外事件总线。
+- 「查找模型」对未保存的地址也生效（fetchModels 直接用编辑器值），但 Key 必须已保存或在输入框里。
+- 视觉开关与视觉/备用指派变更都会触发 VisionScheduler.reenqueueAllPending（OPT-F）；讲解/主力指派变更不影响队列（讲解按需同步调用）。
+- 设置页入口摘要（refreshSummary）只在进入设置页时刷新；模型页改完 popBack 回来 LaunchedEffect 会重跑。
+- 档案 temperature 只对「直接用 cfg.temperature 的调用」生效（旧模型页测试连接）；各 Planner 的温度均为硬编码（讲解 0.5、总结 0.4、粗读 0.2、判卷 0.2），档案温度不覆盖任务温度——行为与旧版一致。
+- 新装用户视觉角色默认跟随主力档案：主力模型须带视觉，否则应在指派里给视觉单独指派带视觉的档案（编辑弹层副标题有提示）。
 
 ## 对后续模块的接口承诺
 
-- 新增 AI 功能时按「用量×质量」决定挂哪个角色：逐段高频 → noteModel（讲解）；低频高质量 → cfg.model（主力）。取值写法统一 `cfg.noteModel.ifBlank { cfg.model }`。
-- 模型列表拉取复用 `AiClient.listModels(baseUrl, apiKey)`；VM 层照抄 ModelsViewModel.fetchModels 的目标解析模式即可加新角色。
+- 新增 AI 功能时按「用量×质量」决定挂哪个角色：逐段高频 → `resolveLlm(LlmRole.NOTE)`；低频高质量 → `resolveLlm(LlmRole.MAIN)`。返回 null = 未配置好（Key 缺失/无档案），调用方给「请到设置页填写」人话。
+- 模型列表拉取复用 `AiClient.listModels(baseUrl, apiKey)`；档案编辑器内已内聚查找/测试，新角色只需加进 LlmRole 与指派卡。
+- 加密键沿用 `_enc` 后缀约定，备份层（BackupManager SETTING_ENC_SUFFIX）自动排除，无需改备份代码。
 
 ## 最后更新
 
-- 2026-11-15 **UI 打磨轮：设置页卡片化**：分区从「细分割线」改为 surfaceContainer 圆角 16dp 分区卡（SectionCard 私有组件，组头 labelLarge 在卡内），细线全删；朗读语速/朗读引擎/离线模型三块合进一张「朗读」卡（同一件事的三面）；备份与恢复、诊断各成一张卡。配置项与落库键零变化，纯视觉重排。模拟器浅/深两主题实测。
+- 2026-11-15 **档案体系多模型轮（本轮，老板点名「很多 LLM 设置、不同功能自己选、界面要漂亮」）**：
+  ①**数据层**：新增 `LlmProfile`（名称/地址/Key/模型/温度）与 `LlmAssign`（四角色指派），存 settings KV JSON；每档 Key 独立加密 `llm_key_<id>_enc`；`resolveLlm(role)` 统一解析端点（回退规则见决策 15）；旧配置（api_base/api_key_enc/note_model/vision 两组）首次 loadLlm 自动迁移成档案，密文原值平移、旧键不删、幂等；
+  ②**消费方收口**：NotePlanner/RoughReadPlanner/SummaryPlanner/OverviewPlanner/QuizJudge/QuickQaSheet/ReNoteSheet 七处从 `cfg+decryptKeyOrNull` 改为 `resolveLlm(角色)`；buildVisionTranscribers/buildTocVisionParser/buildFrontMatterVisionParser 改 VISION/VISION2 角色；SettingsSnapshot 瘦身（只剩 visionEnabled/github token/更新/OCR 五个非端点键），save/saveVision/saveVision2/saveNoteModel/decryptKeyOrNull 等旧方法删除；
+  ③**UI 重做**：ModelsScreen 三张书房卡（档案/指派/本地识别）+ 编辑弹层（12dp 圆角输入、查找模型、测试连接、删除）+ 指派选择弹层（radio 列表+跟随主力/不启用选项）+ 档案行角色徽标与缺 Key 提示；SectionCard 提取为共用组件（ui/components）；设置页入口卡摘要改读档案体系；
+  ④**测试**：SettingsRepoTest AI 部分重写 9 用例（CRUD/回退/迁移），Planner 播种 8 处改 seedMainProfile，NotePlannerTest 换模型用例改档案指派。迁移中修一处 bug：视觉档案有专属 Key 时平移专属密文（原写漏 else 分支）。
+
+- 2026-11-15 **UI 打磨轮：设置页卡片化**：分区从「细分割线」改为 surfaceContainer 圆角 16dp 分区卡（SectionCard 私有组件，组头 labelLarge 在卡内），细线全删；朗读语速/朗读引擎/离线模型三块合进一张「朗读」卡（同一件事的三面）；备份与恢复、诊断各成一张卡。配置项与落库键零变化，纯视觉重排。模拟器浅/深两主题实测。本轮 SectionCard 已提取为 `ui/components/SectionCard.kt` 共用。
 
 - 2026-10-26 **数据安全与体验增量轮：设置页「备份与恢复」+「诊断」区块 + AiGate 排队**：
   ①**备份与恢复**（BackupSection）：SAF CreateDocument 导出 JSON（默认名 studyfriend-backup-yyyyMMdd-HHmm.json）+ OpenDocument 选文件→先只 peek 解析校验（版本/引用完整性，不动库）→确认框明示「当前全部学习数据将被覆盖」→confirmRestore 才整库替换（BackupManager 见 M1）；恢复完成回读设置页五项状态防残留旧值；

@@ -1,8 +1,9 @@
 package com.studyfriend.app.data.study
 
 import android.content.Context
+import com.studyfriend.app.data.LlmRole
+import com.studyfriend.app.data.ResolvedLlm
 import com.studyfriend.app.data.SettingsRepository
-import com.studyfriend.app.data.SettingsSnapshot
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
 import com.studyfriend.app.data.ai.AiBudgets
@@ -60,17 +61,17 @@ class NotePlanner(
         val chapter = db.chapterDao().byIdOnce(chapterId)
             ?: throw PlannerException("章节不存在")
         val paragraphs = db.paragraphDao().byChapter(chapterId)
-        val key = settings.decryptKeyOrNull()
+        // 讲解角色档案（2026-11-15 多模型轮）：未指派跟随主力档案；null = 档案没 Key / 没档案
+        val llm = settings.resolveLlm(LlmRole.NOTE)
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
-        val cfg = settings.load()
         // 讲解详略三档（总计划 §1 目标 7）：标准档即 prompt 原文，简略/深入在 system 末尾追加指令
         val detail = settings.detailLevel()
         // 批D学情：该章读者批注进讲解输入（按单元成员段匹配）；有批注才升学情版本——
         // 无批注书版本号不变，已有讲解零重讲
         val memos = db.paraMemoDao().byChapterOnce(chapterId)
         val noteVer = noteVersion(detail, memos.isNotEmpty())
-        // 档位与模型都参与缓存判定：切档/换讲解模型后旧卡失效重生成，设置才真正生效
-        val noteModelActual = cfg.noteModel.ifBlank { cfg.model }
+        // 档位与模型都参与缓存判定：切档/换讲解档案后旧卡失效重生成，设置才真正生效
+        val noteModelActual = llm.model
         val systemPrompt = buildString {
             append(PromptLoader.load(context, PROMPT_NOTE))
             when (detail) {
@@ -122,7 +123,7 @@ class NotePlanner(
                         try {
                             // 生成成功后才删旧插新：失败/中断时旧卡保留不丢（最终 QA P2-2）；
                             // 删+插包事务，两 lane 并发写库时防"删了旧的新没插进"
-                            val note = runUnitWithRetry(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual, memos)
+                            val note = runUnitWithRetry(unit, chapter, paragraphs, systemPrompt, llm, noteVer, memos)
                             db.withTransaction {
                                 db.paraNoteDao().deleteByParaIds(paraIds)
                                 db.paraNoteDao().insert(note)
@@ -161,16 +162,14 @@ class NotePlanner(
         chapter: ChapterEntity,
         paragraphs: List<ParagraphEntity>,
         systemPrompt: String,
-        cfg: SettingsSnapshot,
-        key: String,
+        llm: ResolvedLlm,
         noteVer: String,
-        noteModelActual: String,
         memos: List<ParaMemoEntity>,
     ): ParaNoteEntity {
         var lastError: Exception? = null
         repeat(ATTEMPTS) { attempt ->
             try {
-                return runUnitOnce(unit, chapter, paragraphs, systemPrompt, cfg, key, noteVer, noteModelActual, memos)
+                return runUnitOnce(unit, chapter, paragraphs, systemPrompt, llm, noteVer, memos)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AiException) {
@@ -191,10 +190,8 @@ class NotePlanner(
         chapter: ChapterEntity,
         paragraphs: List<ParagraphEntity>,
         systemPrompt: String,
-        cfg: SettingsSnapshot,
-        key: String,
+        llm: ResolvedLlm,
         noteVer: String,
-        noteModelActual: String,
         memos: List<ParaMemoEntity>,
     ): ParaNoteEntity {
         val anchor = unit.anchor
@@ -232,9 +229,9 @@ class NotePlanner(
         val plan = NoteTaggedParser.parse(
             chatTextFn(
                 ChatRequest(
-                    baseUrl = cfg.baseUrl, apiKey = key,
-                    // 讲解模型（按用途选模型）：讲解逐段调用用量最大，可单独配低成本模型；空 = 主力
-                    model = noteModelActual,
+                    baseUrl = llm.baseUrl, apiKey = llm.apiKey,
+                    // 讲解角色档案：讲解逐段调用用量最大，可单独指派便宜快速的档案；未指派跟随主力
+                    model = llm.model,
                     temperature = 0.5,
                     // 推理型模型的思考 token 计入 max_tokens：讲解卡主体长，预算须给足
                     maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,
@@ -255,7 +252,7 @@ class NotePlanner(
             keyPointsJson = json.encodeToString(ListSerializer(String.serializer()), n.keyPoints),
             memoryHook = n.memoryHook.ifBlank { null },
             questionsJson = json.encodeToString(ListSerializer(CheckQuestion.serializer()), n.checkQuestions),
-            model = noteModelActual,
+            model = llm.model, // 落库供缓存判定与展示（讲解档案的模型名）
             promptVersion = noteVer,
             createdAt = System.currentTimeMillis(),
         )

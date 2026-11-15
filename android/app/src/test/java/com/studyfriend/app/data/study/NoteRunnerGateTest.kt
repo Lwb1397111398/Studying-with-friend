@@ -57,7 +57,7 @@ class NoteRunnerGateTest {
         db.paragraphDao().insertAll(
             listOf(ParagraphEntity(chapterId = ch, idx = 0, text = "正文0甲甲甲", role = "BODY", aiAction = "EXPLAIN")),
         )
-        SettingsRepository(db, FakeSecretStore()).save("https://api.test/v1", "m", 0.3, "sk-test")
+        SettingsRepository(db, FakeSecretStore()).seedMainProfile("https://api.test/v1", "m", 0.3, "sk-test")
     }
 
     @After

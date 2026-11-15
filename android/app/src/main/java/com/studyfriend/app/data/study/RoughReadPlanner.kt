@@ -1,8 +1,9 @@
 package com.studyfriend.app.data.study
 
 import android.content.Context
+import com.studyfriend.app.data.LlmRole
+import com.studyfriend.app.data.ResolvedLlm
 import com.studyfriend.app.data.SettingsRepository
-import com.studyfriend.app.data.SettingsSnapshot
 import com.studyfriend.app.data.ai.AiClient
 import com.studyfriend.app.data.ai.AiException
 import com.studyfriend.app.data.ai.AiMessage
@@ -116,9 +117,10 @@ class RoughReadPlanner(
         }
         if (paragraphs.isEmpty()) throw PlannerException("本章是目录或无正文内容，无需粗读")
 
-        val key = settings.decryptKeyOrNull()
+        // 双角色（2026-11-15 多模型轮）：逐块批注=讲解角色档案（高频）；章级归并=主力档案（质量）
+        val mainLlm = settings.resolveLlm(LlmRole.MAIN)
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
-        val cfg = settings.load()
+        val noteLlm = settings.resolveLlm(LlmRole.NOTE) ?: mainLlm
         val systemPrompt = PromptLoader.load(context, PROMPT_ROUGH)
         val blocks = RoughReadChunks.split(paragraphs)
         val chapterChars = paragraphs.sumOf { it.text.length }.coerceAtLeast(1)
@@ -156,7 +158,7 @@ class RoughReadPlanner(
                     continue
                 }
                 try {
-                    val outcome = runBlockWithRetry(block, bi, systemPrompt, blocks.size, chapterChars, cfg, key)
+                    val outcome = runBlockWithRetry(block, bi, systemPrompt, blocks.size, chapterChars, noteLlm)
                     coroutineContext.ensureActive() // 重试间隙取消：立即退出，已完成块保留
                     applyDecisions(block, outcome.decisions)
                     blockGists[bi] = outcome.plan.gist.take(200)
@@ -185,7 +187,7 @@ class RoughReadPlanner(
                 saveOverview(chapter, blockGists[0]!!, blockTerms[0])
             } else {
                 // 多块归并；或单块 mergeOnly（blockGists 空，走库标注重建要点后归并）
-                val merge = mergeOverview(chapter, blocks, blockGists, blockTerms, cfg, key, keepOldIfFail = !force)
+                val merge = mergeOverview(chapter, blocks, blockGists, blockTerms, mainLlm, keepOldIfFail = !force)
                 degraded = merge.degraded
                 keptOld = merge.keptOld
             }
@@ -220,13 +222,12 @@ class RoughReadPlanner(
         systemPrompt: String,
         blockTotal: Int,
         chapterChars: Int,
-        cfg: SettingsSnapshot,
-        key: String,
+        noteLlm: ResolvedLlm,
     ): BlockOutcome {
         var lastError: Exception? = null
         repeat(ATTEMPTS) { attempt ->
             try {
-                return runBlockOnce(block, blockIndex, systemPrompt, blockTotal, chapterChars, cfg, key)
+                return runBlockOnce(block, blockIndex, systemPrompt, blockTotal, chapterChars, noteLlm)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AiException) {
@@ -248,8 +249,7 @@ class RoughReadPlanner(
         systemPrompt: String,
         blockTotal: Int,
         chapterChars: Int,
-        cfg: SettingsSnapshot,
-        key: String,
+        noteLlm: ResolvedLlm,
     ): BlockOutcome {
         val budget = PlanParser.unitBudget(block.chars, chapterChars, blockTotal)
         val filled = systemPrompt
@@ -257,10 +257,10 @@ class RoughReadPlanner(
             .replace("{block_total}", blockTotal.toString())
             .replace("{unit_budget}", budget.toString())
         val req = ChatRequest(
-            baseUrl = cfg.baseUrl,
-            apiKey = key,
-            // 逐块批注同属讲解类高频任务，跟讲解模型走；章级合并（mergeOverview）仍用主力
-            model = cfg.noteModel.ifBlank { cfg.model },
+            baseUrl = noteLlm.baseUrl,
+            apiKey = noteLlm.apiKey,
+            // 逐块批注同属讲解类高频任务，跟讲解角色档案走；章级合并（mergeOverview）仍用主力
+            model = noteLlm.model,
             temperature = 0.2,
             // 推理型模型的思考 token 计入 max_tokens：预算不足会被思考吃光、正文截断
             maxTokens = (block.paragraphs.size * AiBudgets.ROUGH_READ_PER_PARA_TOKENS + AiBudgets.ROUGH_READ_BASE_TOKENS)
@@ -304,8 +304,7 @@ class RoughReadPlanner(
         blocks: List<RoughReadBlock>,
         blockGists: Array<String?>,
         blockTerms: Array<List<KeyTermsCodec.TermPlain>>,
-        cfg: SettingsSnapshot,
-        key: String,
+        mainLlm: ResolvedLlm,
         keepOldIfFail: Boolean,
     ): MergeResult {
         val contributions = blocks.mapIndexed { bi, block ->
@@ -328,7 +327,7 @@ class RoughReadPlanner(
             try {
                 val merged = chatJsonFn(
                     ChatRequest(
-                        baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
+                        baseUrl = mainLlm.baseUrl, apiKey = mainLlm.apiKey, model = mainLlm.model,
                         temperature = 0.2,
                         // 原值 800 会被推理模型的思考 token 吃光导致正文截断
                         maxTokens = AiBudgets.OUTPUT_TOKENS_ROUGH_MIN,

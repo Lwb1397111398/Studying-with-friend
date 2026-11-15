@@ -2,8 +2,9 @@ package com.studyfriend.app.data.study
 
 import android.content.Context
 import android.util.Log
+import com.studyfriend.app.data.LlmRole
+import com.studyfriend.app.data.ResolvedLlm
 import com.studyfriend.app.data.SettingsRepository
-import com.studyfriend.app.data.SettingsSnapshot
 import com.studyfriend.app.data.ai.AiMessage
 import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.ai.ChatRequest
@@ -37,9 +38,9 @@ class OverviewPlanner(
         onDelta: (String) -> Unit = {},
     ): OverviewOutcome = withContext(Dispatchers.IO) {
         val book = db.bookDao().get(bookId) ?: throw PlannerException("书不存在")
-        val key = settings.decryptKeyOrNull()
+        // 主力角色档案（2026-11-15 多模型轮）：总览固定走主力
+        val llm = settings.resolveLlm(LlmRole.MAIN)
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
-        val cfg = settings.load()
         val systemPrompt = PromptLoader.load(context, PROMPT_OVERVIEW)
 
         // 输入只收已总结章（promptVersion 匹配且 summaryMd 非空）：
@@ -69,7 +70,7 @@ class OverviewPlanner(
             // 累计 partial 直通 UI（重试时归零重算）；按 STREAM_FLUSH_MS 节流发射
             val raw = StringBuilder()
             var lastFlush = 0L
-            val got = chatTextFn(overviewRequest(cfg, key, systemPrompt, userJson)) { delta ->
+            val got = chatTextFn(overviewRequest(llm, systemPrompt, userJson)) { delta ->
                 raw.append(delta)
                 val now = System.currentTimeMillis()
                 if (now - lastFlush >= STREAM_FLUSH_MS) {
@@ -94,7 +95,7 @@ class OverviewPlanner(
             treeText = result.treeText,
             mainlineMd = result.mainlineMd,
             promptVersion = OverviewCodec.VERSION,
-            model = cfg.model,
+            model = llm.model,
             createdAt = System.currentTimeMillis(),
         )
         db.bookDao().saveOverviewJson(bookId, OverviewCodec.encode(payload), System.currentTimeMillis())
@@ -102,12 +103,11 @@ class OverviewPlanner(
     }
 
     private fun overviewRequest(
-        cfg: SettingsSnapshot,
-        key: String,
+        llm: ResolvedLlm,
         systemPrompt: String,
         userJson: String,
     ) = ChatRequest(
-        baseUrl = cfg.baseUrl, apiKey = key, model = cfg.model,
+        baseUrl = llm.baseUrl, apiKey = llm.apiKey, model = llm.model,
         temperature = 0.5,
         // 推理型模型的思考 token 计入 max_tokens：三件套输出长，预算须给足
         maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,

@@ -15,12 +15,29 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/** 设置存取（计划 M3 §5）：4 键 upsert/读回/覆盖、加密 Key 往返、失效不删密文（仅结构性损坏删除） */
+/**
+ * 设置存取测试：讲解详略四键 + LLM 档案体系（2026-11-15 多模型轮）——
+ * 档案 CRUD、resolveLlm 各角色回退、旧配置一次性迁移（幂等）、Key 加密与失效策略。
+ */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class SettingsRepoTest {
 
-    private fun db() = StudyDatabase.build(ApplicationProvider.getApplicationContext())
+    /**
+     * 测试专用库：inMemory + 单线程 query/transaction executor——Robolectric legacy SQLite
+     * shadow 对「多连接写交替」的 busy timeout 极短，连续事务会偶发 SQLITE_BUSY（生产真机
+     * WAL 不存在此问题），单线程串行根治。MigrationTest 等仍用 StudyDatabase.build 不受影响。
+     */
+    private val dbExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    private fun db(): StudyDatabase =
+        androidx.room.Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            StudyDatabase::class.java,
+        )
+            .setQueryExecutor(dbExecutor)
+            .setTransactionExecutor(dbExecutor)
+            .build()
 
     @Test
     fun detailLevel_defaultStandard_roundTripInvalidFallback() = runBlocking {
@@ -40,161 +57,243 @@ class SettingsRepoTest {
         }
     }
 
+    // ---- 档案体系 ----
+
     @Test
-    fun saveAndLoad_roundTrip() = runBlocking {
+    fun loadLlm_freshInstall_createsDefaultMainProfile_idempotent() = runBlocking {
         val database = db()
         val repo = SettingsRepository(database, FakeSecretStore())
         try {
-            val loaded = repo.load()
-            assertEquals(SettingsRepository.DEFAULT_BASE, loaded.baseUrl)
-            assertEquals(SettingsRepository.DEFAULT_MODEL, loaded.model)
-            assertEquals(0.3, loaded.temperature, 1e-9)
-            assertFalse(loaded.hasKey)
+            val s = repo.loadLlm()
+            assertEquals("全新安装：自动建一个默认主力档案", 1, s.profiles.size)
+            assertEquals("主力", s.profiles[0].name)
+            assertEquals(SettingsRepository.DEFAULT_BASE, s.profiles[0].baseUrl)
+            assertEquals(SettingsRepository.DEFAULT_MODEL, s.profiles[0].model)
+            assertTrue(s.keyIds.isEmpty())
+            // 没 Key 时解析不可用
+            assertNull(repo.resolveLlm(LlmRole.MAIN))
+            // 再读不重复建档（迁移幂等）
+            assertEquals(1, repo.loadLlm().profiles.size)
+        } finally {
+            database.close()
+        }
+    }
 
-            repo.save("https://api.example.com/v1", "deepseek-chat", 0.5, "sk-我的Key")
-            val after = repo.load()
-            assertEquals("https://api.example.com/v1", after.baseUrl)
-            assertEquals("deepseek-chat", after.model)
-            assertEquals(0.5, after.temperature, 1e-9)
-            assertTrue(after.hasKey)
+    @Test
+    fun saveProfile_keyRoundTrip_plaintextNeverOnDisk() = runBlocking {
+        val database = db()
+        val repo = SettingsRepository(database, FakeSecretStore())
+        try {
+            repo.seedMainProfile("https://api.example.com/v1", "deepseek-chat", 0.5, "sk-我的Key")
+            val s = repo.loadLlm()
+            assertEquals(1, s.profiles.size)
+            assertEquals("https://api.example.com/v1", s.profiles[0].baseUrl)
+            assertEquals("deepseek-chat", s.profiles[0].model)
+            assertEquals(1, s.keyIds.size)
+
+            val llm = repo.resolveLlm(LlmRole.MAIN)!!
+            assertEquals("deepseek-chat", llm.model)
+            assertEquals("sk-我的Key", llm.apiKey)
+            assertEquals(0.5, llm.temperature, 1e-9)
 
             // 明文不落库：settings 表里只有密文
-            val raw = database.settingDao().get(SettingsRepository.KEY_ENC)!!.value
+            val raw = database.settingDao().get("llm_key_${llm.profileId}_enc")!!.value
             assertFalse(raw.contains("sk-我的Key"))
 
-            // save 不传 Key 时不清掉已有密文
-            repo.save("https://api.example.com/v2", "m2", 0.1, null)
-            assertTrue(repo.load().hasKey)
+            // 再保存不传 Key：旧 Key 保持（不清除语义）
+            repo.saveProfile(s.profiles[0].copy(baseUrl = "https://api.example.com/v2"), null)
+            assertEquals("https://api.example.com/v2", repo.resolveLlm(LlmRole.MAIN)!!.baseUrl)
+            assertEquals("sk-我的Key", repo.resolveLlm(LlmRole.MAIN)!!.apiKey)
         } finally {
             database.close()
         }
     }
 
     @Test
-    fun decryptKey_returnsPlain_whenStoreHealthy() = runBlocking {
+    fun resolveLlm_roleFallbacks_andVision2OptIn() = runBlocking {
         val database = db()
         val repo = SettingsRepository(database, FakeSecretStore())
         try {
-            repo.save("https://b/v1", "m", 0.3, "sk-明文Key")
-            assertEquals("sk-明文Key", repo.decryptKeyOrNull())
+            repo.seedMainProfile("https://a.example.com/v1", "main-model", 0.3, "main-key")
+            // 讲解/视觉未指派 = 跟随主力（模型取主力档案）
+            assertEquals("main-model", repo.resolveLlm(LlmRole.NOTE)!!.model)
+            assertEquals("main-model", repo.resolveLlm(LlmRole.VISION)!!.model)
+            // 备用视觉未指派 = 不启用
+            assertNull(repo.resolveLlm(LlmRole.VISION2))
+
+            // 指派讲解到独立档案（Key 与主力不同家也各拿各的）
+            repo.saveProfile(LlmProfile("note1", "讲解", "https://b.example.com/v1", "cheap-model"), "note-key")
+            repo.saveAssign(repo.loadLlm().assign.copy(note = "note1"))
+            val note = repo.resolveLlm(LlmRole.NOTE)!!
+            assertEquals("cheap-model", note.model)
+            assertEquals("https://b.example.com/v1", note.baseUrl)
+            assertEquals("note-key", note.apiKey)
+            // 主力不受指派影响
+            assertEquals("main-model", repo.resolveLlm(LlmRole.MAIN)!!.model)
+
+            // 指派的档案没 Key → 该角色不可用（不偷偷回退主力 Key：异家 Key 打异家 URL 无意义）
+            repo.saveProfile(LlmProfile("note2", "讲解2", "https://b.example.com/v1", "m2"), null)
+            repo.saveAssign(repo.loadLlm().assign.copy(note = "note2"))
+            assertNull(repo.resolveLlm(LlmRole.NOTE))
+
+            // 指派失效（档案不存在）→ 回退主力
+            repo.saveAssign(repo.loadLlm().assign.copy(note = "ghost-id"))
+            assertEquals("main-model", repo.resolveLlm(LlmRole.NOTE)!!.model)
         } finally {
             database.close()
         }
     }
 
     @Test
-    fun decryptFailure_keepsCipherAndReturnsNull() = runBlocking {
+    fun deleteProfile_clearsAssignRefsAndKey() = runBlocking {
         val database = db()
-        // 失效场景：decrypt 恒抛异常（换机/清数据后的 KeyStore）
+        val repo = SettingsRepository(database, FakeSecretStore())
+        try {
+            repo.seedMainProfile("https://a.example.com/v1", "main-model", 0.3, "main-key")
+            repo.saveProfile(LlmProfile("p2", "讲解", "https://b.example.com/v1", "m2"), "k2")
+            repo.saveAssign(repo.loadLlm().assign.copy(note = "p2", vision = "p2", vision2 = "p2"))
+
+            repo.deleteProfile("p2")
+            val s = repo.loadLlm()
+            assertEquals("只剩主力档案", 1, s.profiles.size)
+            assertEquals("讲解指拔回收=跟随主力", "", s.assign.note)
+            assertEquals("", s.assign.vision)
+            assertEquals("备用指派回收=不启用", "", s.assign.vision2)
+            assertNull("档案 Key 一并清除", database.settingDao().get("llm_key_p2_enc"))
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
+    fun profileKey_decryptFailureKept_structuralCorruptDeleted() = runBlocking {
+        val database = db()
         val repo = SettingsRepository(database, FakeSecretStore(failDecrypt = true))
         try {
-            repo.save("https://x/v1", "m", 0.3, "plain-key")
-            assertNull(repo.decryptKeyOrNull())
-            // FakeSecretStore 加密产物（plain.reversed()）无前缀 = 遗留密文 → 解密失败走保留路径
-            assertNotNull(database.settingDao().get(SettingsRepository.KEY_ENC)?.value)
+            val id = "p1"
+            repo.saveProfile(LlmProfile(id, "主力", "https://a/v1", "m"), "plain-key")
+            // FakeSecretStore 加密产物无前缀 = 遗留密文口径 → 解密失败保留密文
+            assertNull(repo.resolveLlm(LlmRole.MAIN))
+            assertNotNull(database.settingDao().get("llm_key_${id}_enc")?.value)
+
+            // 结构性损坏（带来源标记但非合法 Base64）→ 删除让用户重填
+            database.settingDao().upsert(SettingEntity("llm_key_${id}_enc", "s1:!!!not-base64!!!"))
+            assertNull(repo.decryptProfileKeyOrNull(id))
+            assertNull(database.settingDao().get("llm_key_${id}_enc"))
         } finally {
             database.close()
         }
     }
 
     @Test
-    fun markedCipherWithIllegalBase64Body_isDeleted() = runBlocking {
+    fun clearProfileKey_removesEntry() = runBlocking {
         val database = db()
         val repo = SettingsRepository(database, FakeSecretStore())
         try {
-            database.settingDao().upsert(SettingEntity(SettingsRepository.KEY_ENC, "s1:!!!not-base64!!!"))
-            assertNull(repo.decryptKeyOrNull())
-            assertNull(database.settingDao().get(SettingsRepository.KEY_ENC)) // 已删除
+            repo.seedMainProfile("https://a/v1", "m", 0.3, "sk-x")
+            val id = repo.loadLlm().profiles[0].id
+            assertTrue(repo.hasProfileKey(id))
+            repo.clearProfileKey(id)
+            assertFalse(repo.hasProfileKey(id))
+            assertNull(repo.resolveLlm(LlmRole.MAIN))
         } finally {
             database.close()
         }
     }
 
-    @Test
-    fun legacyCipher_decryptFailure_isKept() = runBlocking {
-        val database = db()
-        val repo = SettingsRepository(database, FakeSecretStore(failDecrypt = true))
-        try {
-            database.settingDao().upsert(SettingEntity(SettingsRepository.KEY_ENC, "遗留原始串无前缀"))
-            assertNull(repo.decryptKeyOrNull())
-            assertEquals("遗留原始串无前缀", database.settingDao().get(SettingsRepository.KEY_ENC)?.value)
-        } finally {
-            database.close()
-        }
+    // ---- 旧配置迁移 ----
+
+    /** 手工铺一套完整旧版配置（老用户升级现场） */
+    private suspend fun seedLegacy(database: StudyDatabase, noteModel: String = "cheap-model") {
+        val dao = database.settingDao()
+        dao.upsert(SettingEntity("api_base", "https://old.example.com/v1"))
+        dao.upsert(SettingEntity("api_model", "old-main"))
+        dao.upsert(SettingEntity("api_temp", "0.4"))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_ENC, "k1:MAINKEYCIPHER"))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_NOTE_MODEL, noteModel))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_VISION_MODEL, "vision-old"))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_VISION_BASE, "https://vision.example.com/v1"))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_VISION_KEY_ENC, "k1:VISIONKEYCIPHER"))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_VISION2_BASE, "https://v2.example.com/v1"))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_VISION2_MODEL, "vision2-old"))
+        dao.upsert(SettingEntity(SettingsRepository.KEY_VISION2_KEY_ENC, "k1:V2KEYCIPHER"))
     }
 
     @Test
-    fun clearKey_removesEntry() = runBlocking {
-        val database = db()
-        val repo = SettingsRepository(database, FakeSecretStore())
-        try {
-            repo.save("https://b/v1", "m", 0.3, "sk-x")
-            assertTrue(repo.load().hasKey)
-            repo.clearKey()
-            assertFalse(repo.load().hasKey)
-            assertNull(repo.decryptKeyOrNull())
-        } finally {
-            database.close()
-        }
-    }
-
-    @Test
-    fun noteModel_roundTrip_andClearFallsBackToMain() = runBlocking {
-        // 讲解模型（按用途选模型）：保存 → 快照带出；清空（空白）→ 回跟随主力
+    fun migration_fullLegacy_createsAllProfiles() = runBlocking {
         val database = db()
         val repo = SettingsRepository(database, FakeSecretStore())
         try {
-            assertTrue(repo.load().noteModel.isBlank()) // 默认跟随主力
+            // FakeSecretStore 对任意串都可逆（reversed）——迁移只平移密文不解密，
+            // keyIds 只看「是否有密文」，断言不涉及 Key 内容
+            seedLegacy(database)
+            val s = repo.loadLlm()
+            assertEquals("主力+讲解+视觉转写+备用视觉", 4, s.profiles.size)
+            val byName = s.profiles.associateBy { it.name }
+            assertEquals("https://old.example.com/v1", byName["主力"]!!.baseUrl)
+            assertEquals("old-main", byName["主力"]!!.model)
+            assertEquals(0.4, byName["主力"]!!.temperature, 1e-9)
+            assertEquals("old-main 的讲解另有模型 → 独立档案", "cheap-model", byName["讲解"]!!.model)
+            assertEquals("讲解地址沿用旧主力地址", "https://old.example.com/v1", byName["讲解"]!!.baseUrl)
+            assertEquals("vision-old", byName["视觉转写"]!!.model)
+            assertEquals("https://vision.example.com/v1", byName["视觉转写"]!!.baseUrl)
+            assertEquals("vision2-old", byName["备用视觉"]!!.model)
 
-            repo.saveNoteModel("flash-lite-1.5")
-            assertEquals("flash-lite-1.5", repo.load().noteModel)
+            assertEquals("讲解指派到讲解档案", byName["讲解"]!!.id, s.assign.note)
+            assertEquals(byName["视觉转写"]!!.id, s.assign.vision)
+            assertEquals(byName["备用视觉"]!!.id, s.assign.vision2)
+            assertEquals("主力指派留空（回退第一档）", "", s.assign.main)
 
-            // 前后空白自动 trim
-            repo.saveNoteModel("  quick-model  ")
-            assertEquals("quick-model", repo.load().noteModel)
-
-            // 空串/null = 清空回跟随主力
-            repo.saveNoteModel("")
-            assertTrue(repo.load().noteModel.isBlank())
-            repo.saveNoteModel("m")
-            repo.saveNoteModel(null)
-            assertTrue(repo.load().noteModel.isBlank())
+            // Key 密文平移：每个档案都有密文（明文永不出库）
+            assertEquals(4, s.keyIds.size)
+            // 迁移幂等：再读数量不变、旧键没被动
+            assertEquals(4, repo.loadLlm().profiles.size)
+            assertNotNull(database.settingDao().get(SettingsRepository.KEY_ENC))
         } finally {
             database.close()
         }
     }
 
     @Test
-    fun visionIndependentBaseAndKey_roundTripAndFallback() = runBlocking {
-        // 视觉专属地址/Key 独立存取；未配置时视觉 Key 回退主 Key；清除后同样回退
+    fun migration_noteModelSameAsMain_noExtraNoteProfile() = runBlocking {
         val database = db()
         val repo = SettingsRepository(database, FakeSecretStore())
         try {
-            repo.save("https://a.example.com/v1", "m1", 0.3, "main-key-123")
-            assertFalse(repo.load().hasVisionKey)
-            assertEquals("main-key-123", repo.resolveVisionKeyOrNull())
-
-            repo.saveVision(true, "vision-m", "https://vision.example.com/v1", "vision-key-789")
-            val snap = repo.load()
-            assertTrue(snap.hasVisionKey)
-            assertEquals("https://vision.example.com/v1", snap.visionBaseUrl)
-            assertEquals("vision-m", snap.visionModel)
-            assertEquals("vision-key-789", repo.decryptVisionKeyOrNull())
-            assertEquals("vision-key-789", repo.resolveVisionKeyOrNull())
-            assertEquals("main-key-123", repo.decryptKeyOrNull()) // 主 Key 不受影响
-
-            // 开关即点即存（其余参数缺省）不覆盖已存的地址与 Key
-            repo.saveVision(false)
-            val snap2 = repo.load()
-            assertFalse(snap2.visionEnabled)
-            assertEquals("https://vision.example.com/v1", snap2.visionBaseUrl)
-            assertEquals("vision-key-789", repo.resolveVisionKeyOrNull())
-
-            repo.clearVisionKey()
-            assertFalse(repo.load().hasVisionKey)
-            assertEquals("main-key-123", repo.resolveVisionKeyOrNull())
+            seedLegacy(database, noteModel = "old-main") // 与主力模型相同 → 不单独立档
+            // 本用例专测「讲解不立档」：清掉备用视觉三键（seedLegacy 默认带备用）
+            val dao = database.settingDao()
+            dao.delete(SettingsRepository.KEY_VISION2_BASE)
+            dao.delete(SettingsRepository.KEY_VISION2_MODEL)
+            dao.delete(SettingsRepository.KEY_VISION2_KEY_ENC)
+            val s = repo.loadLlm()
+            assertEquals("主力+视觉转写（备用没配）", 2, s.profiles.size)
+            assertEquals("讲解跟主力", "", s.assign.note)
+            assertEquals("", s.assign.vision2)
         } finally {
             database.close()
         }
+    }
+
+    @Test
+    fun migration_freshLegacyOnlyMain_keyResolvesAfterMigrate() = runBlocking {
+        val database = db()
+        val repo = SettingsRepository(database, FakeSecretStore())
+        try {
+            val dao = database.settingDao()
+            dao.upsert(SettingEntity("api_base", "https://only.example.com/v1"))
+            dao.upsert(SettingEntity("api_model", "only-main"))
+            dao.upsert(SettingEntity(SettingsRepository.KEY_ENC, "k1:CIPHER"))
+            val s = repo.loadLlm()
+            assertEquals("没配讲解/备用，也有默认视觉档案（沿用旧默认 LongCat 行为）", 2, s.profiles.size)
+            assertEquals("", s.assign.note)
+            assertNotNull(s.assign.vision)
+            assertEquals(DEFAULT_VISION_NAME, s.profiles.first { it.id == s.assign.vision }.model)
+        } finally {
+            database.close()
+        }
+    }
+
+    private companion object {
+        const val DEFAULT_VISION_NAME = "LongCat-2.5-Preview"
     }
 }

@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.tts.TtsModelManager
+import com.studyfriend.app.ui.components.SectionCard
 
 /**
  * 设置页（瘦身版）：模型类配置收进「模型」页，这里只剩模型入口卡片（显示当前
@@ -66,7 +67,7 @@ fun SettingsScreen(
         ) {
             Text("设置", style = MaterialTheme.typography.headlineSmall)
 
-            // —— 模型入口：AI 功能的地址/Key/模型都在「模型」页配置 ——
+            // —— 模型入口：AI 档案与各任务指派都在「模型」页配置 ——
             SectionCard {
                 Text("AI 模型", style = MaterialTheme.typography.labelLarge)
                 Row(
@@ -90,7 +91,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            "点进去配置地址、Key、各任务的模型",
+                            "点进去管理模型档案、按任务指派",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
@@ -237,22 +238,6 @@ fun SettingsScreen(
 
             BackupSection(vm)
         }
-    }
-}
-
-/** 设置页分区卡（2026-11-15 UI 打磨轮）：surfaceContainer 圆角卡替代细分割线分组 */
-@Composable
-private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            content = content,
-        )
     }
 }
 

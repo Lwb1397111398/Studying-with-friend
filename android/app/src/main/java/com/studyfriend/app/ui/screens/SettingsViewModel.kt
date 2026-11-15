@@ -223,19 +223,23 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 从模型页改完配置返回设置页时刷新摘要 */
+    /** 从模型页改完配置返回设置页时刷新摘要（2026-11-15 起读档案体系） */
     fun refreshSummary() {
         viewModelScope.launch {
             try {
-                val s = repo.load()
-                mainModel = s.model
-                keyReady = s.hasKey
-                noteSummary = if (s.noteModel.isBlank()) "跟随主力" else s.noteModel
-                visionSummary = if (s.visionEnabled) s.visionModel else "已关闭"
+                val s = repo.loadLlm()
+                val main = s.profiles.firstOrNull { it.id == s.assign.main } ?: s.profiles.firstOrNull()
+                mainModel = main?.model.orEmpty()
+                keyReady = main != null && main.id in s.keyIds
+                noteSummary = s.assign.note.takeIf { it.isNotBlank() }
+                    ?.let { id -> s.profiles.firstOrNull { it.id == id }?.name } ?: "跟随主力"
+                val visionProfile = s.assign.vision.takeIf { it.isNotBlank() }
+                    ?.let { id -> s.profiles.firstOrNull { it.id == id }?.name } ?: "跟随主力"
+                visionSummary = if (repo.load().visionEnabled) visionProfile else "已关闭"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // 摘要只是展示，读失败静默保留旧值（正常路径 load 不会抛）
+                // 摘要只是展示，读失败静默保留旧值（正常路径 loadLlm 不会抛）
             }
         }
     }

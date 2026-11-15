@@ -104,26 +104,26 @@ internal fun QuickQaSheet(
             try {
                 // KeyStore 解密（binder IPC）+ 首次读 assets 提示词是同步重活，别在主线程做
                 val prepared = withContext(Dispatchers.IO) {
-                    val cfg = app.settingsRepo.load()
-                    val key = app.settingsRepo.decryptKeyOrNull()
-                    if (key == null) null else Triple(cfg, key, PromptLoader.load(app, "quick_qa"))
+                    // 讲解角色档案（2026-11-15 多模型轮）：随手问是高频轻任务，未指派跟随主力
+                    val llm = app.settingsRepo.resolveLlm(com.studyfriend.app.data.LlmRole.NOTE)
+                    if (llm == null) null else llm to PromptLoader.load(app, "quick_qa")
                 }
                 if (prepared == null) {
                     noKey = true
                     streaming = null
                     return@launch
                 }
-                val (cfg, key, systemPrompt) = prepared
+                val (llm, systemPrompt) = prepared
                 // 打字机节流：StringBuilder 攒增量，至多每 QA_STREAM_FLUSH_MS 刷一次状态。
                 // 逐 delta 全文重拼字符串是 O(n²) 拷贝且每个 delta 触发整卡重组+滚动，长回答越到后面越卡
                 val answer = StringBuilder()
                 var lastFlush = 0L
                 val result = AiClient.chat(
                     ChatRequest(
-                        baseUrl = cfg.baseUrl,
-                        apiKey = key,
-                        // 讲解模型（按用途选模型）：随手问是高频轻任务，空则跟随主力
-                        model = cfg.noteModel.ifBlank { cfg.model },
+                        baseUrl = llm.baseUrl,
+                        apiKey = llm.apiKey,
+                        // 讲解角色档案：随手问是高频轻任务，未指派跟随主力
+                        model = llm.model,
                         temperature = 0.5,
                         maxTokens = 4000,
                         messages = QuickQa.messages(systemPrompt, ctx, history, question),

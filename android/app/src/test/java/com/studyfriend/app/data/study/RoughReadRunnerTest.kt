@@ -50,7 +50,7 @@ class RoughReadRunnerTest {
         )
         chA = seedChapter("甲章", "A 章正文")
         chB = seedChapter("乙章", "B 章正文")
-        SettingsRepository(db, FakeSecretStore()).save("https://api.test/v1", "m", 0.3, "sk-test")
+        SettingsRepository(db, FakeSecretStore()).seedMainProfile("https://api.test/v1", "m", 0.3, "sk-test")
     }
 
     @After

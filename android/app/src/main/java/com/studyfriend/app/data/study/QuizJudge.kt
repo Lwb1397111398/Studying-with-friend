@@ -1,6 +1,7 @@
 package com.studyfriend.app.data.study
 
 import android.content.Context
+import com.studyfriend.app.data.LlmRole
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.ai.AiBudgets
 import com.studyfriend.app.data.ai.AiClient
@@ -51,16 +52,16 @@ object QuizJudge {
         reference: String,
         explain: String,
     ): QuizJudgeResult = withContext(Dispatchers.IO) {
-        val key = repo.decryptKeyOrNull()
+        // 讲解角色档案（2026-11-15 多模型轮）：判卷是逐题轻任务，跟讲解走
+        val llm = repo.resolveLlm(LlmRole.NOTE)
             ?: throw MissingKeyException("API Key 已失效或未保存，请先到设置页填写")
-        val cfg = repo.load()
         val systemPrompt = PromptLoader.load(context, PROMPT_JUDGE)
         normalize(
             AiClient.chatJson(
                 ChatRequest(
-                    baseUrl = cfg.baseUrl,
-                    apiKey = key,
-                    model = cfg.noteModel.ifBlank { cfg.model },
+                    baseUrl = llm.baseUrl,
+                    apiKey = llm.apiKey,
+                    model = llm.model,
                     temperature = 0.2,
                     maxTokens = AiBudgets.OUTPUT_TOKENS_JUDGE,
                     messages = listOf(

@@ -53,7 +53,7 @@ class SummaryPlannerTest {
             db,
             listOf(Triple(0, "EXPLAIN", null), Triple(1, "GROUP", 2L), Triple(2, "GROUP", 2L)),
         )
-        SettingsRepository(db, FakeSecretStore()).save("https://api.test/v1", "test-model", 0.3, "sk-test")
+        SettingsRepository(db, FakeSecretStore()).seedMainProfile("https://api.test/v1", "test-model", 0.3, "sk-test")
     }
 
     @After
@@ -222,7 +222,7 @@ class SummaryPlannerTest {
         ).allowMainThreadQueries().build()
         val emptyCh = seed(fresh, listOf(Triple(0, "NONE", null)))
         val freshSettings = SettingsRepository(fresh, FakeSecretStore())
-        freshSettings.save("https://api.test/v1", "test-model", 0.3, "sk-test") // 先过 Key 检查，专测无标注拒绝
+        freshSettings.seedMainProfile("https://api.test/v1", "test-model", 0.3, "sk-test") // 先过 Key 检查，专测无标注拒绝
         val fake = FakeChatText()
 
         val err = runCatching {
@@ -317,7 +317,7 @@ class SummaryPlannerTest {
             .build()
 
         val chW = seed(fresh, listOf(Triple(0, "EXPLAIN", null)))
-        SettingsRepository(fresh, FakeSecretStore()).save("https://api.test/v1", "test-model", 0.3, "sk-test")
+        SettingsRepository(fresh, FakeSecretStore()).seedMainProfile("https://api.test/v1", "test-model", 0.3, "sk-test")
         fresh.chapterAssetDao().upsert(
             ChapterAssetEntity(
                 chapterId = chW, summaryMd = "旧总结", mindmapTree = "旧树", mindmapJson = null,

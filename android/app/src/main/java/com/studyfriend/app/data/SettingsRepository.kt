@@ -12,29 +12,20 @@ import com.studyfriend.app.data.importer.pdfpipeline.TextSourceRow
 import com.studyfriend.app.data.importer.pdfpipeline.TocVisionParser
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import java.io.File
+import java.util.UUID
 import javax.crypto.SecretKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
-/** 设置页配置快照（Key 永不明文出库，只给"是否已存"） */
+/**
+ * 设置页配置快照（Key 永不明文出库，只给"是否已存"）。
+ * AI 端点配置已升级为「档案」体系（见 [loadLlm] / [resolveLlm]），本快照只剩非端点类设置。
+ */
 data class SettingsSnapshot(
-    val baseUrl: String,
-    val model: String,
-    val temperature: Double,
-    val hasKey: Boolean,
-    /** 视觉兜底开关（OPT-E）：默认开；无 Key 时导入流程自动跳过视觉 */
+    /** 视觉兜底开关（OPT-E）：默认开；无可用档案时导入流程自动跳过视觉 */
     val visionEnabled: Boolean,
-    /** 视觉转写模型：与聊天模型分离（聊天用的文本模型不一定带视觉） */
-    val visionModel: String,
-    /** 视觉专属 API 地址：空 = 跟主配置同一家（文本走 A 家、视觉兜底走 B 家时才填） */
-    val visionBaseUrl: String,
-    /** 是否已存视觉专属 Key（明文不出库） */
-    val hasVisionKey: Boolean,
-    /** 备用视觉组（R3 多模型轮转）：空 = 未配置备用；三键齐（地址/模型/专属 Key）才参与轮转 */
-    val vision2BaseUrl: String,
-    val vision2Model: String,
-    /** 是否已存备用视觉专属 Key（明文不出库；备用组不回退主 Key——异家 Key 打异家 URL 无意义） */
-    val hasVision2Key: Boolean,
     /** 应用自更新（M7）：是否已存 GitHub 只读令牌（明文不出库） */
     val hasGithubToken: Boolean,
     /** 发现新版本自动弹窗检查；默认开 */
@@ -43,11 +34,6 @@ data class SettingsSnapshot(
     val updateApiBase: String,
     /** 扫描书本地识别（OCR）开关（P6b S4）：默认开；off = 扫描书走现状路径（回滚方案载体） */
     val ocrEnabled: Boolean,
-    /**
-     * 讲解模型（按用途选模型）：段落讲解与粗读批注是逐段调用、用量最大的任务，
-     * 可单独配便宜快速的模型；空 = 跟随主力模型（cfg.model）。
-     */
-    val noteModel: String,
 )
 
 /**
@@ -61,42 +47,233 @@ class SettingsRepository(
     private val store: SecretStore,
 ) {
 
-    suspend fun load(): SettingsSnapshot {
-        val base = db.settingDao().get("api_base")?.value.orEmpty()
-        val model = db.settingDao().get("api_model")?.value.orEmpty()
-        val tempRaw = db.settingDao().get("api_temp")?.value.orEmpty()
-        val temp = tempRaw.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 0.3
-        return SettingsSnapshot(
-            baseUrl = base.ifBlank { DEFAULT_BASE },
-            model = model.ifBlank { DEFAULT_MODEL },
-            temperature = temp,
-            hasKey = db.settingDao().get(KEY_ENC)?.value != null,
-            visionEnabled = db.settingDao().get(KEY_VISION_ENABLED)?.value != "false",
-            visionModel = db.settingDao().get(KEY_VISION_MODEL)?.value
-                ?.takeIf { it.isNotBlank() } ?: DEFAULT_VISION_MODEL,
-            visionBaseUrl = db.settingDao().get(KEY_VISION_BASE)?.value.orEmpty(),
-            hasVisionKey = db.settingDao().get(KEY_VISION_KEY_ENC)?.value != null,
-            vision2BaseUrl = db.settingDao().get(KEY_VISION2_BASE)?.value.orEmpty(),
-            vision2Model = db.settingDao().get(KEY_VISION2_MODEL)?.value.orEmpty(),
-            hasVision2Key = db.settingDao().get(KEY_VISION2_KEY_ENC)?.value != null,
-            hasGithubToken = db.settingDao().get(KEY_GITHUB_TOKEN_ENC)?.value != null,
-            updateAutoCheck = db.settingDao().get(KEY_UPDATE_AUTO)?.value != "false",
-            updateApiBase = db.settingDao().get(KEY_UPDATE_API_BASE)?.value.orEmpty(),
-            ocrEnabled = db.settingDao().get(KEY_OCR_ENABLED)?.value != "false",
-            noteModel = db.settingDao().get(KEY_NOTE_MODEL)?.value.orEmpty(),
+    suspend fun load(): SettingsSnapshot = SettingsSnapshot(
+        visionEnabled = db.settingDao().get(KEY_VISION_ENABLED)?.value != "false",
+        hasGithubToken = db.settingDao().get(KEY_GITHUB_TOKEN_ENC)?.value != null,
+        updateAutoCheck = db.settingDao().get(KEY_UPDATE_AUTO)?.value != "false",
+        updateApiBase = db.settingDao().get(KEY_UPDATE_API_BASE)?.value.orEmpty(),
+        ocrEnabled = db.settingDao().get(KEY_OCR_ENABLED)?.value != "false",
+    )
+
+    // ============ LLM 档案体系（2026-11-15 多模型轮）============
+    // 档案列表与功能分配存 settings KV（JSON）；每个档案的 Key 单独加密存
+    // `llm_key_<id>_enc`（_enc 后缀 = 备份导出自动排除、恢复不碰）。
+    // 旧版「主力 + 讲解模型名 + 视觉两组」配置首次读取时自动迁移成档案，旧键不删（降级安全）。
+
+    private val llmJson = Json { ignoreUnknownKeys = true }
+
+    /** 档案快照（首次调用自动迁移旧配置）；keyIds = 已存 Key 的档案 id 集合（明文不出库） */
+    suspend fun loadLlm(): LlmSettings {
+        migrateLegacyLlmIfNeeded()
+        return LlmSettings(
+            profiles = readProfiles(),
+            assign = readAssign(),
+            keyIds = readProfiles().mapNotNullTo(HashSet()) {
+                if (hasProfileKey(it.id)) it.id else null
+            },
         )
     }
 
-    suspend fun save(baseUrl: String, model: String, temperature: Double, keyPlain: String?) {
-        // 多键一次保存包成事务：中途失败不留半套配置（最终 QA P2-7）
+    /** 保存档案（新建或整行覆盖；keyPlain 非空 = 加密写入，null/空白 = 保持已有 Key 不动） */
+    suspend fun saveProfile(profile: LlmProfile, keyPlain: String?) {
+        val clean = profile.copy(
+            name = profile.name.trim().ifBlank { "档案" },
+            baseUrl = profile.baseUrl.trim(),
+            model = profile.model.trim(),
+        )
         db.withTransaction {
-            db.settingDao().upsert(SettingEntity("api_base", baseUrl.trim()))
-            db.settingDao().upsert(SettingEntity("api_model", model.trim()))
-            db.settingDao().upsert(SettingEntity("api_temp", temperature.toString()))
+            val cur = readProfiles().toMutableList()
+            val idx = cur.indexOfFirst { it.id == clean.id }
+            if (idx >= 0) cur[idx] = clean else cur += clean
+            db.settingDao().upsert(SettingEntity(KEY_LLM_PROFILES, llmJson.encodeToString(cur)))
             if (!keyPlain.isNullOrBlank()) {
-                val payload = store.encrypt(keyPlain.trim())
-                db.settingDao().upsert(SettingEntity(KEY_ENC, payload))
+                db.settingDao().upsert(
+                    SettingEntity(profileKeyName(clean.id), store.encrypt(keyPlain.trim())),
+                )
             }
+        }
+    }
+
+    /** 删除档案并清掉指向它的分配（main 回退第一档、note/vision 回跟主力、vision2 回不启用） */
+    suspend fun deleteProfile(id: String) {
+        db.withTransaction {
+            db.settingDao().upsert(
+                SettingEntity(KEY_LLM_PROFILES, llmJson.encodeToString(readProfiles().filterNot { it.id == id })),
+            )
+            db.settingDao().delete(profileKeyName(id))
+            val a = readAssign()
+            if (a.main == id || a.note == id || a.vision == id || a.vision2 == id) {
+                db.settingDao().upsert(
+                    SettingEntity(
+                        KEY_LLM_ASSIGN,
+                        llmJson.encodeToString(
+                            a.copy(
+                                main = a.main.takeUnless { it == id }.orEmpty(),
+                                note = a.note.takeUnless { it == id }.orEmpty(),
+                                vision = a.vision.takeUnless { it == id }.orEmpty(),
+                                vision2 = a.vision2.takeUnless { it == id }.orEmpty(),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+    }
+
+    /** 保存功能分配（即点即存） */
+    suspend fun saveAssign(assign: LlmAssign) {
+        db.settingDao().upsert(SettingEntity(KEY_LLM_ASSIGN, llmJson.encodeToString(assign)))
+    }
+
+    /**
+     * 解析某角色的实际端点（Key 已解密）。返回 null = 该角色当前不可用（没档案/没 Key）：
+     * - MAIN：分配失效时回退第一个档案
+     * - NOTE / VISION：未分配 = 跟随主力；分配失效（档案被删）也回退主力
+     * - VISION2：未分配或失效 = null（备用视觉不启用，不回退——异家 Key 打异家 URL 无意义）
+     */
+    suspend fun resolveLlm(role: LlmRole): ResolvedLlm? {
+        val s = loadLlm()
+        if (s.profiles.isEmpty()) return null
+        val main = s.profiles.firstOrNull { it.id == s.assign.main } ?: s.profiles.first()
+        val target = when (role) {
+            LlmRole.MAIN -> main
+            LlmRole.NOTE -> s.profiles.firstOrNull { it.id == s.assign.note } ?: main
+            LlmRole.VISION -> s.profiles.firstOrNull { it.id == s.assign.vision } ?: main
+            LlmRole.VISION2 -> s.profiles.firstOrNull { it.id == s.assign.vision2 } ?: return null
+        }
+        val key = decryptProfileKeyOrNull(target.id) ?: return null
+        return ResolvedLlm(
+            profileId = target.id,
+            profileName = target.name,
+            baseUrl = target.baseUrl.ifBlank { DEFAULT_BASE },
+            apiKey = key,
+            model = target.model.ifBlank { DEFAULT_MODEL },
+            temperature = target.temperature.coerceIn(0.0, 1.0),
+        )
+    }
+
+    /** 解档案 Key 明文：解密失败返回 null 保留密文；仅结构性损坏删除（与旧 Key 同策略，OPT-A） */
+    suspend fun decryptProfileKeyOrNull(id: String): String? {
+        val name = profileKeyName(id)
+        val payload = db.settingDao().get(name)?.value ?: return null
+        if (isStructurallyCorrupt(payload)) {
+            db.settingDao().delete(name)
+            return null
+        }
+        return try {
+            store.decrypt(payload)
+        } catch (e: SecretCryptoException) {
+            null
+        }
+    }
+
+    suspend fun hasProfileKey(id: String): Boolean =
+        db.settingDao().get(profileKeyName(id))?.value != null
+
+    /** 清除档案 Key（之后 resolveLlm 对该档案返回 null，UI 提示重填） */
+    suspend fun clearProfileKey(id: String) {
+        db.settingDao().delete(profileKeyName(id))
+    }
+
+    /** 播种主力档案（仅测试用）：更新「主力指向的档案」，没有档案时新建一个 */
+    suspend fun seedMainProfile(baseUrl: String, model: String, temperature: Double, keyPlain: String?) {
+        val s = loadLlm()
+        val existing = s.profiles.firstOrNull { it.id == s.assign.main } ?: s.profiles.firstOrNull()
+        val p = existing?.copy(baseUrl = baseUrl, model = model, temperature = temperature)
+            ?: LlmProfile(newProfileId(), "主力", baseUrl, model, temperature)
+        saveProfile(p, keyPlain)
+        if (existing == null) saveAssign(readAssign().copy(main = p.id))
+    }
+
+    // ---- 档案读写内部件 ----
+
+    private suspend fun readProfiles(): List<LlmProfile> =
+        db.settingDao().get(KEY_LLM_PROFILES)?.value
+            ?.let { raw -> runCatching { llmJson.decodeFromString<List<LlmProfile>>(raw) }.getOrDefault(emptyList()) }
+            ?.filter { it.id.isNotBlank() }
+            .orEmpty()
+
+    private suspend fun readAssign(): LlmAssign =
+        db.settingDao().get(KEY_LLM_ASSIGN)?.value
+            ?.let { raw -> runCatching { llmJson.decodeFromString<LlmAssign>(raw) }.getOrDefault(LlmAssign()) }
+            ?: LlmAssign()
+
+    private fun profileKeyName(id: String) = "llm_key_${id}_enc"
+
+    private fun newProfileId(): String = UUID.randomUUID().toString().substring(0, 8)
+
+    /** 旧 Key 密文原值平移（同一 SecretStore 加解密格式，无需重加密） */
+    private suspend fun copyKeyPayload(fromKeyName: String, toProfileId: String) {
+        db.settingDao().get(fromKeyName)?.value?.let {
+            db.settingDao().upsert(SettingEntity(profileKeyName(toProfileId), it))
+        }
+    }
+
+    /**
+     * 旧配置一次性迁移（幂等：llm_profiles 键存在即跳过；事务内防并发双跑）。旧键不删（降级安全）：
+     * - 主力（api_base/api_model/api_temp/api_key_enc）→ 档案「主力」
+     * - 讲解模型名非空且 ≠ 主力模型 → 档案「讲解」（地址/Key 沿用主力，密文原值平移）
+     * - 视觉组 → 档案「视觉转写」（专属地址/Key 优先回退主力；模型缺省 LongCat，保持旧默认行为）
+     * - 备用视觉三键齐 → 档案「备用视觉」
+     */
+    private suspend fun migrateLegacyLlmIfNeeded() {
+        if (db.settingDao().get(KEY_LLM_PROFILES)?.value != null) return
+        db.withTransaction {
+            if (db.settingDao().get(KEY_LLM_PROFILES)?.value != null) return@withTransaction
+            val dao = db.settingDao()
+            val legacyBase = dao.get("api_base")?.value.orEmpty().ifBlank { DEFAULT_BASE }
+            val legacyModel = dao.get("api_model")?.value.orEmpty().ifBlank { DEFAULT_MODEL }
+            val legacyTemp = dao.get("api_temp")?.value?.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 0.3
+
+            val mainId = newProfileId()
+            val profiles = mutableListOf(LlmProfile(mainId, "主力", legacyBase, legacyModel, legacyTemp))
+            var assign = LlmAssign()
+            copyKeyPayload(KEY_ENC, mainId) // 主力 Key 密文原值平移（讲解/视觉的平移同样以它为兜底源）
+
+            // 讲解：旧版只有模型名（地址/Key 永远跟主力）→ 有且不同于主力模型才单独立档
+            val noteModel = dao.get(KEY_NOTE_MODEL)?.value.orEmpty().trim()
+            if (noteModel.isNotEmpty() && noteModel != legacyModel) {
+                val id = newProfileId()
+                profiles += LlmProfile(id, "讲解", legacyBase, noteModel)
+                copyKeyPayload(KEY_ENC, id)
+                assign = assign.copy(note = id)
+            }
+
+            // 视觉转写：仅当旧配置真实存在视觉痕迹时才立档——有主力 Key = 用过 App 的老用户
+            // （旧版模型缺省 LongCat，立档保持行为不变）；全新安装（什么都没配）不立，
+            // 视觉跟随主力档案（UI 指派弹层副标题提示主力模型需带视觉）
+            val legacyHasVision = dao.get(KEY_VISION_MODEL)?.value?.takeIf { it.isNotBlank() } != null ||
+                dao.get(KEY_VISION_BASE)?.value?.isNotBlank() == true ||
+                dao.get(KEY_VISION_KEY_ENC)?.value != null ||
+                dao.get(KEY_ENC)?.value != null
+            if (legacyHasVision) {
+                val visionModel = dao.get(KEY_VISION_MODEL)?.value?.takeIf { it.isNotBlank() }
+                    ?: DEFAULT_VISION_MODEL
+                val visionBase = dao.get(KEY_VISION_BASE)?.value.orEmpty().ifBlank { legacyBase }
+                val visionId = newProfileId()
+                profiles += LlmProfile(visionId, "视觉转写", visionBase, visionModel)
+                // 专属 Key 优先平移；无专属时平移主力 Key（与旧版 resolveVisionKeyOrNull 回退语义一致）
+                if (dao.get(KEY_VISION_KEY_ENC)?.value != null) {
+                    copyKeyPayload(KEY_VISION_KEY_ENC, visionId)
+                } else {
+                    copyKeyPayload(KEY_ENC, visionId)
+                }
+                assign = assign.copy(vision = visionId)
+            }
+
+            // 备用视觉：旧版三键齐才参与轮转 → 三键齐才立档
+            val v2Base = dao.get(KEY_VISION2_BASE)?.value.orEmpty().trim()
+            val v2Model = dao.get(KEY_VISION2_MODEL)?.value.orEmpty().trim()
+            val v2Key = dao.get(KEY_VISION2_KEY_ENC)?.value
+            if (v2Base.isNotEmpty() && v2Model.isNotEmpty() && v2Key != null) {
+                val id = newProfileId()
+                profiles += LlmProfile(id, "备用视觉", v2Base, v2Model)
+                db.settingDao().upsert(SettingEntity(profileKeyName(id), v2Key))
+                assign = assign.copy(vision2 = id)
+            }
+
+            db.settingDao().upsert(SettingEntity(KEY_LLM_PROFILES, llmJson.encodeToString(profiles)))
+            db.settingDao().upsert(SettingEntity(KEY_LLM_ASSIGN, llmJson.encodeToString(assign)))
         }
     }
 
@@ -109,80 +286,9 @@ class SettingsRepository(
         db.settingDao().upsert(SettingEntity(KEY_DETAIL, level))
     }
 
-    suspend fun clearKey() {
-        db.settingDao().delete(KEY_ENC)
-    }
-
-    /**
-     * 视觉兜底配置（OPT-E）：开关即点即存；模型/地址/Key 随"保存"按钮落库。
-     * null = 保持不变（即点即存路径只传开关，不覆盖输入框里未保存的值）；
-     * baseUrl 传空串 = 显式清空专属地址（回退主配置）；Key 只在非空时加密写入。
-     */
-    suspend fun saveVision(
-        enabled: Boolean,
-        model: String? = null,
-        baseUrl: String? = null,
-        keyPlain: String? = null,
-    ) {
-        db.withTransaction {
-            db.settingDao().upsert(SettingEntity(KEY_VISION_ENABLED, if (enabled) "true" else "false"))
-            if (!model.isNullOrBlank()) {
-                db.settingDao().upsert(SettingEntity(KEY_VISION_MODEL, model.trim()))
-            }
-            if (baseUrl != null) {
-                db.settingDao().upsert(SettingEntity(KEY_VISION_BASE, baseUrl.trim()))
-            }
-            if (!keyPlain.isNullOrBlank()) {
-                val payload = store.encrypt(keyPlain.trim())
-                db.settingDao().upsert(SettingEntity(KEY_VISION_KEY_ENC, payload))
-            }
-        }
-    }
-
-    /** 清除视觉专属 Key（之后视觉回退用主 Key） */
-    suspend fun clearVisionKey() {
-        db.settingDao().delete(KEY_VISION_KEY_ENC)
-    }
-
-    /**
-     * 备用视觉组（R3 多模型轮转）：随"保存"按钮落库，模式同 [saveVision]。
-     * null = 保持不变；Key 只在非空时加密写入。三键齐才参与轮转（见 buildVisionTranscribers）。
-     */
-    suspend fun saveVision2(
-        baseUrl: String? = null,
-        model: String? = null,
-        keyPlain: String? = null,
-    ) {
-        db.withTransaction {
-            if (baseUrl != null) {
-                db.settingDao().upsert(SettingEntity(KEY_VISION2_BASE, baseUrl.trim()))
-            }
-            if (!model.isNullOrBlank()) {
-                db.settingDao().upsert(SettingEntity(KEY_VISION2_MODEL, model.trim()))
-            }
-            if (!keyPlain.isNullOrBlank()) {
-                val payload = store.encrypt(keyPlain.trim())
-                db.settingDao().upsert(SettingEntity(KEY_VISION2_KEY_ENC, payload))
-            }
-        }
-    }
-
-    /** 清除备用视觉 Key（备用组三键缺一即退出轮转） */
-    suspend fun clearVision2Key() {
-        db.settingDao().delete(KEY_VISION2_KEY_ENC)
-    }
-
-    /**
-     * 讲解模型（按用途选模型）：传空白 = 清空回跟随主力模型；非空 = 指定讲解专用模型。
-     * 只有模型名，地址与 Key 永远跟主力服务商（讲解跑在主力配置的端点上）。
-     */
-    suspend fun saveNoteModel(model: String?) {
-        val trimmed = model?.trim().orEmpty()
-        if (trimmed.isEmpty()) {
-            db.settingDao().delete(KEY_NOTE_MODEL)
-        } else {
-            db.settingDao().upsert(SettingEntity(KEY_NOTE_MODEL, trimmed))
-        }
+    /** 视觉兜底开关（OPT-E）：即点即存，与档案体系解耦（开=尝试组装，无可用档案自动跳过） */
+    suspend fun saveVisionEnabled(enabled: Boolean) {
+        db.settingDao().upsert(SettingEntity(KEY_VISION_ENABLED, if (enabled) "true" else "false"))
     }
 
     // ---- 阅读字号/行距（功能补齐轮）：无级字号 14..30sp（旧四档 16/18/20/22 天然兼容），
@@ -334,28 +440,17 @@ class SettingsRepository(
     suspend fun updateLastCheckedMs(): Long =
         db.settingDao().get(KEY_UPDATE_LAST)?.value?.toLongOrNull() ?: 0L
 
-    /** 视觉兜底实际生效的 Key：专属 Key 优先，未配置回退主 Key（同一家时两处不用重复填） */
-    suspend fun resolveVisionKeyOrNull(): String? =
-        decryptVisionKeyOrNull() ?: decryptKeyOrNull()
-
     /**
-     * 组装视觉转写器列表（R3 多模型轮转）：开关开且至少一组可用才非空。
-     * 主组：专属 Key 优先、留空回退主 Key（同一家时两处不用重复填）；
-     * 备用组：地址/模型/专属 Key 三键齐才入列（异家 Key 不回退主 Key）。
+     * 组装视觉转写器列表（R3 多模型轮转）：开关开且至少一个档案可用才非空。
+     * 主视觉 = VISION 角色档案（未指派跟随主力档案）；备用 = VISION2 角色档案
+     * （未指派不参与，不回退主力——异家 Key 打异家 URL 无意义）。
      * 导入同步路径与探针取首个；后台队列 Worker 用全列表做多模型并行轮转。
      */
     suspend fun buildVisionTranscribers(): List<VisionTranscriber> {
-        val snap = load()
-        if (!snap.visionEnabled) return emptyList()
+        if (!load().visionEnabled) return emptyList()
         val list = mutableListOf<VisionTranscriber>()
-        resolveVisionKeyOrNull()?.let { key ->
-            val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
-            list += VisionTranscriber(base, key, snap.visionModel)
-        }
-        val key2 = decryptVision2KeyOrNull()
-        if (key2 != null && snap.vision2BaseUrl.isNotBlank() && snap.vision2Model.isNotBlank()) {
-            list += VisionTranscriber(snap.vision2BaseUrl, key2, snap.vision2Model)
-        }
+        resolveLlm(LlmRole.VISION)?.let { list += VisionTranscriber(it.baseUrl, it.apiKey, it.model) }
+        resolveLlm(LlmRole.VISION2)?.let { list += VisionTranscriber(it.baseUrl, it.apiKey, it.model) }
         return list
     }
 
@@ -363,80 +458,31 @@ class SettingsRepository(
     suspend fun buildVisionTranscriber(): VisionTranscriber? = buildVisionTranscribers().firstOrNull()
 
     /**
-     * 组装目录探针（P3b-1）：与 [buildVisionTranscriber] 同源快照（开关/Key/专属地址
-     * 留空回退主配置），视觉不可用 → null（探针静默跳过）。cacheDir/renderFn 由调用方
+     * 组装目录探针（P3b-1）：与 [buildVisionTranscriber] 同源（VISION 角色档案），
+     * 视觉不可用 → null（探针静默跳过）。cacheDir/renderFn 由调用方
      * 绑定（探针逐页渲染→调用→释放，内存峰值 ≤1 页图）。
      */
     suspend fun buildTocVisionParser(cacheDir: File, renderFn: (Int) -> String): TocVisionParser? {
-        val snap = load()
-        if (!snap.visionEnabled) return null
-        val key = resolveVisionKeyOrNull() ?: return null
-        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
-        return TocVisionParser(base, key, snap.visionModel, cacheDir, renderFn = renderFn)
+        if (!load().visionEnabled) return null
+        val llm = resolveLlm(LlmRole.VISION) ?: return null
+        return TocVisionParser(llm.baseUrl, llm.apiKey, llm.model, cacheDir, renderFn = renderFn)
     }
 
     /**
-     * 组装前置探针（P8）：与 [buildTocVisionParser] 同源快照与不可用语义（null=静默跳过，
+     * 组装前置探针（P8）：与 [buildTocVisionParser] 同源与不可用语义（null=静默跳过，
      * 回退纯文本路线）。
      */
     suspend fun buildFrontMatterVisionParser(
         cacheDir: File,
         renderFn: (Int) -> String,
     ): FrontMatterVisionParser? {
-        val snap = load()
-        if (!snap.visionEnabled) return null
-        val key = resolveVisionKeyOrNull() ?: return null
-        val base = snap.visionBaseUrl.ifBlank { snap.baseUrl }
-        return FrontMatterVisionParser(base, key, snap.visionModel, cacheDir, renderFn = renderFn)
-    }
-
-    /**
-     * 解出明文 Key 供 AiClient 使用。解密失败仅返回 null、保留密文（OPT-A）：
-     * keystore 可能只是暂时故障，删除会毁掉本可恢复的 Key；唯一例外是
-     * 结构性损坏（带 k1:/s1: 标记但 body 非合法 Base64）——任何实现都解不开，删除。
-     */
-    /** 解视觉专属 Key，逻辑同 [decryptKeyOrNull]（仅结构性损坏才删密文） */
-    suspend fun decryptVisionKeyOrNull(): String? {
-        val payload = db.settingDao().get(KEY_VISION_KEY_ENC)?.value ?: return null
-        if (isStructurallyCorrupt(payload)) {
-            db.settingDao().delete(KEY_VISION_KEY_ENC)
-            return null
-        }
-        return try {
-            store.decrypt(payload)
-        } catch (e: SecretCryptoException) {
-            null
-        }
-    }
-
-    /** 解备用视觉专属 Key，逻辑同 [decryptVisionKeyOrNull] */
-    suspend fun decryptVision2KeyOrNull(): String? {
-        val payload = db.settingDao().get(KEY_VISION2_KEY_ENC)?.value ?: return null
-        if (isStructurallyCorrupt(payload)) {
-            db.settingDao().delete(KEY_VISION2_KEY_ENC)
-            return null
-        }
-        return try {
-            store.decrypt(payload)
-        } catch (e: SecretCryptoException) {
-            null
-        }
-    }
-
-    suspend fun decryptKeyOrNull(): String? {
-        val payload = db.settingDao().get(KEY_ENC)?.value ?: return null
-        if (isStructurallyCorrupt(payload)) {
-            db.settingDao().delete(KEY_ENC)
-            return null
-        }
-        return try {
-            store.decrypt(payload)
-        } catch (e: SecretCryptoException) {
-            null
-        }
+        if (!load().visionEnabled) return null
+        val llm = resolveLlm(LlmRole.VISION) ?: return null
+        return FrontMatterVisionParser(llm.baseUrl, llm.apiKey, llm.model, cacheDir, renderFn = renderFn)
     }
 
     companion object {
+        // 旧版 AI 配置键（迁移数据源，保留不写不读端点；见 migrateLegacyLlmIfNeeded）
         const val KEY_ENC = "api_key_enc"
         const val KEY_DETAIL = "note_detail"
         const val KEY_VISION_ENABLED = "vision_enabled"
@@ -449,6 +495,9 @@ class SettingsRepository(
         const val KEY_VISION2_KEY_ENC = "vision2_key_enc"
         // 讲解模型（按用途选模型）：段落讲解与粗读批注专用，空 = 跟随主力
         const val KEY_NOTE_MODEL = "note_model"
+        // LLM 档案体系（2026-11-15 多模型轮）
+        const val KEY_LLM_PROFILES = "llm_profiles"
+        const val KEY_LLM_ASSIGN = "llm_assign"
         // 扫描书本地识别（P6b S4）
         const val KEY_OCR_ENABLED = "ocr_enabled"
         const val KEY_OCR_FEEDBACK_TOTAL = "ocr_feedback_total"

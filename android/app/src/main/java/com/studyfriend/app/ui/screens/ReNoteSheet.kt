@@ -73,24 +73,24 @@ internal fun ReNoteSheet(
             streaming = ""
             try {
                 val prepared = withContext(Dispatchers.IO) {
-                    val cfg = app.settingsRepo.load()
-                    val key = app.settingsRepo.decryptKeyOrNull()
-                    if (key == null) null else Triple(cfg, key, PromptLoader.load(app, ReNote.PROMPT_RENOTE))
+                    // 讲解角色档案（2026-11-15 多模型轮）：换个讲法是逐段讲解类任务，未指派跟随主力
+                    val llm = app.settingsRepo.resolveLlm(com.studyfriend.app.data.LlmRole.NOTE)
+                    if (llm == null) null else llm to PromptLoader.load(app, ReNote.PROMPT_RENOTE)
                 }
                 if (prepared == null) {
                     noKey = true
                     streaming = null
                     return@launch
                 }
-                val (cfg, key, systemPrompt) = prepared
+                val (llm, systemPrompt) = prepared
                 val answer = StringBuilder()
                 var lastFlush = 0L
                 val text = AiClient.chat(
                     ChatRequest(
-                        baseUrl = cfg.baseUrl,
-                        apiKey = key,
-                        // 换个讲法属逐段讲解类高频任务，走讲解模型（空则跟随主力）
-                        model = cfg.noteModel.ifBlank { cfg.model },
+                        baseUrl = llm.baseUrl,
+                        apiKey = llm.apiKey,
+                        // 换个讲法属逐段讲解类高频任务，走讲解角色档案（未指派跟随主力）
+                        model = llm.model,
                         temperature = 0.6,
                         maxTokens = 4000,
                         messages = ReNote.messages(systemPrompt, paragraphText, note),
