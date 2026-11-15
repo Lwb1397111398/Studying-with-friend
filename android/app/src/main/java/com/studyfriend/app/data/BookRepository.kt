@@ -11,9 +11,11 @@ import com.studyfriend.app.data.db.ParaNoteEntity
 import com.studyfriend.app.data.db.ParagraphEntity
 import com.studyfriend.app.data.db.QuizAttemptEntity
 import com.studyfriend.app.data.db.ReviewItemEntity
+import com.studyfriend.app.data.db.ReviewLogEntity
 import com.studyfriend.app.data.db.StudyDatabase
 import com.studyfriend.app.data.importer.pdfpipeline.ExtractedFigure
 import com.studyfriend.app.data.importer.pdfpipeline.FigureCoordMath
+import com.studyfriend.app.data.study.Fsrs
 import java.io.File
 
 /** 纯 DB 操作封装（不含 AI/解析逻辑），UI 经此访问数据，不直捅 DAO。
@@ -284,8 +286,23 @@ class BookRepository(
     fun dueCountByBookFlow(now: Long) = db.reviewItemDao().dueCountByBookFlow(now)
     suspend fun wrongLatest() = db.quizAttemptDao().wrongLatest()
     suspend fun scheduleReviews(items: List<ReviewItemEntity>) = db.reviewItemDao().insertAll(items)
-    suspend fun markReviewResult(id: Long, intervalIdx: Int, dueAt: Long, done: Boolean) =
-        db.reviewItemDao().markResult(id, intervalIdx, dueAt, done)
+
+    /** FSRS 推进落库（P0-①）：卡状态一次写回 + 复习日志一行，同一事务——评分不丢账 */
+    suspend fun markReviewResult(id: Long, adv: Fsrs.FsrsAdvance) = db.withTransaction {
+        db.reviewItemDao().markResult(
+            id = id, intervalIdx = adv.intervalDays, dueAt = adv.dueAt, done = false,
+            fsrsState = adv.state, fsrsStability = adv.stability,
+            fsrsDifficulty = adv.difficulty, fsrsLastReviewAt = adv.lastReviewAt,
+        )
+        db.reviewLogDao().insert(
+            ReviewLogEntity(
+                itemId = id, rating = adv.rating, stateBefore = adv.stateBefore,
+                stabilityBefore = adv.stabilityBefore, difficultyBefore = adv.difficultyBefore,
+                dueBefore = adv.dueBefore, scheduledDays = adv.intervalDays.toDouble(),
+                dueAt = adv.dueAt, reviewedAt = adv.lastReviewAt,
+            ),
+        )
+    }
     suspend fun pendingReviews(bookId: Long) = db.reviewItemDao().pendingByBook(bookId)
 
     /** 术语卡盒（学习闭环轮）：全书有 keyTerms 的章（复习中心「术语」Tab） */

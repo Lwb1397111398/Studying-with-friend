@@ -2,7 +2,9 @@ package com.studyfriend.app.data
 
 import androidx.room.testing.MigrationTestHelper
 import androidx.test.platform.app.InstrumentationRegistry
+import com.studyfriend.app.data.db.MIGRATION_10_11
 import com.studyfriend.app.data.db.MIGRATION_8_9
+import com.studyfriend.app.data.db.MIGRATION_9_10
 import com.studyfriend.app.data.db.MIGRATIONS
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -343,7 +345,7 @@ fun migrate8To9_readingStatsUsable() {
                     "VALUES (1, 1, '第一章', 0, 1, 0)",
             )
         }
-        helper.runMigrationsAndValidate(dbName, 10, true, MIGRATIONS.last()).use { v10 ->
+        helper.runMigrationsAndValidate(dbName, 10, true, MIGRATION_9_10).use { v10 ->
             // 存量行 source/itemType 自动落默认值，新行可显式写新值
             v10.query("SELECT source FROM quiz_attempts").use { cur ->
                 assertTrue(cur.moveToFirst())
@@ -361,6 +363,55 @@ fun migrate8To9_readingStatsUsable() {
                 "INSERT INTO review_items (bookId, chapterId, title, intervalIdx, dueAt, done, itemType) " +
                     "VALUES (1, 1, '善意取得', 0, 1, 0, 'TERM')",
             )
+        }
+    }
+
+    @Test
+    fun migrate10To11_fsrsColumnsBackfilledAndLogTableUsable() {
+        val dbName = "migration-test-1011.db"
+        helper.createDatabase(dbName, 10).use { v10 ->
+            v10.execSQL(
+                "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                    "overviewJson, createdAt, updatedAt) VALUES ('书', '', 'TXT', '', 'READY', 1, NULL, 1, 1)",
+            )
+            v10.execSQL(
+                "INSERT INTO chapters (bookId, idx, title, readState, gist, keyTermsJson, level, calibrated) " +
+                    "VALUES (1, 0, '第一章', 'NOT_READ', NULL, NULL, 1, 0)",
+            )
+            // 未完成行（档 2 = 7 天档）+ 已完成行：前者折算 FSRS 初值，后者不折算
+            v10.execSQL(
+                "INSERT INTO review_items (bookId, chapterId, title, intervalIdx, dueAt, done, itemType) " +
+                    "VALUES (1, 1, '第一章', 2, 1000, 0, 'CHAPTER')",
+            )
+            v10.execSQL(
+                "INSERT INTO review_items (bookId, chapterId, title, intervalIdx, dueAt, done, itemType) " +
+                    "VALUES (1, 1, '第一章完', 4, 1000, 1, 'CHAPTER')",
+            )
+        }
+        helper.runMigrationsAndValidate(dbName, 11, true, MIGRATION_10_11).use { v11 ->
+            // 未完成行：fsrsState=REVIEW、稳定性=旧档天数、难度中位、上次复习=dueAt 倒推一档
+            v11.query("SELECT fsrsState, fsrsStability, fsrsDifficulty, fsrsLastReviewAt FROM review_items WHERE done = 0").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(2, cur.getInt(0))
+                assertEquals(7.0, cur.getDouble(1), 1e-9)
+                assertEquals(5.0, cur.getDouble(2), 1e-9)
+                assertEquals(1000L - 7L * 86_400_000L, cur.getLong(3))
+            }
+            // 已完成行：保持 LEARNING 默认态（无读取方，不折算）
+            v11.query("SELECT fsrsState, fsrsStability FROM review_items WHERE done = 1").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(1, cur.getInt(0))
+                assertTrue(cur.isNull(1))
+            }
+            // review_log 新表写读
+            v11.execSQL(
+                "INSERT INTO review_log (itemId, rating, stateBefore, stabilityBefore, difficultyBefore, " +
+                    "dueBefore, scheduledDays, dueAt, reviewedAt) VALUES (1, 3, 2, 7.0, 5.0, 1000, 10.0, 2000, 1500)",
+            )
+            v11.query("SELECT rating FROM review_log WHERE itemId = 1").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(3, cur.getInt(0))
+            }
         }
     }
 }

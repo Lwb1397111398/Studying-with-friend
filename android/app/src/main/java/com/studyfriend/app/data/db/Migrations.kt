@@ -192,7 +192,36 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
     }
 }
 
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // P0-① FSRS 复习排期：review_items 加卡状态 4 列（stability null = 没复习过的新卡）+ review_log 新表。
+        // 旧档位一次性折算成 FSRS 初值（未完成行按当前档位天数为稳定性、难度取中位 5.0、上次复习按
+        // dueAt 倒推一档间隔）；已完成行无读取方，留默认值不折算。fsrsState=2 即 REVIEW（空学习步，
+        // 任意评分后都按天排期，列值恒为 2，保留列位防后续启用学习步）
+        db.execSQL("ALTER TABLE `review_items` ADD COLUMN `fsrsState` INTEGER NOT NULL DEFAULT 1")
+        db.execSQL("ALTER TABLE `review_items` ADD COLUMN `fsrsStability` REAL")
+        db.execSQL("ALTER TABLE `review_items` ADD COLUMN `fsrsDifficulty` REAL")
+        db.execSQL("ALTER TABLE `review_items` ADD COLUMN `fsrsLastReviewAt` INTEGER")
+        // createSql 逐字段抄自 ReviewLogEntity 定义，漏抄会被迁移校验报红
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `review_log` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                "`itemId` INTEGER NOT NULL, `rating` INTEGER NOT NULL, `stateBefore` INTEGER NOT NULL, " +
+                "`stabilityBefore` REAL, `difficultyBefore` REAL, `dueBefore` INTEGER NOT NULL, " +
+                "`scheduledDays` REAL NOT NULL, `dueAt` INTEGER NOT NULL, `reviewedAt` INTEGER NOT NULL, " +
+                "FOREIGN KEY(`itemId`) REFERENCES `review_items`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_review_log_itemId` ON `review_log` (`itemId`)")
+        db.execSQL(
+            "UPDATE review_items SET fsrsState = 2, " +
+                "fsrsStability = CASE intervalIdx WHEN 0 THEN 1.0 WHEN 1 THEN 3.0 WHEN 2 THEN 7.0 WHEN 3 THEN 14.0 ELSE 30.0 END, " +
+                "fsrsDifficulty = 5.0, " +
+                "fsrsLastReviewAt = dueAt - CAST(CASE intervalIdx WHEN 0 THEN 1 WHEN 1 THEN 3 WHEN 2 THEN 7 WHEN 3 THEN 14 ELSE 30 END AS INTEGER) * 86400000 " +
+                "WHERE done = 0",
+        )
+    }
+}
+
 val MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
+    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
 )

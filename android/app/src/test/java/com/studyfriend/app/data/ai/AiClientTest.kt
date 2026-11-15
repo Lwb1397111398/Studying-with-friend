@@ -212,6 +212,85 @@ class AiClientTest {
         }
     }
 
+    // ---------- P0-② 降档梯子：JSON mode 首选 → 网关拒收/解析/校验不过自动降纯 prompt 档 ----------
+
+    @Test
+    fun chatJson_jsonMode_putsResponseFormatInBody() {
+        val bodies = ConcurrentLinkedQueue<String>()
+        val server = MiniHttpServer { _, _, body, resp ->
+            bodies.add(body)
+            resp.sse(listOf("{\"a\":1}"))
+        }
+        try {
+            @Serializable
+            data class Dummy(val a: Int)
+            val result = runBlocking { AiClient.chatJson(request(server.baseUrl).copy(jsonMode = true), serializer<Dummy>()) {} }
+            assertEquals(Dummy(1), result)
+            assertTrue("jsonMode 请求体应带 response_format", bodies.poll()?.contains("response_format") == true)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun chatJson_jsonModeRejected400_degradesToPlainWithoutIt() {
+        val calls = AtomicInteger(0)
+        val bodies = ConcurrentLinkedQueue<String>()
+        val server = MiniHttpServer { _, _, body, resp ->
+            bodies.add(body)
+            val n = calls.incrementAndGet()
+            // 第 1 档：网关不认 response_format 回 400 → 降档后第 2 次给合法 JSON
+            if (n == 1) resp.status(400, "response_format is not supported") else resp.sse(listOf("{\"a\":2}"))
+        }
+        try {
+            @Serializable
+            data class Dummy(val a: Int)
+            val result = runBlocking { AiClient.chatJson(request(server.baseUrl).copy(jsonMode = true), serializer<Dummy>()) {} }
+            assertEquals(Dummy(2), result)
+            assertEquals(2, calls.get())
+            assertTrue("第 1 档应带 response_format", bodies.poll()?.contains("response_format") == true)
+            assertTrue("降档后不得再带 response_format", bodies.poll()?.contains("response_format") != true)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun chatJson_validateFailure_retriesWithCorrectiveHint_thenThrows() {
+        val calls = AtomicInteger(0)
+        val bodies = ConcurrentLinkedQueue<String>()
+        val server = MiniHttpServer { _, _, body, resp ->
+            bodies.add(body)
+            calls.incrementAndGet()
+            // 两轮都返回合法 JSON，但过不了校验 → 纠正语重试一次后抛结构不合格
+            resp.sse(listOf("{\"a\":0}"))
+        }
+        try {
+            @Serializable
+            data class Dummy(val a: Int)
+            val err = runBlocking {
+                try {
+                    AiClient.chatJson(
+                        request(server.baseUrl),
+                        serializer<Dummy>(),
+                        validate = { if (it.a == 0) "a 不能为 0" else null },
+                    ) {}
+                    null
+                } catch (e: AiException) {
+                    e.message
+                }
+            }
+            assertEquals(2, calls.get())
+            assertNotNull(err)
+            assertTrue(err!!.contains("结构不合格"))
+            assertTrue(err.contains("a 不能为 0"))
+            bodies.poll() // 第 1 轮请求体
+            assertTrue("重试请求应带纠正语", bodies.poll()?.contains("a 不能为 0") == true)
+        } finally {
+            server.stop()
+        }
+    }
+
     // ---------- listModels（「查找模型」拉服务商模型列表） ----------
 
     @Test

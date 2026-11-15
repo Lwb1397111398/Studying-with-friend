@@ -374,11 +374,24 @@ interface ReviewItemDao {
     fun dueCountByBookFlow(now: Long): Flow<List<BookDueCount>>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertAll(items: List<ReviewItemEntity>)
+    suspend fun insertAll(items: List<ReviewItemEntity>): List<Long>
 
-    /** 记得→推进间隔；忘了→intervalIdx 归 0、重新排期，逻辑在调用方 */
-    @Query("UPDATE review_items SET intervalIdx = :intervalIdx, dueAt = :dueAt, done = :done WHERE id = :id")
-    suspend fun markResult(id: Long, intervalIdx: Int, dueAt: Long, done: Boolean)
+    /** FSRS 推进落库（P0-①）：整卡状态一次写回；dueAt 仍是到期查询的权威列；done 恒 false（FSRS 无 30 天封顶，按排出间隔自然回归） */
+    @Query(
+        "UPDATE review_items SET intervalIdx = :intervalIdx, dueAt = :dueAt, done = :done, " +
+            "fsrsState = :fsrsState, fsrsStability = :fsrsStability, fsrsDifficulty = :fsrsDifficulty, " +
+            "fsrsLastReviewAt = :fsrsLastReviewAt WHERE id = :id",
+    )
+    suspend fun markResult(
+        id: Long,
+        intervalIdx: Int,
+        dueAt: Long,
+        done: Boolean,
+        fsrsState: Int,
+        fsrsStability: Double?,
+        fsrsDifficulty: Double?,
+        fsrsLastReviewAt: Long?,
+    )
 
     @Query("SELECT * FROM review_items WHERE bookId = :bookId AND done = 0 ORDER BY dueAt")
     suspend fun pendingByBook(bookId: Long): List<ReviewItemEntity>
@@ -394,6 +407,16 @@ data class DueItem(
     @Embedded val item: ReviewItemEntity,
     val bookTitle: String,
 )
+
+/** FSRS 复习日志（P0-①）：评分历史，撤销评分/参数训练的数据底座 */
+@Dao
+interface ReviewLogDao {
+    @Insert
+    suspend fun insert(log: ReviewLogEntity)
+
+    @Query("SELECT COUNT(*) FROM review_log WHERE itemId = :itemId")
+    suspend fun countByItem(itemId: Long): Int
+}
 
 /** 书架徽标投影：每本书的到期章数（M6 计划 §2.4） */
 data class BookDueCount(

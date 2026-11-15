@@ -391,13 +391,28 @@ private data class BackupReviewItem(
     val intervalIdx: Int,
     val dueAt: Long,
     val done: Boolean = false,
+    /** 批D 起入库（顺手修复：旧 DTO 漏了 itemType，术语行恢复会被错标成章行）；旧版备份缺省回退 CHAPTER */
+    val itemType: String = "CHAPTER",
+    // P0-① FSRS 卡状态：随 review_items 进备份，排期状态换机不丢
+    val fsrsState: Int = 1,
+    val fsrsStability: Double? = null,
+    val fsrsDifficulty: Double? = null,
+    val fsrsLastReviewAt: Long? = null,
 )
 
-private fun ReviewItemEntity.toBackup() =
-    BackupReviewItem(id, bookId, chapterId, title, intervalIdx, dueAt, done)
+private fun ReviewItemEntity.toBackup() = BackupReviewItem(
+    id, bookId, chapterId, title, intervalIdx, dueAt, done,
+    itemType = itemType,
+    fsrsState = fsrsState, fsrsStability = fsrsStability,
+    fsrsDifficulty = fsrsDifficulty, fsrsLastReviewAt = fsrsLastReviewAt,
+)
 
-private fun BackupReviewItem.toEntity() =
-    ReviewItemEntity(id, bookId, chapterId, title, intervalIdx, dueAt, done)
+private fun BackupReviewItem.toEntity() = ReviewItemEntity(
+    id, bookId, chapterId, title, intervalIdx, dueAt, done,
+    itemType = itemType,
+    fsrsState = fsrsState, fsrsStability = fsrsStability,
+    fsrsDifficulty = fsrsDifficulty, fsrsLastReviewAt = fsrsLastReviewAt,
+)
 
 @Serializable
 private data class BackupBookmark(

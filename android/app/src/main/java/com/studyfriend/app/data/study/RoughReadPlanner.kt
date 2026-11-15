@@ -40,7 +40,7 @@ object AiClientChatJsonFn : ChatJsonFn {
         req: ChatRequest,
         deserializer: DeserializationStrategy<T>,
         onDelta: (String) -> Unit,
-    ): T = AiClient.chatJson(req, deserializer, onDelta)
+    ): T = AiClient.chatJson(req, deserializer, onDelta = onDelta)
 }
 
 /** user JSON 字符串字面量转义（粗读/讲解/总结共用）：**含首尾引号**——调用点直接 append 值；

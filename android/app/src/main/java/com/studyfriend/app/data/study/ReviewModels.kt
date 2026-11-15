@@ -2,50 +2,24 @@ package com.studyfriend.app.data.study
 
 import com.studyfriend.app.data.db.WrongAttempt
 
-// ---------- 间隔复习推进（计划 M6 §2.1） ----------
-
-/** 间隔档位（intervalIdx 0..4 对应天数）；推进规则=艾宾浩斯式 1/3/7/14/30 */
-val INTERVAL_DAYS = listOf(1, 3, 7, 14, 30)
+// ---------- 间隔复习推进（P0-① FSRS 化；推进逻辑在 Fsrs.kt，本文件留聚合与常量） ----------
 
 const val DAY_MS = 24 * 60 * 60 * 1000L
 
-/** 复习自评三态（对齐 M5 自测三按钮：答对/模糊/答错） */
-enum class ReviewVerdict { REMEMBER, FUZZY, FORGOT }
-
-/** 一次推进的结果：落库走 ReviewItemDao.markResult(id, intervalIdx, dueAt, done) */
-data class ReviewAdvance(val intervalIdx: Int, val dueAt: Long, val done: Boolean)
+/** 复习自评四档（P0-①，映射 FSRS：忘了→Again/模糊→Hard/记得→Good/太简单→Easy） */
+enum class ReviewVerdict { REMEMBER, FUZZY, FORGOT, EASY }
 
 /**
- * 按自评推进排期：记得→下一档；封顶档记得→完成（done=true 保持 30 天档）；
- * 模糊→降一档（批D：原「同档重排」等于不惩罚，「记得不牢」就该拉回更近的间隔）；
- * 忘了→归 0。入口先 coerce，历史脏数据（越界 idx）不持久化越界值。
- */
-fun advanceReview(intervalIdx: Int, verdict: ReviewVerdict, nowMs: Long): ReviewAdvance {
-    val idx = intervalIdx.coerceIn(0, INTERVAL_DAYS.lastIndex)
-    return when (verdict) {
-        ReviewVerdict.REMEMBER ->
-            if (idx >= INTERVAL_DAYS.lastIndex) {
-                ReviewAdvance(idx, nowMs + INTERVAL_DAYS.last() * DAY_MS, true)
-            } else {
-                ReviewAdvance(idx + 1, nowMs + INTERVAL_DAYS[idx + 1] * DAY_MS, false)
-            }
-        ReviewVerdict.FUZZY -> {
-            val next = (idx - 1).coerceAtLeast(0)
-            ReviewAdvance(next, nowMs + INTERVAL_DAYS[next] * DAY_MS, false)
-        }
-        ReviewVerdict.FORGOT -> ReviewAdvance(0, nowMs + INTERVAL_DAYS[0] * DAY_MS, false)
-    }
-}
-
-/**
- * 章级聚合（计划 M6 §2.2）：逐题自评后章级一次推进——
- * 全记得→REMEMBER；任一忘了→FORGOT；其余（含空列表退化的单按钮场景）→FUZZY。
+ * 章级聚合（计划 M6 §2.2，P0-① 扩四档）：逐题自评后章级一次推进——
+ * 任一忘了→FORGOT；任一模糊→FUZZY（「有没答好的题」就该拉近间隔）；
+ * 全部太简单→EASY；记得与太简单混评→REMEMBER（从保守）；空列表退化→FUZZY。
  */
 fun aggregateVerdict(verdicts: List<ReviewVerdict>): ReviewVerdict = when {
     verdicts.isEmpty() -> ReviewVerdict.FUZZY
-    verdicts.all { it == ReviewVerdict.REMEMBER } -> ReviewVerdict.REMEMBER
     verdicts.any { it == ReviewVerdict.FORGOT } -> ReviewVerdict.FORGOT
-    else -> ReviewVerdict.FUZZY
+    verdicts.any { it == ReviewVerdict.FUZZY } -> ReviewVerdict.FUZZY
+    verdicts.all { it == ReviewVerdict.EASY } -> ReviewVerdict.EASY
+    else -> ReviewVerdict.REMEMBER
 }
 
 // ---------- 错题本去重（M5 契约 #1 落地） ----------

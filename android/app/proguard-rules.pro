@@ -26,3 +26,12 @@
 # pdfbox-android 的 JPEG2000 解码依赖（com.gemalto.jp2）是可选包，未随库分发：
 # 遇 JPX 书页时该 filter 自行报错（与未开 R8 前行为一致），声明缺类无妨
 -dontwarn com.gemalto.jp2.**
+
+# java-fsrs（P0-① 复习排期）两类缺类放行（都不在真实执行路径上，R8 直接剥离）：
+# 1) Card.toJson/fromJson 引用 Jackson——库自身唯一落盘入口，我们只走自己的列存取从不调它
+#    （实测 Gradle 排除 Jackson 会让 fsrs 类在加载期就 NoClassDefFoundError，故依赖保留、
+#    靠 R8 剥不可达路径，release 包不含 Jackson）
+-dontwarn com.fasterxml.jackson.**
+# 2) 库用 Lombok 编译，注解残留在字节码（Generated/NonNull），运行时注解类永不需要
+-dontwarn lombok.Generated
+-dontwarn lombok.NonNull

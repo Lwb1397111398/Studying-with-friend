@@ -184,6 +184,38 @@ class BackupManagerTest {
     }
 
     @Test
+    fun restoreRoundtrip_keepsTermItemTypeAndFsrsState() = runBlocking {
+        val db = db()
+        try {
+            val bookId = db.bookDao().insert(book("术语备份书"))
+            val chId = db.chapterDao().insertAll(listOf(chapter(bookId, 0)))[0]
+            // P0-①：术语行 + FSRS 卡状态随备份往返不丢（itemType 回归钉子——旧 DTO 漏字段会把术语行错标成章行）
+            db.reviewItemDao().insertAll(
+                listOf(
+                    ReviewItemEntity(
+                        bookId = bookId, chapterId = chId, title = "善意取得", intervalIdx = 3,
+                        dueAt = 500L, done = false, itemType = com.studyfriend.app.data.db.DbValues.ITEM_TERM,
+                        fsrsState = com.studyfriend.app.data.db.DbValues.FSRS_STATE_REVIEW,
+                        fsrsStability = 7.5, fsrsDifficulty = 4.2, fsrsLastReviewAt = 100L,
+                    ),
+                ),
+            )
+            val m = BackupManager(db)
+            val bytes = exportBytes(m)
+            db.bookDao().delete(db.bookDao().get(bookId)!!)
+            m.restoreFrom(ByteArrayInputStream(bytes))
+            val restored = db.backupDao().allReviewItems().single()
+            assertEquals(com.studyfriend.app.data.db.DbValues.ITEM_TERM, restored.itemType)
+            assertEquals(com.studyfriend.app.data.db.DbValues.FSRS_STATE_REVIEW, restored.fsrsState)
+            assertEquals(7.5, restored.fsrsStability!!, 1e-9)
+            assertEquals(4.2, restored.fsrsDifficulty!!, 1e-9)
+            assertEquals(100L, restored.fsrsLastReviewAt)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
     fun restoreReplacesEntireLibraryAndClearsFiguresAndQueue() = runBlocking {
         val db = db()
         try {

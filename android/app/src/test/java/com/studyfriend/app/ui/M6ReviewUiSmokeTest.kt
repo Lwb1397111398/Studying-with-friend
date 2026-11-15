@@ -65,15 +65,25 @@ class M6ReviewUiSmokeTest {
         )
     }
 
-    private fun reviewItem(chapterId: Long, title: String, intervalIdx: Int = 1) = runBlocking {
+    private fun reviewItem(
+        chapterId: Long,
+        title: String,
+        intervalIdx: Int = 1,
+        stability: Double? = null,
+    ): Long = runBlocking {
+        // P0-①：stability 非空 = 模拟复习中途的卡（迁移回填形态）；null = 新种子
         db.reviewItemDao().insertAll(
             listOf(
                 ReviewItemEntity(
                     bookId = bookId, chapterId = chapterId, title = title,
                     intervalIdx = intervalIdx, dueAt = now - 1_000L, done = false,
+                    fsrsState = if (stability != null) com.studyfriend.app.data.db.DbValues.FSRS_STATE_REVIEW
+                    else com.studyfriend.app.data.db.DbValues.FSRS_STATE_LEARNING,
+                    fsrsStability = stability, fsrsDifficulty = stability?.let { 5.0 },
+                    fsrsLastReviewAt = stability?.let { now - 3 * 86_400_000L },
                 ),
             ),
-        )
+        )[0]
     }
 
     @Before
@@ -115,7 +125,7 @@ class M6ReviewUiSmokeTest {
     fun review_dueFlowSessionTransitionAndMarkResult(): Unit = runBlocking {
         val chId = seedChapter("复习章")
         asset(chId, QuizQuestion("RECALL", "善意取得的构成要件？", "无权处分+善意+合理价格+登记", "按四要件记"))
-        reviewItem(chId, "复习章", intervalIdx = 1)
+        val itemId = reviewItem(chId, "复习章", intervalIdx = 1, stability = 3.0)
 
         setContent()
         awaitText("复习章")
@@ -125,21 +135,34 @@ class M6ReviewUiSmokeTest {
         awaitText("参考答案：无权处分+善意+合理价格+登记")
         compose.onNodeWithText("记得").performClick()
 
-        // 行从 dueList Flow 消失（done=false 但 dueAt=+3d 不再到期 → 空态）
+        // 行从 dueList Flow 消失（P0-①：FSRS 排出的间隔 > 0 天，不再到期 → 空态）
         awaitText("今天没有要复习的")
-        // 落库断言：intervalIdx 1→2（3 天档 → 7 天档）
+        // 落库断言（P0-①）：UI 时刻与测试时刻差几十毫秒——用 FSRS 在区间两端的预演夹住断言
+        val seeded = ReviewItemEntity(
+            bookId = bookId, chapterId = chId, title = "复习章",
+            intervalIdx = 1, dueAt = now - 1_000L, done = false,
+            fsrsState = com.studyfriend.app.data.db.DbValues.FSRS_STATE_REVIEW,
+            fsrsStability = 3.0, fsrsDifficulty = 5.0, fsrsLastReviewAt = now - 3 * 86_400_000L,
+        )
+        val expectedLo = com.studyfriend.app.data.study.Fsrs.review(seeded, com.studyfriend.app.data.study.ReviewVerdict.REMEMBER, now)
+        val expectedHi = com.studyfriend.app.data.study.Fsrs.review(seeded, com.studyfriend.app.data.study.ReviewVerdict.REMEMBER, now + 60_000L)
         val pending = db.reviewItemDao().pendingByBook(bookId).single()
-        assertEquals(2, pending.intervalIdx)
+        assertTrue(
+            "intervalIdx 应等于 FSRS 排出天数（${expectedLo.intervalDays}..${expectedHi.intervalDays}），实际 ${pending.intervalIdx}",
+            pending.intervalIdx in minOf(expectedLo.intervalDays, expectedHi.intervalDays)..maxOf(expectedLo.intervalDays, expectedHi.intervalDays),
+        )
+        assertTrue("dueAt 应推进到未来", pending.dueAt > now)
         assertEquals(false, pending.done)
-        assertTrue("dueAt 应推进到 7 天档", pending.dueAt in now + 6 * 86_400_000L..now + 8 * 86_400_000L)
+        // 复习日志同事务落一行（P0-①）
+        assertEquals(1, db.reviewLogDao().countByItem(itemId))
     }
 
-    // ---------- 2. 无题/无资产：退化单问，忘了归 0 ----------
+    // ---------- 2. 无题/无资产：退化单问，忘了最快再见 ----------
 
     @Test
     fun review_noAssetFallbackSingleQuestion(): Unit = runBlocking {
         val chId = seedChapter("空资产章")
-        reviewItem(chId, "空资产章", intervalIdx = 3)
+        val itemId = reviewItem(chId, "空资产章", intervalIdx = 3)
 
         setContent()
         awaitText("空资产章")
@@ -149,9 +172,15 @@ class M6ReviewUiSmokeTest {
 
         awaitText("今天没有要复习的")
         val pending = db.reviewItemDao().pendingByBook(bookId).single()
-        assertEquals(0, pending.intervalIdx) // 忘了 → 归 0
         assertEquals(false, pending.done)
-        assertTrue("dueAt 应重排约 1 天", pending.dueAt in now..now + 2 * 86_400_000L)
+        // P0-① FSRS：新卡忘了 → 初始稳定性最短，隔 1 天尽快再见（不再是旧档位制归 0）
+        assertTrue(
+            "忘了应在 2 天内再见，实际 dueAt 距今 ${(pending.dueAt - now) / 86_400_000L} 天",
+            pending.dueAt in now..now + 2 * 86_400_000L + 60_000L,
+        )
+        // 空学习步：评分后转 REVIEW 态按天排期
+        assertEquals(com.studyfriend.app.data.db.DbValues.FSRS_STATE_REVIEW, pending.fsrsState)
+        assertEquals(1, db.reviewLogDao().countByItem(itemId))
     }
 
     // ---------- 2b. 同章双到期行：M5 契约防御去重只显示一条（评审 P1-1） ----------

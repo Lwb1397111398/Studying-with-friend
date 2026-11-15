@@ -53,14 +53,13 @@ import com.studyfriend.app.data.db.QuizAttemptEntity
 import com.studyfriend.app.data.db.computeStreak
 import com.studyfriend.app.data.study.DAY_MS
 import com.studyfriend.app.data.study.CheckQuestion
+import com.studyfriend.app.data.study.Fsrs
 import com.studyfriend.app.data.study.KeyTermsCodec
 import com.studyfriend.app.data.study.QuizCodec
 import com.studyfriend.app.data.study.QuizQuestion
-import com.studyfriend.app.data.study.ReviewAdvance
 import com.studyfriend.app.data.study.ReviewVerdict
 import com.studyfriend.app.data.study.TermBookGroup
 import com.studyfriend.app.data.study.TermChapter
-import com.studyfriend.app.data.study.advanceReview
 import com.studyfriend.app.data.study.decodeCheckQuestions
 import com.studyfriend.app.data.study.aggregateVerdict
 import com.studyfriend.app.data.study.DedupedTerm
@@ -93,9 +92,9 @@ fun ReviewScreen() {
         ReviewSessionPane(
             session = s,
             onDone = { adv ->
-                // 落库挂 appScope：自评完成瞬间切 Tab/退页也不丢这次推进
+                // 落库挂 appScope：自评完成瞬间切 Tab/退页也不丢这次推进（P0-①：卡状态+复习日志同事务落库）
                 app.appScope.launch {
-                    repo.markReviewResult(s.due.item.id, adv.intervalIdx, adv.dueAt, adv.done)
+                    repo.markReviewResult(s.due.item.id, adv)
                 }
                 session = null
             },
@@ -278,6 +277,11 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
     val visible = remember(due) {
         due.distinctBy { if (it.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) "term_${it.item.id}" else it.item.bookId to it.item.chapterId }
     }
+    // P0-① 「最快要忘优先」：按当前记住概率升序（没复习过的新卡概率 0 排最前），同概率到期早者先
+    val sorted = remember(visible) {
+        val risk = visible.associate { it.item.id to Fsrs.retrievability(it.item, now) }
+        visible.sortedWith(compareBy({ risk[it.item.id] ?: 0.0 }, { it.item.dueAt }))
+    }
     if (visible.isEmpty()) {
         EmptyState(
             title = "今天没有要复习的",
@@ -291,7 +295,7 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(visible, key = { it.item.id }) { d ->
+        items(sorted, key = { it.item.id }) { d ->
             val overdueDays = ((now - d.item.dueAt) / DAY_MS).toInt()
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainer,
@@ -337,19 +341,21 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
 @Composable
 private fun ReviewSessionPane(
     session: ReviewSession,
-    onDone: (ReviewAdvance) -> Unit,
+    onDone: (Fsrs.FsrsAdvance) -> Unit,
     onCancel: () -> Unit,
 ) {
     val qs = session.questions
     var idx by remember { mutableIntStateOf(0) }
     var revealed by remember { mutableStateOf(false) }
     var verdicts by remember { mutableStateOf(listOf<ReviewVerdict>()) }
+    // P0-① 按钮预写间隔：进会话时按当前卡模拟四档各一次（fuzz 已关，预写=实际排期）
+    val previews = remember(session.due.item) { Fsrs.previewDays(session.due.item, System.currentTimeMillis()) }
 
     fun selfAssess(v: ReviewVerdict) {
         val next = verdicts + v
         if (qs.isEmpty() || idx + 1 >= qs.size) {
-            // 章级聚合一次推进：单按钮场景聚合值即该值
-            onDone(advanceReview(session.due.item.intervalIdx, aggregateVerdict(next), System.currentTimeMillis()))
+            // 章级聚合一次推进：单按钮场景聚合值即该值；P0-① FSRS 按聚合档评分排出下次间隔
+            onDone(Fsrs.review(session.due.item, aggregateVerdict(next), System.currentTimeMillis()))
         } else {
             verdicts = next
             idx += 1
@@ -392,16 +398,50 @@ private fun ReviewSessionPane(
                 Button(onClick = { revealed = true }, modifier = Modifier.fillMaxWidth()) { Text("看答案") }
             }
         }
-        VerdictButtons(::selfAssess)
+        VerdictButtons(previews, ::selfAssess)
+    }
+}
+
+/** 四档评分按钮（P0-①）：按钮上预写下次间隔（AnkiDroid 思路——评分前知道后果），记得为主按钮 */
+@Composable
+private fun VerdictButtons(
+    previews: Map<ReviewVerdict, Int>,
+    onVerdict: (ReviewVerdict) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        VerdictButton("忘了", previews[ReviewVerdict.FORGOT], false, Modifier.weight(1f)) { onVerdict(ReviewVerdict.FORGOT) }
+        VerdictButton("模糊", previews[ReviewVerdict.FUZZY], false, Modifier.weight(1f)) { onVerdict(ReviewVerdict.FUZZY) }
+        VerdictButton("记得", previews[ReviewVerdict.REMEMBER], true, Modifier.weight(1f)) { onVerdict(ReviewVerdict.REMEMBER) }
+        VerdictButton("太简单", previews[ReviewVerdict.EASY], false, Modifier.weight(1f)) { onVerdict(ReviewVerdict.EASY) }
     }
 }
 
 @Composable
-private fun VerdictButtons(onVerdict: (ReviewVerdict) -> Unit) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(onClick = { onVerdict(ReviewVerdict.REMEMBER) }, modifier = Modifier.weight(1f)) { Text("记得") }
-        OutlinedButton(onClick = { onVerdict(ReviewVerdict.FUZZY) }, modifier = Modifier.weight(1f)) { Text("模糊") }
-        OutlinedButton(onClick = { onVerdict(ReviewVerdict.FORGOT) }, modifier = Modifier.weight(1f)) { Text("忘了") }
+private fun VerdictButton(
+    label: String,
+    days: Int?,
+    filled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val content: @Composable () -> Unit = {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(label, style = MaterialTheme.typography.labelLarge)
+            Text(
+                if (days != null) "约 $days 天" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (filled) {
+                    MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+    }
+    if (filled) {
+        Button(onClick = onClick, modifier = modifier) { content() }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = modifier) { content() }
     }
 }
 

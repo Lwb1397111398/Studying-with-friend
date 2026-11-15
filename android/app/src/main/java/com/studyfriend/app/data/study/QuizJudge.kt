@@ -64,13 +64,27 @@ object QuizJudge {
                     model = llm.model,
                     temperature = 0.2,
                     maxTokens = AiBudgets.OUTPUT_TOKENS_JUDGE,
+                    // P0-② 降档梯子：JSON mode 首选，网关拒收/解析不过自动降纯 prompt 档
+                    jsonMode = true,
                     messages = listOf(
                         AiMessage("system", systemPrompt),
                         AiMessage("user", userJson(question, myAnswer, reference, explain)),
                     ),
                 ),
                 QuizJudgeResult.serializer(),
-            ) { },
+                onDelta = { },
+                validate = { r ->
+                    // 结构校验（P0-② 调研评审：字段级白名单防「合格形状的空结果」）——
+                    // 全空的判卷没有信息量，带纠正语重试而不是直接展示。
+                    // 注：不用「条目必须逐字出现在作答里」校验——判卷 prompt 第 4 条明确
+                    // 「意思相同但用词不同也算覆盖」，逐字比对会把合法转述误杀
+                    if (r.covered.isEmpty() && r.missing.isEmpty() && r.advice.isBlank()) {
+                        "covered/missing/advice 全为空"
+                    } else {
+                        null
+                    }
+                },
+            ),
         )
     }
 }

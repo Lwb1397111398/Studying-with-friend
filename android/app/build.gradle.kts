@@ -126,6 +126,10 @@ dependencies {
     ksp("androidx.room:room-compiler:2.6.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // FSRS-6 间隔重复算法（P0-① 复习排期升级，MIT）。Jackson 传递依赖必须保留：库的类加载期
+    // 就引用 jackson-core 异常类型（实测排除后 Fsrs 初始化 NoClassDefFoundError）。
+    // 我们从不调 toJson/fromJson，R8 会把这条不可达路径连同 Jackson 一起剥掉——release 体积不受影响
+    implementation("io.github.open-spaced-repetition:fsrs:1.0.0")
     // PDF 文本提取（pdfbox 2.0 的 Android 移植）
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     // P6b OCR 推理（PP-OCRv5 mobile det+rec；模型 ~21MB 不进 APK，走 S5 GitHub Release 下载）

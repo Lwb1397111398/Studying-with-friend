@@ -51,6 +51,11 @@ object DbValues {
     const val ITEM_CHAPTER = "CHAPTER"
     const val ITEM_TERM = "TERM"
 
-    /** 复习间隔天数表，intervalIdx 0..4 对应 */
+    // review_items.fsrsState（P0-① FSRS）：java-fsrs State 枚举值 1/2/3
+    const val FSRS_STATE_LEARNING = 1
+    const val FSRS_STATE_REVIEW = 2
+    const val FSRS_STATE_RELEARNING = 3
+
+    /** 复习间隔天数表，intervalIdx 0..4 对应（P0-① 前的旧档位制；列已改存 FSRS 排出天数，表仅存档） */
     val REVIEW_INTERVAL_DAYS = intArrayOf(1, 3, 7, 14, 30)
 }

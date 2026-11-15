@@ -156,3 +156,9 @@ EPUB 3 Media Overlays「朗读同步逐句高亮」，本地 EPUB 配 MP3/M4B �
 - 引任何库前先核对当时仓库 LICENSE 文件（本文快照是 2026-11-15 的，库可能换许可证）。
 - GPL/AGPL 机制落地时**重写实现**，只保留行为思路；diff 审查不得出现 GPL 代码片段。
 - 每个借鉴项落地后回写对应模块总览（M1/M2/M4a/M5/M6）并在本文件登记状态。
+
+## 七、落地状态登记
+
+- **P0-① FSRS 复习排期**：✅ 2026-11-15 落地（java-fsrs 1.0.0，MIT）。四档映射+空学习步+关 fuzz+旧档迁移回填+review_log+备份 DTO。见 M1/M6 总览同日条。
+- **P0-② 降档梯子**：✅ 2026-11-15 落地（范式移植 bilingual_book_maker structured.py，MIT；未引库，Kotlin 重写）。JSON mode→纯 prompt→校验重试，QuizJudge 首个接入方。见 M3/M5 总览同日条。**校验收窄说明**：评审建议的「来源章节号必须真实存在」逐字校验不适用于判卷（prompt 明确转述合法，逐字比对误杀）——该防幻觉校验归属 P1 引用溯源。
+- P1（引用溯源/prompt 改写+基准集/激励统计）、P2（导图 mind-elixir spike/低成本分页验证）：未开工。

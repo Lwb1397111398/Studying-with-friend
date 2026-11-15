@@ -41,6 +41,8 @@ data class ChatRequest(
     val messages: List<AiMessage>,
     /** 读超时（ms）：视觉转写单页要 60 秒级，这类长任务调大；默认值见 [AiBudgets.READ_TIMEOUT_DEFAULT_MS] */
     val readTimeoutMs: Int = AiBudgets.READ_TIMEOUT_DEFAULT_MS,
+    /** P0-② 降档梯子：true 时请求体带 response_format={"type":"json_object"}；仅 chatJson 链路消费，网关拒收自动降纯 prompt 档 */
+    val jsonMode: Boolean = false,
 )
 
 /**
@@ -196,38 +198,94 @@ object AiClient {
     /**
      * 要求 AI 返回 JSON：chat → 剥壳 → 反序列化；失败自动重试 1 次
      * （附加提示"只输出 JSON"），再失败抛含原始输出片段的异常（计划 M3 §4）。
+     *
+     * P0-② 降档梯子（借鉴 bilingual_book_maker structured.py 范式，MIT）：
+     * - req.jsonMode=true 先走 JSON mode（response_format）；网关以 400/422 拒收或解析/校验不过
+     *   → 降纯 prompt 档（被拒档位本轮内不重打，不重复付费），已有输出作为 assistant 上下文带入；
+     * - validate 钩子非空时对解析结果做结构校验（如判卷结果全空），失败带纠正语重试一次；
+     * - jsonMode=false 的调用方行为与旧版完全一致（零回归面）。
      */
     suspend fun <T> chatJson(
         req: ChatRequest,
         deserializer: DeserializationStrategy<T>,
+        validate: ((T) -> String?)? = null,
         onDelta: (String) -> Unit = {},
     ): T {
-        val first = chat(req, onDelta)
-        try {
-            return json.decodeFromString(deserializer, JsonSlicer.slice(first))
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
+        if (req.jsonMode) {
+            val first = try {
+                chat(req, onDelta)
+            } catch (e: AiException) {
+                // 仅格式类拒收降档（response_format 未实现）；鉴权/限流/路径错原样抛，交上层退避
+                if (e.httpCode == 400 || e.httpCode == 422) null else throw e
+            }
+            if (first != null) {
+                val parsed = parseJson(first, deserializer)
+                val err = parsed?.let { validate?.invoke(it) }
+                if (parsed != null && err == null) return parsed
+                return chatJsonFallback(req, deserializer, onDelta, validate, seed = first, corrective = err)
+            }
+            return chatJsonFallback(req, deserializer, onDelta, validate, seed = null, corrective = null)
         }
+        return chatJsonFallback(req, deserializer, onDelta, validate, seed = null, corrective = null)
+    }
+
+    /** 解析 + 剥壳一次；失败返回 null（取消除外）。chatJson 梯子各档共用 */
+    private fun <T> parseJson(raw: String, deserializer: DeserializationStrategy<T>): T? = try {
+        json.decodeFromString(deserializer, JsonSlicer.slice(raw))
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** 纯 prompt 档（原 chatJson 主体）：首打（可带降档种子与纠正语）→ 失败纠正重试 1 次 → 抛人话异常 */
+    private suspend fun <T> chatJsonFallback(
+        req: ChatRequest,
+        deserializer: DeserializationStrategy<T>,
+        onDelta: (String) -> Unit,
+        validate: ((T) -> String?)?,
+        seed: String?,
+        corrective: String?,
+    ): T {
+        val plainReq = req.copy(
+            jsonMode = false,
+            messages = req.messages +
+                // 降档种子：JSON mode 档已产出内容时作为 assistant 上下文带入（帮模型对齐格式）；
+                // 空正文不追加空 content 的 assistant 消息（部分网关校验拒绝空 content）
+                (if (!seed.isNullOrBlank()) listOf(AiMessage("assistant", seed.take(2000))) else emptyList()) +
+                (if (corrective != null) listOf(AiMessage("user", "上一轮输出的问题：$corrective。请修正后重新输出完整 JSON。")) else emptyList()),
+        )
+        val first = chat(plainReq, onDelta)
+        val parsed = parseJson(first, deserializer)
+        val err = parsed?.let { validate?.invoke(it) }
+        if (parsed != null && err == null) return parsed
         // 立刻重打常撞限流窗口；稍等片刻再要 JSON（推理模型输出长，也给网关喘息）
         delay(1_500)
         // 正文为空 = 思考吃满了输出预算（finish=length）：原样重打只会再收到一次空串，
         // 必须翻倍预算并换提示（"不是合法 JSON"对空正文场景语义不准）。
         // maxTokens=null 的请求无从翻倍、沿用服务端默认预算（当前所有 chatJson 调用方都显式传值）
         val blankContent = first.isBlank()
-        val retryReq = req.copy(
-            maxTokens = if (blankContent) req.maxTokens?.let { it * 2 } else req.maxTokens,
-            messages = req.messages +
-                // 空正文时不追加空 content 的 assistant 消息（部分网关校验拒绝空 content）
+        val hint = when {
+            blankContent -> BLANK_CONTENT_HINT
+            parsed != null -> "你上一轮的 JSON 结构不合格（$err）。请重新输出完整 JSON，不要任何其他文字。"
+            else -> RETRY_HINT
+        }
+        val retryReq = plainReq.copy(
+            maxTokens = if (blankContent) plainReq.maxTokens?.let { it * 2 } else plainReq.maxTokens,
+            messages = plainReq.messages +
                 (if (!blankContent) listOf(AiMessage("assistant", first.take(2000))) else emptyList()) +
-                AiMessage("user", if (blankContent) BLANK_CONTENT_HINT else RETRY_HINT),
+                AiMessage("user", hint),
         )
         val second = chat(retryReq, onDelta)
-        try {
-            return json.decodeFromString(deserializer, JsonSlicer.slice(second))
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            throw AiException("AI 输出的 JSON 无法解析，原始输出片段：${second.take(120)}")
-        }
+        val parsed2 = parseJson(second, deserializer)
+        val err2 = parsed2?.let { validate?.invoke(it) }
+        if (parsed2 != null && err2 == null) return parsed2
+        throw AiException(
+            when {
+                parsed2 != null -> "AI 输出的 JSON 结构不合格（$err2），原始输出片段：${second.take(120)}"
+                else -> "AI 输出的 JSON 无法解析，原始输出片段：${second.take(120)}"
+            },
+        )
     }
 
     private const val RETRY_HINT = "你上一次的输出不是合法 JSON。请只输出 JSON，不要任何其他文字、解释或代码围栏。"
@@ -239,6 +297,10 @@ object AiClient {
         put("stream", true)
         put("temperature", req.temperature)
         req.maxTokens?.let { put("max_tokens", it) }
+        if (req.jsonMode) {
+            // P0-② 降档梯子第 1 档：JSON mode（OpenAI 兼容 response_format）
+            put("response_format", buildJsonObject { put("type", "json_object") })
+        }
         putJsonArray("messages") {
             req.messages.forEach { m ->
                 addJsonObject {

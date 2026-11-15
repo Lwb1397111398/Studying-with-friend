@@ -277,11 +277,48 @@ data class ReviewItemEntity(
     val bookId: Long,
     val chapterId: Long,
     val title: String, // 章节名，到期列表展示用
-    val intervalIdx: Int, // 0..4 对应 1/3/7/14/30 天
+    val intervalIdx: Int, // P0-① 起改存 FSRS 排出的天数（旧档位索引仅存量行遗留，只展示不消费）
     val dueAt: Long,
     val done: Boolean = false,
     /** 批D：排期项类型——CHAPTER=章末包（存量默认）；TERM=术语翻转卡（title=术语，问法由 UI 定） */
     val itemType: String = "CHAPTER",
+    // ---- P0-① FSRS（java-fsrs 1.0.0）卡片状态：每行一张卡（章卡/术语卡），到期查询仍以 dueAt 为权威 ----
+    /** 学习步留空：日粒度复习单元不走 Anki 式同日小步，任意评分后均转 REVIEW 按天排期 */
+    val fsrsState: Int = DbValues.FSRS_STATE_LEARNING,
+    /** null = 没复习过的新卡（首次评分由 FSRS 初始参数定 S/D）；迁移回填 = 旧档位折算 */
+    val fsrsStability: Double? = null,
+    val fsrsDifficulty: Double? = null,
+    val fsrsLastReviewAt: Long? = null,
+)
+
+/**
+ * FSRS 复习日志（P0-①）：每条评分一行。用途：撤销评分（backlog）/ 未来 FSRS 参数训练数据。
+ * 不进备份（恢复时 review_items 清空 → CASCADE 同步清空，排期状态随 review_items.fsrs* 列走）。
+ */
+@Entity(
+    tableName = "review_log",
+    foreignKeys = [
+        ForeignKey(
+            entity = ReviewItemEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["itemId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("itemId")],
+)
+data class ReviewLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val itemId: Long,
+    /** java-fsrs Rating：1=Again(忘了) 2=Hard(模糊) 3=Good(记得) 4=Easy(太简单) */
+    val rating: Int,
+    val stateBefore: Int,
+    val stabilityBefore: Double?,
+    val difficultyBefore: Double?,
+    val dueBefore: Long,
+    val scheduledDays: Double,
+    val dueAt: Long,
+    val reviewedAt: Long,
 )
 
 /**

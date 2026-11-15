@@ -158,13 +158,22 @@ class DaoTest {
             assertEquals(1, due.size)
             assertEquals(now - 1_000L, due[0].dueAt)
 
-            // 记得 → 推进间隔
-            db.reviewItemDao().markResult(due[0].id, 2, now + 7L * 86_400_000, false)
+            // 记得 → FSRS 推进（P0-①：卡状态整行写回）
+            db.reviewItemDao().markResult(
+                due[0].id, intervalIdx = 2, dueAt = now + 7L * 86_400_000, done = false,
+                fsrsState = DbValues.FSRS_STATE_REVIEW, fsrsStability = 7.0,
+                fsrsDifficulty = 5.0, fsrsLastReviewAt = now,
+            )
             val pending = db.reviewItemDao().pendingByBook(bookId)
             assertEquals(2, pending[0].intervalIdx)
+            assertEquals(DbValues.FSRS_STATE_REVIEW, pending[0].fsrsState)
 
-            // 忘了 → 归 0 重新排期
-            db.reviewItemDao().markResult(pending[0].id, 0, now + 86_400_000, false)
+            // 忘了 → 短间隔重新排期（列语义：intervalIdx 已改存天数）
+            db.reviewItemDao().markResult(
+                pending[0].id, intervalIdx = 0, dueAt = now + 86_400_000, done = false,
+                fsrsState = DbValues.FSRS_STATE_REVIEW, fsrsStability = 1.0,
+                fsrsDifficulty = 5.0, fsrsLastReviewAt = now,
+            )
             assertEquals(0, db.reviewItemDao().pendingByBook(bookId)[0].intervalIdx)
         } finally {
             db.close()

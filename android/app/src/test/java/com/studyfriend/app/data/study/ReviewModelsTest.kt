@@ -2,59 +2,15 @@ package com.studyfriend.app.data.study
 
 import com.studyfriend.app.data.db.WrongAttempt
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** M6 计划 §6：间隔推进 5 例 + 章级聚合 2 例 + 错题去重 2 例 */
+/**
+ * P0-① FSRS 化后本文件只剩「章级聚合 + 错题去重」两组纯函数；
+ * 推进逻辑归 FsrsTest（真实 java-fsrs 调用），旧 advanceReview 五例随档位制一起退役。
+ */
 class ReviewModelsTest {
 
-    private val now = 1_000_000L
-    private val day = 24 * 60 * 60 * 1000L
-
-    // ---------- advanceReview（计划 §2.1） ----------
-
-    @Test
-    fun remember_advancesToNextInterval() {
-        val a = advanceReview(0, ReviewVerdict.REMEMBER, now)
-        assertEquals(1, a.intervalIdx)
-        assertEquals(now + 3 * day, a.dueAt) // 第 1 档记得 → 3 天后再来
-        assertFalse(a.done)
-    }
-
-    @Test
-    fun remember_atCapMarksDone() {
-        val a = advanceReview(4, ReviewVerdict.REMEMBER, now)
-        assertEquals(4, a.intervalIdx)
-        assertTrue(a.done)
-    }
-
-    @Test
-    fun fuzzy_dropsOneInterval() {
-        // 批D：模糊→降一档（原「同档重排」等于不惩罚）
-        val a = advanceReview(2, ReviewVerdict.FUZZY, now)
-        assertEquals(1, a.intervalIdx)
-        assertEquals(now + 3 * day, a.dueAt)
-        assertFalse(a.done)
-    }
-
-    @Test
-    fun forgot_resetsToZero() {
-        val a = advanceReview(3, ReviewVerdict.FORGOT, now)
-        assertEquals(0, a.intervalIdx)
-        assertEquals(now + day, a.dueAt)
-        assertFalse(a.done)
-    }
-
-    @Test
-    fun outOfRangeIdx_isCoercedBeforeAdvance() {
-        // 历史脏数据 idx=5：coerce 到 4 后模糊降一档 → 3（批D语义）
-        val a = advanceReview(5, ReviewVerdict.FUZZY, now)
-        assertEquals(3, a.intervalIdx)
-        assertEquals(now + 14 * day, a.dueAt)
-    }
-
-    // ---------- aggregateVerdict（计划 §2.2） ----------
+    // ---------- aggregateVerdict（P0-① 四档） ----------
 
     @Test
     fun aggregate_allRememberIsRemember() {
@@ -62,10 +18,31 @@ class ReviewModelsTest {
     }
 
     @Test
-    fun aggregate_anyForgotIsForgot_elseFuzzy() {
-        assertEquals(ReviewVerdict.FORGOT, aggregateVerdict(listOf(ReviewVerdict.REMEMBER, ReviewVerdict.FORGOT, ReviewVerdict.REMEMBER)))
+    fun aggregate_anyForgotBeatsEverything() {
+        assertEquals(
+            ReviewVerdict.FORGOT,
+            aggregateVerdict(listOf(ReviewVerdict.REMEMBER, ReviewVerdict.FORGOT, ReviewVerdict.EASY)),
+        )
+    }
+
+    @Test
+    fun aggregate_anyFuzzyBeatsRemember() {
         assertEquals(ReviewVerdict.FUZZY, aggregateVerdict(listOf(ReviewVerdict.REMEMBER, ReviewVerdict.FUZZY)))
         assertEquals(ReviewVerdict.FUZZY, aggregateVerdict(emptyList())) // 无题退化单按钮容错
+    }
+
+    @Test
+    fun aggregate_allEasyIsEasy() {
+        assertEquals(ReviewVerdict.EASY, aggregateVerdict(listOf(ReviewVerdict.EASY, ReviewVerdict.EASY)))
+    }
+
+    @Test
+    fun aggregate_mixedRememberEasy_staysConservativeRemember() {
+        // 「记得+太简单」混评从保守：按 Good 档排期（Easy 只在全程秒懂时给）
+        assertEquals(
+            ReviewVerdict.REMEMBER,
+            aggregateVerdict(listOf(ReviewVerdict.REMEMBER, ReviewVerdict.EASY)),
+        )
     }
 
     // ---------- latestWrongAttempts（M5 契约 #1：取最新再过滤 WRONG） ----------

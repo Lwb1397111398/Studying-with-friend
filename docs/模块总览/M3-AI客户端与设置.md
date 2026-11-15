@@ -22,7 +22,7 @@
 | SSE 流式 | — | OpenAI 兼容 `/chat/completions`，`stream:true`，onDelta 逐块回调 |
 | 取消 | — | 哨兵子协程 `awaitCancellation()` + finally disconnect；取消型 IOException 还原 CancellationException |
 | 错误分层 | — | 401/403→Key 无效、404→路径不存在、429→太频繁/额度尽；错误 body 限读 300 字节 |
-| JSON 剥壳与修复重试 | — | stripFence + 配平扫描；chatJson 失败重试 1 次（空正文翻倍 maxTokens + 换提示） |
+| JSON 剥壳与修复重试 | — | stripFence + 配平扫描；chatJson 失败重试 1 次（空正文翻倍 maxTokens + 换提示）。**P0-② 降档梯子**（借鉴 bilingual_book_maker，MIT）：`ChatRequest.jsonMode=true` 时请求体带 `response_format={"type":"json_object"}`（OpenAI 兼容 JSON mode）；网关 400/422 拒收或解析/校验不过 → 自动降纯 prompt 档（被拒档位本轮不重打），已有输出作 assistant 上下文带入；`validate` 钩子对解析结果做结构校验、失败带纠正语重试一次。`jsonMode=false` 调用方行为与旧版逐字节一致（签名 validate 在 onDelta 前，尾随 lambda 语义不变）。当前唯一消费方：QuizJudge 判卷 |
 
 ## 关键文件
 
@@ -80,6 +80,8 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
 - 加密键沿用 `_enc` 后缀约定，备份层（BackupManager SETTING_ENC_SUFFIX）自动排除，无需改备份代码。
 
 ## 最后更新
+
+- 2026-11-15 **P0-② 降档梯子轮**：AiClient.chatJson 加「JSON mode→纯 prompt+剥壳提取→校验重试」降档链（详见功能清单「JSON 剥壳与修复重试」行）；`ChatRequest` 加 `jsonMode` 字段（默认 false 零回归面）；chatJson 签名 validate 挂 onDelta 前（保持全部既有尾随 lambda 调用语义）；`AiClientChatJsonFn` 适配器改 onDelta 命名传参。AiClientTest +3 例（response_format 进请求体 / 400 降档不再带 / 校验失败纠正语重试后抛结构不合格）。接入方：QuizJudge（M5 同日条）。粗读归并等其余 chatJson 调用方行为零变化（后续任务按需接入 jsonMode）。
 
 - 2026-11-15 **档案体系多模型轮（本轮，老板点名「很多 LLM 设置、不同功能自己选、界面要漂亮」）**：
   ①**数据层**：新增 `LlmProfile`（名称/地址/Key/模型/温度）与 `LlmAssign`（四角色指派），存 settings KV JSON；每档 Key 独立加密 `llm_key_<id>_enc`；`resolveLlm(role)` 统一解析端点（回退规则见决策 15）；旧配置（api_base/api_key_enc/note_model/vision 两组）首次 loadLlm 自动迁移成档案，密文原值平移、旧键不删、幂等；
