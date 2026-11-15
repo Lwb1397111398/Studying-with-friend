@@ -22,8 +22,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -311,9 +311,11 @@ fun ReadScreen(
             TopAppBar(
                 title = {
                     Column {
+                        // 2026-11-15 UI 打磨轮：章名两行显示不再截断（「第一章 总 …」这种半截标题就是毛坯感）
                         Text(
                             chapter?.title.orEmpty().ifBlank { "阅读" },
-                            maxLines = 1,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
                         // 委托属性不能 smart cast（M4a 坑 #15）：取局部变量再判空
@@ -339,14 +341,15 @@ fun ReadScreen(
                     IconButton(onClick = { showTocSheet = true }) {
                         Icon(Icons.Filled.Menu, contentDescription = "目录与书签")
                     }
+                    // 上一章/下一章：左右箭头更直觉（原上下箭头常被误读成滚动）
                     IconButton(
                         enabled = prevChapter != null,
                         onClick = { prevChapter?.let { onOpenChapter(it.id, -1L) } },
-                    ) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "上一章") }
+                    ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "上一章") }
                     IconButton(
                         enabled = nextChapter != null,
                         onClick = { nextChapter?.let { onOpenChapter(it.id, -1L) } },
-                    ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "下一章") }
+                    ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "下一章") }
                     // P7 阅读字号调节
                     IconButton(onClick = { showFontSheet = true }) {
                         Text(

@@ -74,6 +74,8 @@ test/.../SettingsRepoTest.kt   9 用例（-presets 用例，+noteModel 往返与
 
 ## 最后更新
 
+- 2026-11-15 **UI 打磨轮：设置页卡片化**：分区从「细分割线」改为 surfaceContainer 圆角 16dp 分区卡（SectionCard 私有组件，组头 labelLarge 在卡内），细线全删；朗读语速/朗读引擎/离线模型三块合进一张「朗读」卡（同一件事的三面）；备份与恢复、诊断各成一张卡。配置项与落库键零变化，纯视觉重排。模拟器浅/深两主题实测。
+
 - 2026-10-26 **数据安全与体验增量轮：设置页「备份与恢复」+「诊断」区块 + AiGate 排队**：
   ①**备份与恢复**（BackupSection）：SAF CreateDocument 导出 JSON（默认名 studyfriend-backup-yyyyMMdd-HHmm.json）+ OpenDocument 选文件→先只 peek 解析校验（版本/引用完整性，不动库）→确认框明示「当前全部学习数据将被覆盖」→confirmRestore 才整库替换（BackupManager 见 M1）；恢复完成回读设置页五项状态防残留旧值；
   ②**诊断日志**（`data/DiagLog.kt` object，StudyApp.onCreate 挂载）：filesDir/logs/ 按天分文件滚动保留 7 天；崩溃捕获挂 Thread.setDefaultUncaughtExceptionHandler（先写盘再交原 handler）；AiTaskRunner 四 Runner 的失败/取消/占线原因写入（一处埋点覆盖四个任务）；设置页「导出诊断日志」按钮 SAF 存最近 7 天合并 txt（DiagLogTest 5 例）；

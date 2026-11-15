@@ -146,12 +146,13 @@ class M6OverviewUiSmokeTest {
             }
         }
         awaitText("总览第1 章") // Flow 首发射，列表已渲染
+        // 2026-11-15 UI 打磨轮：总览入口改卡片行，副文案「已总结 N 章 · 思维导图与要点都在这里」
         compose.waitUntil(3_000) {
-            compose.onAllNodesWithText("全书总览（已总结 1 章）").fetchSemanticsNodes().isEmpty() &&
-                compose.onAllNodesWithText("全书总览（已总结 2 章）").fetchSemanticsNodes().isEmpty()
+            compose.onAllNodesWithText("已总结 1 章 · 思维导图与要点都在这里").fetchSemanticsNodes().isEmpty() &&
+                compose.onAllNodesWithText("已总结 2 章 · 思维导图与要点都在这里").fetchSemanticsNodes().isEmpty()
         }
 
         seedSummarizedChapter(2) // 第 2 章总结完成 → Flow 重发射 → 入口出现
-        awaitText("全书总览（已总结 2 章）")
+        awaitText("已总结 2 章 · 思维导图与要点都在这里")
     }
 }

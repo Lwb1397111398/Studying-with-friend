@@ -6,12 +6,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -21,9 +23,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -65,179 +67,192 @@ fun SettingsScreen(
             Text("设置", style = MaterialTheme.typography.headlineSmall)
 
             // —— 模型入口：AI 功能的地址/Key/模型都在「模型」页配置 ——
-            Text("AI 模型", style = MaterialTheme.typography.labelLarge)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onOpenModels)
-                    .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        if (vm.keyReady) "主力：${vm.mainModel}" else "主力：${vm.mainModel}（未配置 API Key）",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (vm.keyReady) MaterialTheme.colorScheme.onSurface
-                        else MaterialTheme.colorScheme.error,
-                    )
-                    Text(
-                        "讲解：${vm.noteSummary} · 视觉转写：${vm.visionSummary}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        "点进去配置地址、Key、各任务的模型",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+            SectionCard {
+                Text("AI 模型", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenModels)
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (vm.keyReady) "主力：${vm.mainModel}" else "主力：${vm.mainModel}（未配置 API Key）",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (vm.keyReady) MaterialTheme.colorScheme.onSurface
+                            else MaterialTheme.colorScheme.error,
+                        )
+                        Text(
+                            "讲解：${vm.noteSummary} · 视觉转写：${vm.visionSummary}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "点进去配置地址、Key、各任务的模型",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "进入模型页")
                 }
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "进入模型页")
             }
-
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
             // 外观主题三态（功能补齐轮）：即选即存，改完全 App 即时生效
-            Text("外观", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(
-                    SettingsRepository.THEME_SYSTEM to "跟随系统",
-                    SettingsRepository.THEME_LIGHT to "浅色",
-                    SettingsRepository.THEME_DARK to "深色",
-                ).forEach { (mode, label) ->
-                    FilterChip(
-                        selected = vm.themeMode == mode,
-                        onClick = { vm.chooseThemeMode(mode) },
-                        label = { Text(label) },
-                    )
+            SectionCard {
+                Text("外观", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        SettingsRepository.THEME_SYSTEM to "跟随系统",
+                        SettingsRepository.THEME_LIGHT to "浅色",
+                        SettingsRepository.THEME_DARK to "深色",
+                    ).forEach { (mode, label) ->
+                        FilterChip(
+                            selected = vm.themeMode == mode,
+                            onClick = { vm.chooseThemeMode(mode) },
+                            label = { Text(label) },
+                        )
+                    }
                 }
             }
 
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
-
-            // 朗读语速（功能补齐轮正文听书）：阅读页「朗读」与本机朗读共用；拖完落库
-            Text("朗读语速", style = MaterialTheme.typography.labelLarge)
-            var rateDragging by remember { mutableStateOf(vm.ttsRate) }
-            Slider(
-                value = rateDragging,
-                onValueChange = { rateDragging = (it * 10).toInt() / 10f },
-                onValueChangeFinished = { vm.chooseTtsRate(rateDragging) },
-                valueRange = SettingsRepository.TTS_RATE_MIN..SettingsRepository.TTS_RATE_MAX,
-            )
-            Text(
-                "${rateDragging} 倍速（0.5 ~ 2.0）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
-
-            // 朗读引擎（TTS 双模式）：手机自带 / 本地离线模型（sherpa kokoro，模型在下方下载管理）。
-            // 「听的思维」同机实测：系统引擎要先声明 queries 才绑得上（本次修复的根因）
-            Text("朗读引擎", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(
-                    SettingsRepository.TTS_ENGINE_SYSTEM to "手机自带",
-                    SettingsRepository.TTS_ENGINE_LOCAL to "离线模型",
-                ).forEach { (mode, label) ->
-                    FilterChip(
-                        selected = vm.ttsEngine == mode,
-                        onClick = { vm.chooseTtsEngine(mode) },
-                        label = { Text(label) },
-                    )
+            // 朗读：语速 + 引擎 + 离线模型管理（同一件事的三面，收进一张卡）
+            SectionCard {
+                Text("朗读", style = MaterialTheme.typography.labelLarge)
+                // 朗读语速（功能补齐轮正文听书）：阅读页「朗读」与本机朗读共用；拖完落库
+                var rateDragging by remember { mutableStateOf(vm.ttsRate) }
+                Slider(
+                    value = rateDragging,
+                    onValueChange = { rateDragging = (it * 10).toInt() / 10f },
+                    onValueChangeFinished = { vm.chooseTtsRate(rateDragging) },
+                    valueRange = SettingsRepository.TTS_RATE_MIN..SettingsRepository.TTS_RATE_MAX,
+                )
+                Text(
+                    "${rateDragging} 倍速（0.5 ~ 2.0）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // 朗读引擎（TTS 双模式）：手机自带 / 本地离线模型（sherpa kokoro，模型在下方下载管理）。
+                // 「听的思维」同机实测：系统引擎要先声明 queries 才绑得上（本次修复的根因）
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        SettingsRepository.TTS_ENGINE_SYSTEM to "手机自带",
+                        SettingsRepository.TTS_ENGINE_LOCAL to "离线模型",
+                    ).forEach { (mode, label) ->
+                        FilterChip(
+                            selected = vm.ttsEngine == mode,
+                            onClick = { vm.chooseTtsEngine(mode) },
+                            label = { Text(label) },
+                        )
+                    }
                 }
+                TtsModelSection(vm)
             }
-            TtsModelSection(vm)
-
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
             // 复习到期提醒（功能补齐轮）：每日本地通知；Android 13+ 打开时请求通知权限
-            val permissionLauncher = rememberLauncherForActivityResult(
-                ActivityResultContracts.RequestPermission(),
-            ) { }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("复习到期提醒", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        "有章目复习到期时每天提醒一次，点击通知直达 App",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+            SectionCard {
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) { }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("复习到期提醒", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            "有章目复习到期时每天提醒一次，点击通知直达 App",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = vm.reviewReminder,
+                        onCheckedChange = { enabled ->
+                            if (enabled && android.os.Build.VERSION.SDK_INT >= 33) {
+                                permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            vm.chooseReviewReminder(enabled)
+                        },
                     )
                 }
-                Switch(
-                    checked = vm.reviewReminder,
-                    onCheckedChange = { enabled ->
-                        if (enabled && android.os.Build.VERSION.SDK_INT >= 33) {
-                            permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-                        }
-                        vm.chooseReviewReminder(enabled)
-                    },
-                )
             }
-
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
             // 讲解详略三档（总计划 §1 目标 7）：即选即存
-            Text("讲解详略", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SettingsRepository.DETAIL_LEVELS.forEach { level ->
-                    FilterChip(
-                        selected = vm.detailLevel == level,
-                        onClick = { vm.chooseDetailLevel(level) },
-                        label = { Text(level) },
-                    )
+            SectionCard {
+                Text("讲解详略", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsRepository.DETAIL_LEVELS.forEach { level ->
+                        FilterChip(
+                            selected = vm.detailLevel == level,
+                            onClick = { vm.chooseDetailLevel(level) },
+                            label = { Text(level) },
+                        )
+                    }
                 }
             }
-
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
             // —— 应用更新（M7）：手机上直接升级，不用连电脑传 APK ——
-            Text("应用更新", style = MaterialTheme.typography.labelLarge)
-            Text(
-                "当前版本 v${updateVm.currentVersion}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("自动检查更新", style = MaterialTheme.typography.labelLarge)
+            SectionCard {
+                Text("应用更新", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "当前版本 v${updateVm.currentVersion}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("自动检查更新", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            "每天最多联网检查一次，发现新版本弹窗提醒",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = updateVm.autoCheck, onCheckedChange = { updateVm.changeAutoCheck(it) })
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { updateVm.checkNow() },
+                        enabled = !updateVm.checking && !updateVm.downloading,
+                    ) { Text(if (updateVm.checking) "检查中…" else "检查更新") }
+                }
+                if (updateVm.checking || updateVm.downloading) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+                updateVm.status?.let {
                     Text(
-                        "每天最多联网检查一次，发现新版本弹窗提醒",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        it,
+                        color = if (updateVm.statusError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                 }
-                Switch(checked = updateVm.autoCheck, onCheckedChange = { updateVm.changeAutoCheck(it) })
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { updateVm.checkNow() },
-                    enabled = !updateVm.checking && !updateVm.downloading,
-                ) { Text(if (updateVm.checking) "检查中…" else "检查更新") }
-            }
-            if (updateVm.checking || updateVm.downloading) {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-            }
-            updateVm.status?.let {
-                Text(
-                    it,
-                    color = if (updateVm.statusError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
             BackupSection(vm)
         }
+    }
+}
+
+/** 设置页分区卡（2026-11-15 UI 打磨轮）：surfaceContainer 圆角卡替代细分割线分组 */
+@Composable
+private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            content = content,
+        )
     }
 }
 
@@ -257,41 +272,43 @@ private fun BackupSection(vm: SettingsViewModel) {
         ActivityResultContracts.CreateDocument("text/plain"),
     ) { uri -> uri?.let(vm::exportDiag) }
 
-    Text("备份与恢复", style = MaterialTheme.typography.labelLarge)
-    Text(
-        "导出全部学习数据（书、讲解、批注、进度）为一个 JSON 文件，换机/重装后可整库恢复。" +
-            "API Key 不包含在备份里，恢复后需重新填写。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(
-            enabled = !vm.backupBusy,
-            onClick = { exportLauncher.launch(backupFileName()) },
-        ) { Text("导出备份") }
-        OutlinedButton(
-            enabled = !vm.backupBusy,
-            onClick = { restoreLauncher.launch(arrayOf("*/*")) },
-        ) { Text("从备份恢复") }
-    }
-    vm.backupMessage?.let {
+    SectionCard {
+        Text("备份与恢复", style = MaterialTheme.typography.labelLarge)
         Text(
-            it,
+            "导出全部学习数据（书、讲解、批注、进度）为一个 JSON 文件，换机/重装后可整库恢复。" +
+                "API Key 不包含在备份里，恢复后需重新填写。",
             style = MaterialTheme.typography.bodySmall,
-            color = if (vm.backupIsError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                enabled = !vm.backupBusy,
+                onClick = { exportLauncher.launch(backupFileName()) },
+            ) { Text("导出备份") }
+            OutlinedButton(
+                enabled = !vm.backupBusy,
+                onClick = { restoreLauncher.launch(arrayOf("*/*")) },
+            ) { Text("从备份恢复") }
+        }
+        vm.backupMessage?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (vm.backupIsError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            )
+        }
     }
-
-    HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
     // 诊断日志（数据安全轮）：崩溃与 AI 任务失败原因按天滚动记 7 天，这里合并导出
-    Text("诊断", style = MaterialTheme.typography.labelLarge)
-    Text(
-        "App 崩溃与 AI 任务失败的原因会自动记录（保留最近 7 天）。遇到问题时导出发给 AI 排障。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    OutlinedButton(onClick = { diagLauncher.launch(diagFileName()) }) { Text("导出诊断日志") }
+    SectionCard {
+        Text("诊断", style = MaterialTheme.typography.labelLarge)
+        Text(
+            "App 崩溃与 AI 任务失败的原因会自动记录（保留最近 7 天）。遇到问题时导出发给 AI 排障。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(onClick = { diagLauncher.launch(diagFileName()) }) { Text("导出诊断日志") }
+    }
 
     // 恢复确认：明示覆盖语义（整库替换，无法撤销）
     vm.pendingRestore?.let { pending ->

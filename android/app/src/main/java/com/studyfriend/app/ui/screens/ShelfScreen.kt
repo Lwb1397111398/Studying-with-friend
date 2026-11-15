@@ -141,6 +141,7 @@ fun ShelfScreen(
             list.isEmpty() -> EmptyState(
                 title = "书架还是空的",
                 subtitle = "点右下角 + 导入 TXT，开始和搭子一起读书",
+                icon = Icons.Filled.Add,
             )
             else -> BookShelf(
                 list, dueByBook, visionByBook, progressByBook,
@@ -172,8 +173,8 @@ fun ShelfScreen(
             onDismissRequest = { menuFor = null },
             title = { Text("《${book.title}》") },
             text = {
+                // 2026-11-15 UI 打磨轮：去掉突兀的「书架共 N 本」计数行，操作按常用度纵排
                 Column {
-                    Text("书架共 ${books?.size ?: 0} 本。要做什么？")
                     // 体验优化轮：点书直达阅读位置后，章目录页从这里进（保留全书搜索/总览入口）
                     if (book.status == DbValues.BOOK_READY) {
                         TextButton(onClick = {
@@ -181,6 +182,11 @@ fun ShelfScreen(
                             onOpenChapters(book.id)
                         }) { Text("查看章节目录") }
                     }
+                    TextButton(onClick = {
+                        pendingRename = book
+                        renameInput = book.title
+                        menuFor = null
+                    }) { Text("重命名") }
                     if (failedPages > 0) {
                         Text(
                             "视觉增强 ${vstat!!.done}/${vstat.total}，${failedPages} 页失败",
@@ -207,23 +213,15 @@ fun ShelfScreen(
                             }
                         }) { Text(if (failedPages > 0) "重试视觉增强（${failedPages} 页失败）" else "开始视觉补识别") }
                     }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    pendingRename = book
-                    renameInput = book.title
-                    menuFor = null
-                }) { Text("重命名") }
-            },
-            dismissButton = {
-                Row {
                     TextButton(onClick = {
                         pendingDelete = book
                         menuFor = null
                     }) { Text("删除", color = MaterialTheme.colorScheme.error) }
-                    TextButton(onClick = { menuFor = null }) { Text("取消") }
                 }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { menuFor = null }) { Text("取消") }
             },
         )
     }
@@ -548,23 +546,26 @@ private fun BookCard(
                 }
             }
         }
-        // 封面下状态行：待复习 > 视觉增强进行中；都无则留白保持干净
-        when {
-            !ready -> Unit
-            due > 0 -> Text(
-                "$due 章待复习",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-            vision != null && vision.done < vision.total -> Text(
-                "视觉增强 ${vision.done}/${vision.total}",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-            else -> Unit
+        // 封面下状态行（2026-11-15 UI 打磨轮）：固定高度占位——同排卡片有没有状态文字，
+        // 下面的进度条都齐平（原先「视觉增强 x/y」把进度条压低一截，同排错位）
+        Box(Modifier.fillMaxWidth().height(22.dp)) {
+            when {
+                !ready -> Unit
+                due > 0 -> Text(
+                    "$due 章待复习",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.align(Alignment.CenterStart),
+                )
+                vision != null && vision.done < vision.total -> Text(
+                    "视觉增强 ${vision.done}/${vision.total}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.CenterStart),
+                )
+                else -> Unit
+            }
         }
         // v7 阅读进度条：已读 x/y 章（总计划 §4.2 书卡进度条落地）
         if (ready && progress != null && progress.totalChapters > 0) {

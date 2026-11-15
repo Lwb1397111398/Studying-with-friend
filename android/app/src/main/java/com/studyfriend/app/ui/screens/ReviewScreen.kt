@@ -1,9 +1,11 @@
 package com.studyfriend.app.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,16 +13,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,6 +39,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -117,7 +124,7 @@ fun ReviewScreen() {
         return
     }
 
-    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
         // 体验增量轮：阅读统计卡（今日/连续/累计）——进页查一次（阅读页按分钟入账）
         val today = remember { java.time.LocalDate.now().toString() }
         val stats by produceState<ReadingSummary?>(initialValue = null) {
@@ -128,22 +135,9 @@ fun ReviewScreen() {
                 totalMinutes = byDay.sumOf { it.minutes },
             )
         }
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            StatCell(label = "今日", value = "${stats?.todayMinutes ?: 0} 分钟")
-            StatCell(label = "连续", value = "${stats?.streakDays ?: 0} 天")
-            StatCell(label = "累计", value = "%.1f 小时".format((stats?.totalMinutes ?: 0) / 60f))
-        }
-        HorizontalDivider()
-        TabRow(selectedTabIndex = tab) {
-            listOf("今日复习", "错题本", "术语").forEachIndexed { i, t ->
-                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
-            }
-        }
+        ReadingStatsCard(stats)
+        ReviewTabs(selected = tab, onSelect = { tab = it })
+
         when (tab) {
             0 -> DuePane(repo = repo, onStart = { due ->
                 // 会话状态写回切主线程（与项目线程纪律一致）
@@ -167,11 +161,90 @@ private data class ReadingSummary(
     val totalMinutes: Int,
 )
 
+/** 时长展示：< 60 分钟显示「x 分钟」，满一小时起显示「x.x 小时」（0.1 小时这种读不懂的数不出现） */
+private fun formatMinutes(minutes: Int): String = when {
+    minutes >= 60 -> "%.1f 小时".format(minutes / 60f)
+    else -> "$minutes 分钟"
+}
+
+/** 阅读统计卡（2026-11-15 UI 打磨轮）：一张卡三格，今日格主色强调 */
 @Composable
-private fun StatCell(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun ReadingStatsCard(stats: ReadingSummary?) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 14.dp)) {
+            StatCell(
+                label = "今日",
+                value = formatMinutes(stats?.todayMinutes ?: 0),
+                emphasized = true,
+                modifier = Modifier.weight(1f),
+            )
+            StatCell(
+                label = "连续",
+                value = "${stats?.streakDays ?: 0} 天",
+                modifier = Modifier.weight(1f),
+            )
+            StatCell(
+                label = "累计",
+                value = formatMinutes(stats?.totalMinutes ?: 0),
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatCell(label: String, value: String, emphasized: Boolean = false, modifier: Modifier = Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            value,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = if (emphasized) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** 三 Tab 胶囊分段（替代老式下划线 TabRow）：选中 primaryContainer 底 */
+@Composable
+private fun ReviewTabs(selected: Int, onSelect: (Int) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf("今日复习", "错题本", "术语").forEachIndexed { i, t ->
+            val sel = selected == i
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(
+                        if (sel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                    )
+                    .clickable { onSelect(i) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    t,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (sel) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -206,31 +279,55 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
         due.distinctBy { if (it.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) "term_${it.item.id}" else it.item.bookId to it.item.chapterId }
     }
     if (visible.isEmpty()) {
-        EmptyState(title = "今天没有要复习的", subtitle = "读完一章后，这里会帮你安排复习")
+        EmptyState(
+            title = "今天没有要复习的",
+            subtitle = "读完一章后，这里会帮你安排复习",
+            icon = Icons.Filled.Refresh,
+        )
         return
     }
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
         items(visible, key = { it.item.id }) { d ->
             val overdueDays = ((now - d.item.dueAt) / DAY_MS).toInt()
-            ListItem(
-                headlineContent = { Text(d.item.title, fontWeight = FontWeight.Medium) },
-                supportingContent = {
-                    Text(
-                        if (d.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) "术语卡 · ${d.bookTitle}" else d.bookTitle,
-                    )
-                },
-                trailingContent = {
-                    Text(
-                        if (overdueDays <= 0) "今天到期" else "逾期 $overdueDays 天",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                },
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
-                    .clickable { onStart(d) }
-                    .padding(horizontal = 4.dp),
-            )
-            HorizontalDivider()
+                    .fillMaxWidth()
+                    .clickable { onStart(d) },
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(d.item.title, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            if (d.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) "术语卡 · ${d.bookTitle}" else d.bookTitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    val overdue = overdueDays > 0
+                    Text(
+                        if (overdue) "逾期 $overdueDays 天" else "今天到期",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (overdue) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .background(
+                                (if (overdue) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                                    .copy(alpha = 0.10f),
+                                RoundedCornerShape(999.dp),
+                            )
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -384,7 +481,11 @@ private fun WrongBookPane(repo: BookRepository, onRetest: (List<WrongRow>) -> Un
     }
     when {
         rows == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-        rows!!.isEmpty() -> EmptyState(title = "错题本是空的", subtitle = "自测答错的题会出现在这里，方便考前翻看")
+        rows!!.isEmpty() -> EmptyState(
+            title = "错题本是空的",
+            subtitle = "自测答错的题会出现在这里，方便考前翻看",
+            icon = Icons.Filled.Warning,
+        )
         else -> {
             var expandedKey by rememberSaveable { mutableStateOf<String?>(null) }
             LazyColumn(Modifier.fillMaxSize()) {
@@ -549,6 +650,7 @@ private fun TermsPane(repo: BookRepository) {
         data!!.groups.isEmpty() -> EmptyState(
             title = "还没有术语卡",
             subtitle = "读完章节、完成粗读后，每章的关键术语和大白话解释会汇集到这里",
+            icon = Icons.Filled.Star,
         )
         else -> {
             // 手风琴：一次展开一章，翻看不迷路

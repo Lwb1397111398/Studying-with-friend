@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,17 +17,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -41,6 +42,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -125,18 +127,47 @@ fun ChapterListScreen(
             },
         )
         if (items.isEmpty()) {
-            EmptyState(title = "没有章节", subtitle = "这本书还没有解析出章节")
+            EmptyState(
+                title = "没有章节",
+                subtitle = "这本书还没有解析出章节",
+                icon = Icons.Filled.List,
+            )
             return@Column
         }
-        LazyColumn(Modifier.fillMaxSize()) {
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+        ) {
             if (summarizedCount >= 2) {
                 item(key = "overview_entry") {
-                    OutlinedButton(
-                        onClick = onOpenOverview,
+                    // 全书总览入口（2026-11-15 UI 打磨轮）：卡片行替代描边大按钮，入口更醒目
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                    ) { Text("全书总览（已总结 $summarizedCount 章）") }
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .clickable(onClick = onOpenOverview),
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("全书总览", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "已总结 $summarizedCount 章 · 思维导图与要点都在这里",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "打开全书总览",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
                 }
             }
             // P5 校准徽标（calibrated 列语义定案：任一行 calibrated=true ⇔ 本书目录校准成功）
@@ -178,7 +209,6 @@ fun ChapterListScreen(
                         SectionRow(item.row) { onOpenChapter(item.parentChapterId, item.row.title) }
                     }
                 }
-                HorizontalDivider()
             }
         }
 
@@ -336,13 +366,33 @@ private fun ChapterRow(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
-                TextButton(onClick = onStop) { Text("停止") }
+                MiniPill("停止", onStop, neutral = true)
             }
-            interrupted || resumeByData -> TextButton(onClick = onStart, enabled = !runningOther) { Text("继续") }
-            noMark -> Button(onClick = onStart, enabled = !runningOther) { Text("粗读") }
-            else -> OutlinedButton(onClick = onForce, enabled = !runningOther) { Text("重读") }
+            interrupted || resumeByData -> MiniPill("继续", onStart, enabled = !runningOther)
+            noMark -> MiniPill("粗读", onStart, enabled = !runningOther)
+            else -> MiniPill("重读", onForce, enabled = !runningOther)
         }
     }
+}
+
+/** 行尾轻量操作胶囊（2026-11-15 UI 打磨轮）：替代原实心大按钮——章目录页 10 行 10 个
+ *  大「粗读」又吵又挤；主色只作淡染，视觉让位给章名本身。 */
+@Composable
+private fun MiniPill(text: String, onClick: () -> Unit, enabled: Boolean = true, neutral: Boolean = false) {
+    val tint = when {
+        neutral -> MaterialTheme.colorScheme.onSurfaceVariant
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = tint.copy(alpha = if (enabled) 1f else 0.45f),
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(tint.copy(alpha = if (enabled) 0.12f else 0.06f))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    )
 }
 
 /** 节行（P5）：缩进次级样式，无粗读按钮/无徽标；点击=目录锚跳转（父章+滚动定位） */

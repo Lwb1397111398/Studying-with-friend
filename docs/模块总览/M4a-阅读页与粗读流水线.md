@@ -150,6 +150,7 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 
 ## 最后更新
 
+- 2026-11-15 **UI 打磨轮：章目录页 + 阅读页顶栏**：①**章目录页行尾大按钮瘦身**——每章行尾实心「粗读」大按钮（10 行 10 个又吵又挤）改 MiniPill 轻量胶囊（labelMedium 小字+主色 12% 淡染，停止=中性灰染），逻辑四态不变（粗读/继续/重读/进度+停止）；行间 HorizontalDivider 全删改留白；**全书总览入口卡片化**——OutlinedButton 改 surfaceContainer 卡片行（书名级标题「全书总览」+ 副行「已总结 N 章 · 思维导图与要点都在这里」+ 尾部箭头），M6OverviewUiSmokeTest 断言同步适配新副文案。②**阅读页顶栏**——章标题 maxLines 1→2（修「第一章 总 …」半截截断），字号降 titleMedium；上一章/下一章 KeyboardArrowUp/Down 改 AutoMirrored KeyboardArrowLeft/Right（左右=前后章更直觉）。模拟器浅/深两主题实测。**已知数据问题待查**：《民法物权_Kit图包》章序号乱（idx2=第六章排在 idx4=第一章前），属导入/切章数据层，与本次 UI 无关。
 - 2026-11-15 **体验优化轮：翻页模式 + 直达进度**：①**翻页模式**（上表新增行）——老板点名「没有翻页的形式么」；选型说明：真分页（一段文本按行测量切页+HorizontalPager）与现有划词把手/事件泵/图混排/听书跟随全部冲突，工程风险失控，故采用「点按/滑动翻屏」方案：保留 LazyColumn 与全部既有交互，点两侧+左右滑=按视口 88% 平滑翻屏，翻页体感成立且零交互损失；FontSizeSheet 加开关，`read_page_mode` settings 键 watch 即时生效。②**点书直达**——书架点书不再固定进章目录页，有阅读记忆直接进阅读页恢复到段（老板报「不会自动跳转到上次阅读的进度」的根因：位置记忆功能一直在，但入口要两跳、继续读横幅不显眼）；AppNav 判定改传 BookEntity。模拟器实测六项过：开关渲染/点右翻下页/点左翻上页/左滑翻页/点中切沉浸/翻页位置退出重进精确恢复（详见 M0 总览同日条）。
 
 - 2026-10-31 **优化轮批A4+D1**：①**阅读统计碎片结转**——原「每次 ON_PAUSE 四舍五入、不足 1 分钟丢弃」改零头结转：`readingFlushMath(pendingMs, elapsedMs)` 纯函数返回 (入账分钟, 新零头)，合计=上次零头+本次，整分钟入账、余数存 `StudyApp.readingPendingMs`（@Volatile 应用级）留到下次，ON_PAUSE 哨兵防双计保留（ReadStatsCarryTest 4 例）；②**粗读 200 字瓶颈**——`RoughReadPlanner.sampleForClassify`：段 ≤200 字全发，超长取「前 150 + … + 尾 50」（首尾最能判定文体），块预算与调用量不变、单块请求体约 +25%（RoughReadSampleTest 2 例）。
