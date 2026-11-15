@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>mind-elixir 千节点性能探针</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #fff; }
+  #map { height: 100%; width: 100%; }
+  #hud {
+    position: fixed; top: 8px; left: 8px; z-index: 99999;
+    background: rgba(20,20,24,.88); color: #0f0; font: 12px/1.5 monospace;
+    padding: 8px 10px; border-radius: 8px; max-width: 92vw; white-space: pre-wrap;
+  }
+  #hud.jank { color: #f66; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud">探针启动中…</div>
+<script>
+// 千节点性能探针。URL 参数：
+//   lib=cur|full|lite  三版 mind-elixir（MECore / MindElixir / MindElixirLite）
+//   nodes=100          节点档（data 目录文件名后缀）
+//   fold=0|1           0=全展开直接 init；1=折叠 init 后 refresh 展开全部
+// 流程：加载库→拉数据→init 计时→(fold=1) refresh 展开计时→5s rAF 采样（配合外部 swipe）
+//      →POST /report 落盘。产品 index.html 同款选项，保证可比性。
+(function () {
+  var q = {};
+  location.search.slice(1).split('&').forEach(function (kv) {
+    var p = kv.split('=');
+    q[p[0]] = p[1];
+  });
+  var LIB = q.lib || 'cur';
+  var NODES = q.nodes || '100';
+  var FOLD = q.fold === '1';
+  var SRC = {
+    cur: 'mind-elixir.current.js',
+    full: 'mind-elixir.v4-full.iife.js',
+    lite: 'mind-elixir.v4-lite.iife.js',
+  }[LIB];
+  var GETTER = {
+    cur: function () { return window.MECore && MECore.default; },
+    full: function () { return window.MindElixir && MindElixir.default; },
+    lite: function () { return window.MindElixirLite && MindElixirLite.default; },
+  }[LIB];
+
+  var hud = document.getElementById('hud');
+  function say(msg, jank) {
+    hud.textContent = 'lib=' + LIB + ' nodes=' + NODES + ' fold=' + (FOLD ? 1 : 0) + '\n' + msg;
+    hud.className = jank ? 'jank' : '';
+  }
+
+  function raf2() {
+    return new Promise(function (res) {
+      requestAnimationFrame(function () { requestAnimationFrame(function () { res(); }); });
+    });
+  }
+
+  function loadScript(src) {
+    return new Promise(function (res, rej) {
+      var t0 = performance.now();
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = function () { res(performance.now() - t0); };
+      s.onerror = function () {
+        // 诊断：同 URL fetch 一次，报回状态码与 Content-Type（定位 MIME/网络问题）
+        fetch(src, { cache: 'no-store' }).then(function (r) {
+          rej(new Error('script load fail: ' + src + ' | fetch status=' + r.status +
+            ' ct=' + r.headers.get('content-type')));
+        }).catch(function (e2) {
+          rej(new Error('script load fail: ' + src + ' | fetch also fail: ' + e2));
+        });
+      };
+      document.head.appendChild(s);
+    });
+  }
+
+  // 渲染高负载期模拟器 NAT 偶发断连：fetch 带重试（间隔 1s/2s/4s），全败才抛
+  async function fetchRetry(url) {
+    var delays = [0, 1000, 2000, 4000];
+    for (var i = 0; i < delays.length; i++) {
+      if (delays[i]) await new Promise(function (r) { setTimeout(r, delays[i]); });
+      try {
+        var r = await fetch(url, { cache: 'no-store' });
+        if (r.ok) return await r.json();
+        say('fetch ' + url + ' -> HTTP ' + r.status + '，重试 ' + (i + 1) + '/3', true);
+      } catch (e) {
+        say('fetch ' + url + ' 失败，重试 ' + (i + 1) + '/3', true);
+      }
+    }
+    throw new Error('fetch 重试 3 次仍失败: ' + url);
+  }
+
+  function post(payload) {
+    payload.lib = LIB; payload.nodes = NODES; payload.fold = FOLD ? 1 : 0;
+    payload.ua = navigator.userAgent;
+    payload.ts = new Date().toISOString();
+    return fetch('/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(function (e) { say('report fail: ' + e, true); });
+  }
+
+  // rAF 采样 ms 秒：返回 {n, p50, p95, max, jank32, jank50}
+  function sampleFps(seconds) {
+    return new Promise(function (res) {
+      var deltas = [];
+      var last = performance.now();
+      var t0 = last;
+      function tick(t) {
+        deltas.push(t - last);
+        last = t;
+        if ((t - t0) / 1000 < seconds) {
+          requestAnimationFrame(tick);
+        } else {
+          deltas.sort(function (a, b) { return a - b; });
+          var n = deltas.length;
+          res({
+            n: n,
+            p50: +deltas[Math.floor(n * 0.5)].toFixed(1),
+            p95: +deltas[Math.min(n - 1, Math.floor(n * 0.95))].toFixed(1),
+            max: +deltas[n - 1].toFixed(1),
+            jank32: deltas.filter(function (d) { return d > 32; }).length,
+            jank50: deltas.filter(function (d) { return d > 50; }).length,
+          });
+        }
+      }
+      requestAnimationFrame(tick);
+    });
+  }
+
+  function heapMB() {
+    var m = performance.memory;
+    return m ? +(m.usedJSHeapSize / 1048576).toFixed(1) : null;
+  }
+
+  var ME = null;
+  var mind = null;
+  var expandData = null;
+
+  // 子资源黑洞自愈：该环境偶发「主文档可达但页面内所有子资源请求无响应」（同页面
+  // 重试无效，重开页面即好）。页面加载后先用 1KB ping 探针自检，超时自动 reload
+  // （sessionStorage 计数防死循环，force-stop 后自动清零）。
+  function loadScriptWithTimeout(src, ms) {
+    return new Promise(function (res) {
+      var s = document.createElement('script');
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) { done = true; s.remove(); res(false); }
+      }, ms);
+      s.src = src;
+      s.onload = function () { if (!done) { done = true; clearTimeout(timer); s.remove(); res(true); } };
+      s.onerror = function () { if (!done) { done = true; clearTimeout(timer); s.remove(); res(false); } };
+      document.head.appendChild(s);
+    });
+  }
+
+  async function main() {
+    var reloads = +(sessionStorage.getItem('probeReloads') || 0);
+    if (reloads < 3) {
+      var ping = await loadScriptWithTimeout('data/probe_ping.js?t=' + Date.now(), 4000);
+      if (!ping) {
+        say('子资源黑洞（ping 超时），自愈重载 ' + (reloads + 1) + '/3 …', true);
+        sessionStorage.setItem('probeReloads', String(reloads + 1));
+        location.reload();
+        return;
+      }
+    }
+    sessionStorage.removeItem('probeReloads');
+    say('加载库 ' + SRC + ' …');
+    var libLoadMs = await loadScript(SRC);
+    ME = GETTER();
+    if (!ME) throw new Error('库加载后拿不到构造器（lib=' + LIB + '）');
+
+    say('拉取数据 data/…_' + NODES + ' …');
+    // 数据经 script 变量加载（fetch 大 JSON 在此环境会被吞，库 JS 走 script 从未失败）
+    var t0 = performance.now();
+    await loadScript('data/' + (FOLD ? 'collapsed_' : 'expand_') + NODES + '.js');
+    var initPayload = window.__PROBE_DATA__;
+    if (!initPayload) throw new Error('数据 script 加载后拿不到 __PROBE_DATA__');
+    var dataMs = +(performance.now() - t0).toFixed(1);
+    if (FOLD) {
+      await loadScript('data/expand_' + NODES + '.js');
+      expandData = window.__PROBE_DATA__;
+      if (!expandData) throw new Error('展开数据 script 加载后拿不到 __PROBE_DATA__');
+    }
+
+    // 选项与产品 assets/mindmap/index.html 保持一致（overflowHidden 默认 false，
+    // 该构建只在 false 时注册触摸手势——见 index.html 注释）
+    say('init 渲染中…');
+    var el = document.getElementById('map');
+    var t1 = performance.now();
+    mind = new ME({
+      el: el,
+      direction: ME.SIDE,
+      locale: 'zh_CN',
+      draggable: true,
+      editable: false,
+      contextMenu: false,
+      toolBar: false,
+      keypress: false,
+      newTopicName: '新节点',
+      allowUndo: false,
+      scaleMax: 3,
+      scaleMin: 0.15,
+      scaleSensitivity: 0.2,
+      before: {},
+    });
+    try { mind.install(ME.nodeDraggable); } catch (e) {}
+    try { mind.install(ME.operationHistory); } catch (e) {}
+    var initErr = mind.init(initPayload);
+    await raf2();
+    var initMs = +(performance.now() - t1).toFixed(1);
+
+    var expandMs = null;
+    if (FOLD) {
+      say('折叠图已渲染，refresh 展开全部…');
+      var t2 = performance.now();
+      mind.refresh(expandData);
+      await raf2();
+      expandMs = +(performance.now() - t2).toFixed(1);
+    }
+
+    var pre = {
+      phase: 'pre',
+      libLoadMs: +libLoadMs.toFixed(1),
+      dataMs: dataMs,
+      initMs: initMs,
+      expandMs: expandMs,
+      initErr: String(initErr || ''),
+      domNodes: document.querySelectorAll('*').length,
+    };
+    await post(pre);
+    say('开始 5s 帧率采样（请 swipe）… init=' + initMs + 'ms' + (FOLD ? ' expand=' + expandMs + 'ms' : ''));
+
+    var fps = await sampleFps(5);
+
+    var result = Object.assign({}, pre, {
+      phase: 'final',
+      fps: fps,
+      heapMB: heapMB(),
+      window: innerWidth + 'x' + innerHeight,
+      dpr: window.devicePixelRatio,
+    });
+    await post(result);
+    say('完成 ✓ init=' + initMs + 'ms' + (FOLD ? ' expand=' + expandMs + 'ms' : '') +
+        '\nfps p50=' + fps.p50 + ' p95=' + fps.p95 + ' max=' + fps.max +
+        ' jank(>32ms)=' + fps.jank32 + ' (>50ms)=' + fps.jank50 +
+        '\nDOM=' + pre.domNodes + ' heap=' + result.heapMB + 'MB\n结果已上报');
+  }
+
+  main().catch(function (e) {
+    say('探针失败：' + (e && e.stack || e), true);
+    post({ phase: 'error', error: String(e && e.stack || e) });
+  });
+})();
+</script>
+</body>
+</html>

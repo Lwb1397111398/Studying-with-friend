@@ -36,3 +36,11 @@ bookocr-kit/_diag_*.py
 
 # 签名密钥不入库（GitHub secret 注入 CI；本地文件保留）
 android/keystore/app.keystore
+
+# spike 目录（第 5 期 P2）：构建产物与临时报文不入库，代码/数据/汇总表入库
+spike/pager-demo/.gradle/
+spike/pager-demo/build/
+spike/pager-demo/app/build/
+spike/pager-demo/local.properties
+spike/mindmap-perf/results/report_*.json
+spike/mindmap-perf/server_access.log

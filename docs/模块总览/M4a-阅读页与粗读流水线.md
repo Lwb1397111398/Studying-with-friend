@@ -150,6 +150,16 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 
 ## 最后更新
 
+- 2026-11-16 **P2-⑦ 低成本分页体验 spike 收官（第 5 期）——拍板：值得小改立项「视口估算+锚段首」（B 形态），「LazyColumn 预加载」放弃（C 形态无收益），真分页维持否决**。demo 在 `spike/pager-demo/`（独立 Gradle 项目，不进主构建树，applicationId `com.studyfriend.spike.pagerdemo` 与产品并存）：同一 400 段法律风长文（18sp/1.7 行距/12dp 段距与产品一致），三模式对比——**A 现款复刻**（`animateScrollBy(±0.88 视口, tween 340ms)`，现行翻页模式）/ **B 视口估算分页**（段高估算累计 ≥0.88 视口→`animateScrollToItem` 锚段首）/ **C 估算+预热**（落点前 `scrollToItem(target-2)` 合成一帧再滚）。**模拟器实测**（emulator-5554 软件渲染，自动连翻 20 页×2 遍，方差 <2%，Choreographer 逐帧统计）：
+  | 模式 | 墙钟 | 帧数 | p50 | jank>32（占比） | jank>50 |
+  | --- | --- | --- | --- | --- | --- |
+  | A 现款 | 6714ms | 220 | 33ms | 120（55%） | 9 |
+  | B 估算分页 | 6684ms | 252 | **16ms（满帧）** | 103（41%） | 4 |
+  | C 估算+预热 | 2919ms | 92 | 33ms | 56（61%） | 2 |
+  - **读数**：B 的中位帧率满帧、jank>50 减半、落点页首恒为完整段落（现款任意像素落点的半截段痛点消除）——**值得小改立项**：ReadScreen 翻页函数改「段高估算+animateScrollToItem」（Compose 原生 spring 动画），一处改动零新表，不碰划词/图混排/听书；**C 预热无收益还添乱**（jank 占比最高，scrollToItem 落点同步合成本已够快），拍板里「LazyColumn 预加载」一项放弃；**真分页维持否决**——B 的页首完整段已消解假翻页最大痛点，若老板上手 B 仍不满意再议「换阅读器内核」大决策。
+  - **局限声明**：模拟器软件渲染+自动连翻高压口径，jank 绝对值是环境下限（真机只会更好）；A=tween340/B·C=spring 默认（动画规格变量未对齐，但 spring 正是产品用 animateScrollToItem 立项后的真实形态）；样本各 2 遍。**老板手感拍板**：装 demo（`spike/pager-demo/app/build/outputs/apk/debug/app-debug.apk`）切 A/B 对比。
+  - demo 踩坑（防重蹈）：①`LazyListState.animateScrollToItem(index, scrollOffset)` 第二参是 Int 不是 AnimationSpec，tween 误传编译不过（子代理实测时最小编译修复，B/C 走 spring 默认动画=产品立项真实形态）；②模拟器顶部 128px 被 StatusBar+ScreenDecorOverlay 覆盖吞触摸，自动化点击 chip 要用 y=135 窄条；③`adb shell input tap` 在该模拟器部分场景不注入事件，自动化一律 MCP `android_ui_tap`。数据明细 `spike/pager-demo/results/auto20.md`。
+
 - 2026-11-15 **UI 打磨轮：章目录页 + 阅读页顶栏**：①**章目录页行尾大按钮瘦身**——每章行尾实心「粗读」大按钮（10 行 10 个又吵又挤）改 MiniPill 轻量胶囊（labelMedium 小字+主色 12% 淡染，停止=中性灰染），逻辑四态不变（粗读/继续/重读/进度+停止）；行间 HorizontalDivider 全删改留白；**全书总览入口卡片化**——OutlinedButton 改 surfaceContainer 卡片行（书名级标题「全书总览」+ 副行「已总结 N 章 · 思维导图与要点都在这里」+ 尾部箭头），M6OverviewUiSmokeTest 断言同步适配新副文案。②**阅读页顶栏**——章标题 maxLines 1→2（修「第一章 总 …」半截截断），字号降 titleMedium；上一章/下一章 KeyboardArrowUp/Down 改 AutoMirrored KeyboardArrowLeft/Right（左右=前后章更直觉）。模拟器浅/深两主题实测。**已知数据问题待查**：《民法物权_Kit图包》章序号乱（idx2=第六章排在 idx4=第一章前），属导入/切章数据层，与本次 UI 无关。
 - 2026-11-15 **体验优化轮：翻页模式 + 直达进度**：①**翻页模式**（上表新增行）——老板点名「没有翻页的形式么」；选型说明：真分页（一段文本按行测量切页+HorizontalPager）与现有划词把手/事件泵/图混排/听书跟随全部冲突，工程风险失控，故采用「点按/滑动翻屏」方案：保留 LazyColumn 与全部既有交互，点两侧+左右滑=按视口 88% 平滑翻屏，翻页体感成立且零交互损失；FontSizeSheet 加开关，`read_page_mode` settings 键 watch 即时生效。②**点书直达**——书架点书不再固定进章目录页，有阅读记忆直接进阅读页恢复到段（老板报「不会自动跳转到上次阅读的进度」的根因：位置记忆功能一直在，但入口要两跳、继续读横幅不显眼）；AppNav 判定改传 BookEntity。模拟器实测六项过：开关渲染/点右翻下页/点左翻上页/左滑翻页/点中切沉浸/翻页位置退出重进精确恢复（详见 M0 总览同日条）。
 
