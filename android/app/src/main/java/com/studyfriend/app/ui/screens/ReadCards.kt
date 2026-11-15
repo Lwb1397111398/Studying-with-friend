@@ -86,7 +86,8 @@ internal fun ParaRow(
     onSelectionChange: ((IntRange) -> Unit)? = null,
     onAnchorChange: ((IntOffset) -> Unit)? = null,
     onDragStateChange: ((Boolean) -> Unit)? = null,
-    onTap: (() -> Unit)? = null,
+    // 翻页模式：onTap 带文本内点击坐标（Text 本地坐标，x 用于分左右翻页区）
+    onTap: ((Offset) -> Unit)? = null,
 ) {
     // OPT-C C4：目录条目特殊展示——小字次级色，无重点竖条/无 AI 徽标（TOC 段也不参与 AI 标注）
     // OPT-E：脚注段同款次级展示；P5-F：FRONT/BACK（前/后置版权页）纳入次级展示，
@@ -224,7 +225,7 @@ private fun SelectableText(
     onSelectionChange: ((IntRange) -> Unit)? = null,
     onAnchorChange: ((IntOffset) -> Unit)? = null,
     onDragStateChange: ((Boolean) -> Unit)? = null,
-    onTap: (() -> Unit)? = null,
+    onTap: ((Offset) -> Unit)? = null,
 ) {
     val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
     val windowBounds = remember { mutableStateOf<Rect?>(null) }
@@ -328,7 +329,8 @@ private fun SelectableText(
                 .onGloballyPositioned { windowBounds.value = it.boundsInWindow() }
                 .pointerInput(text) {
                     detectTapGestures(
-                        onTap = { onTap?.invoke() },
+                        // 翻页模式：坐标透传给调用方分左右翻页区；滚动模式调用方忽略坐标
+                        onTap = { pos -> onTap?.invoke(pos) },
                         onLongPress = { pos ->
                             val l = layout.value ?: return@detectTapGestures
                             // 长按默认选整句：词组定位 → 扩句；查词场景拖首把手收缩

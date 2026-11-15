@@ -28,6 +28,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -358,12 +359,15 @@ private fun TaskProgressRow(label: String, progress: Float, onStop: () -> Unit) 
 }
 
 /** 阅读字号/行距弹层（功能补齐轮）：无级 Slider 即拖即预览（onChange 由调用方改内存态），
- *  关弹层时由调用方统一存库；「恢复默认」= 18sp / 1.7 倍 */
+ *  关弹层时由调用方统一存库；「恢复默认」= 18sp / 1.7 倍。
+ *  体验优化轮：+翻页模式开关（点屏幕两侧/左右滑翻页，即时存库即时生效） */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FontSizeSheet(
     fontSize: Int,
     lineHeightMult: Float,
+    pageMode: Boolean,
+    onPageModeChange: (Boolean) -> Unit,
     onChange: (Int, Float) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -419,6 +423,24 @@ internal fun FontSizeSheet(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            Spacer(Modifier.height(12.dp))
+            // 翻页模式（体验优化轮）：开=点屏幕左/右 1/3 前后翻一屏 + 左右滑翻页；关=上下滚动
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("翻页模式", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "点屏幕两侧或左右滑动翻页；关闭则上下滚动",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = pageMode, onCheckedChange = onPageModeChange)
+            }
         }
     }
 }

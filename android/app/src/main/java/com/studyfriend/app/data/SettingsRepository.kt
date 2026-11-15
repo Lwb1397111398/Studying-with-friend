@@ -13,6 +13,8 @@ import com.studyfriend.app.data.importer.pdfpipeline.TocVisionParser
 import com.studyfriend.app.data.importer.pdfpipeline.VisionTranscriber
 import java.io.File
 import javax.crypto.SecretKey
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 /** 设置页配置快照（Key 永不明文出库，只给"是否已存"） */
 data class SettingsSnapshot(
@@ -202,6 +204,18 @@ class SettingsRepository(
     suspend fun saveReadLineHeight(mult: Float) {
         if (mult !in READ_LINE_MIN..READ_LINE_MAX) return
         db.settingDao().upsert(SettingEntity(KEY_READ_LINE_HEIGHT, mult.toString()))
+    }
+
+    // ---- 翻页模式（体验优化轮）：true=点屏幕两侧/左右滑翻页，false=上下滚动；watch 供阅读页即时生效 ----
+
+    fun readPageModeFlow(): Flow<Boolean> =
+        db.settingDao().watch(KEY_READ_PAGE_MODE).map { it == "true" }
+
+    suspend fun readPageMode(): Boolean =
+        db.settingDao().get(KEY_READ_PAGE_MODE)?.value == "true"
+
+    suspend fun saveReadPageMode(on: Boolean) {
+        db.settingDao().upsert(SettingEntity(KEY_READ_PAGE_MODE, if (on) "true" else "false"))
     }
 
     // ---- 外观主题（功能补齐轮）：三态，默认跟随系统；MainActivity watch 本键即时生效 ----
@@ -454,6 +468,8 @@ class SettingsRepository(
         const val READ_LINE_MIN = 1.4f
         const val READ_LINE_MAX = 2.2f
         const val DEFAULT_READ_LINE_HEIGHT = 1.7f
+        // 翻页模式（体验优化轮）：点屏幕两侧/左右滑翻页
+        const val KEY_READ_PAGE_MODE = "read_page_mode"
         // 外观主题三态（system=跟随系统）
         const val KEY_THEME = "theme_mode"
         const val THEME_SYSTEM = "system"

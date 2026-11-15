@@ -1,9 +1,9 @@
 package com.studyfriend.app.ui.screens
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,8 +26,10 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -46,7 +48,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -78,15 +82,29 @@ private val COVER_PALETTES = listOf(
     Color(0xFF7A8A70) to Color(0xFF5C6B54), // 橄榄
 )
 
+/**
+ * 进程级书单缓存（体验优化轮旋转 Bug 修复）：旋转/主题切换等场景会重建 Activity，
+ * Room Flow 重新收集前的首帧窗口期里 collectAsState 拿到的是 initialValue——真机大库
+ * 慢盘时窗口期肉眼可见（书架空白）。进程存活期间静态字段不会丢，重建首帧直接用
+ * 上一次的书单渲染，Room 重发后无缝刷新。
+ */
+private var cachedShelfBooks: List<BookEntity>? = null
+
 @Composable
 fun ShelfScreen(
     onImport: () -> Unit,
-    onOpenBook: (Long) -> Unit = {},
+    // 体验优化轮：点书直达上次阅读位置——有阅读记忆（status=READY 且 lastReadChapterId
+    // 非空）直接进阅读页并恢复到段；没读过的书才进章目录页挑选。整本 BookEntity 传出
+    onOpenBook: (BookEntity) -> Unit = {},
     onContinueRead: (chapterId: Long) -> Unit = {},
+    // 长按菜单「查看章节目录」：章目录页仍有全书搜索/总览入口
+    onOpenChapters: (bookId: Long) -> Unit = {},
 ) {
     val app = LocalContext.current.applicationContext as StudyApp
     val repo = remember { BookRepository(app.database, app.filesDir) }
-    val books by repo.shelfFlow().collectAsStateWithLifecycle(initialValue = null)
+    // 旋转修复：initialValue 取进程缓存，重建首帧即有书；Room 重发后照常刷新并回写缓存
+    val books by repo.shelfFlow().collectAsStateWithLifecycle(initialValue = cachedShelfBooks)
+    LaunchedEffect(books) { books?.let { cachedShelfBooks = it } }
     // v7 全书架进度（已读 x/y 章）：书卡进度条数据源
     val progressAll by app.database.bookDao().progressAllFlow()
         .collectAsStateWithLifecycle(initialValue = emptyList())
@@ -115,7 +133,11 @@ fun ShelfScreen(
     Box(Modifier.fillMaxSize()) {
         val list = books
         when {
-            list == null -> Unit // 首帧加载中
+            // 首帧加载中且没有缓存可画：给个安静的加载圈，不再整屏空白
+            list == null -> Box(
+                Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) { CircularProgressIndicator() }
             list.isEmpty() -> EmptyState(
                 title = "书架还是空的",
                 subtitle = "点右下角 + 导入 TXT，开始和搭子一起读书",
@@ -140,7 +162,7 @@ fun ShelfScreen(
         }
     }
 
-    // v7 长按书卡：重命名 / 删除 / 视觉增强重试（批B） / 取消
+    // v7 长按书卡：章节目录 / 重命名 / 删除 / 视觉增强重试（批B） / 取消
     menuFor?.let { book ->
         val vstat = visionByBook[book.id]
         val failedPages = vstat?.failed ?: 0
@@ -152,6 +174,13 @@ fun ShelfScreen(
             text = {
                 Column {
                     Text("书架共 ${books?.size ?: 0} 本。要做什么？")
+                    // 体验优化轮：点书直达阅读位置后，章目录页从这里进（保留全书搜索/总览入口）
+                    if (book.status == DbValues.BOOK_READY) {
+                        TextButton(onClick = {
+                            menuFor = null
+                            onOpenChapters(book.id)
+                        }) { Text("查看章节目录") }
+                    }
                     if (failedPages > 0) {
                         Text(
                             "视觉增强 ${vstat!!.done}/${vstat.total}，${failedPages} 页失败",
@@ -261,52 +290,102 @@ private fun BookShelf(
     continueBook: BookEntity?,
     continueChapterTitle: String,
     onContinueRead: (Long) -> Unit,
-    onOpenBook: (Long) -> Unit,
+    onOpenBook: (BookEntity) -> Unit,
     onMenu: (BookEntity) -> Unit,
 ) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 108.dp),
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 104.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 104.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                Text("书架", style = MaterialTheme.typography.headlineMedium)
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "共 ${books.size} 本",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 3.dp),
+            Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text("书架", style = MaterialTheme.typography.headlineMedium)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "共 ${books.size} 本",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 3.dp),
+                    )
+                }
+                // 标题下的主色小横条：一点书签丝带的味道
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    Modifier
+                        .width(36.dp)
+                        .height(3.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
+                            ),
+                            RoundedCornerShape(2.dp),
+                        ),
                 )
             }
         }
-        // v7 继续读横幅：最近在读的书 + 上次读到的章，点击直达阅读页（位置记忆恢复到段）
+        // 继续读卡（体验优化轮重做）：小封面 + 书名章名 + 进度 + 箭头，primaryContainer 底更醒目
         if (continueBook != null && continueChapterTitle.isNotBlank()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
+                val (ctop, cbottom) = COVER_PALETTES[(continueBook.id % COVER_PALETTES.size).toInt()]
+                val cprog = progressByBook[continueBook.id]
                 Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { continueBook.lastReadChapterId?.let(onContinueRead) },
                 ) {
-                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                        Text(
-                            "继续读",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Text(
-                            "《${continueBook.title}》· $continueChapterTitle",
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                    Row(
+                        Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // 小封面缩略：同封面色板渐变 + 首字，一眼认出是哪本
+                        Box(
+                            Modifier
+                                .size(width = 40.dp, height = 56.dp)
+                                .shadow(3.dp, RoundedCornerShape(6.dp))
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Brush.verticalGradient(listOf(ctop, cbottom))),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                continueBook.title.take(1).ifBlank { "书" },
+                                color = Color.White.copy(alpha = 0.92f),
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "继续读",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                "《${continueBook.title}》· $continueChapterTitle",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (cprog != null && cprog.totalChapters > 0) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "已读 ${cprog.readChapters}/${cprog.totalChapters} 章",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "继续阅读",
+                            tint = MaterialTheme.colorScheme.primary,
                         )
                     }
                 }
@@ -318,14 +397,14 @@ private fun BookShelf(
                 due = dueByBook[book.id] ?: 0,
                 vision = visionByBook[book.id],
                 progress = progressByBook[book.id],
-                onClick = { onOpenBook(book.id) },
+                onClick = { onOpenBook(book) },
                 onLongClick = { onMenu(book) },
             )
         }
     }
 }
 
-/** 一张书卡：实体书封面（渐变+书脊+厚度阴影+装饰框）+ 封面下状态行 + 阅读进度条（v7） */
+/** 一张书卡：实体书封面（渐变+书脊+纸页纹+厚度阴影+装饰框）+ 封面下状态行 + 阅读进度条（v7） */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookCard(
@@ -339,14 +418,14 @@ private fun BookCard(
     val ready = book.status == DbValues.BOOK_READY
     val (top, bottom) = COVER_PALETTES[(book.id % COVER_PALETTES.size).toInt()]
     // 书脊在左侧：左缘窄圆角、右缘（翻口）稍大圆角
-    val shape = RoundedCornerShape(topStart = 3.dp, bottomStart = 3.dp, topEnd = 7.dp, bottomEnd = 7.dp)
+    val shape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp, topEnd = 10.dp, bottomEnd = 10.dp)
 
     Column {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(0.72f)
-                .shadow(6.dp, shape, spotColor = Color.Black.copy(alpha = 0.35f))
+                .shadow(5.dp, shape, spotColor = Color.Black.copy(alpha = 0.30f))
                 .clip(shape)
                 .background(Brush.verticalGradient(listOf(top, bottom)))
                 .combinedClickable(enabled = ready, onClick = onClick, onLongClick = onLongClick),
@@ -372,6 +451,28 @@ private fun BookCard(
                             1f to Color.Black.copy(alpha = 0.28f),
                         ),
                     ),
+            )
+            // 纸页纹（体验优化轮）：右缘一组细白横线，封面立刻有「一本书」的辨识度
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .drawBehind {
+                        val stripeW = size.width * 0.04f
+                        val x0 = size.width - stripeW - size.width * 0.02f
+                        val top = size.height * 0.07f
+                        val bottom = size.height * 0.93f
+                        val lines = 6
+                        val gap = (bottom - top) / lines
+                        for (i in 1 until lines) {
+                            val y = top + gap * i
+                            drawLine(
+                                Color.White.copy(alpha = 0.20f),
+                                Offset(x0, y),
+                                Offset(x0 + stripeW, y),
+                                strokeWidth = 1.2f,
+                            )
+                        }
+                    },
             )
             // 经典精装书的细装饰框
             Box(
@@ -476,7 +577,7 @@ private fun BookCard(
             ) {
                 LinearProgressIndicator(
                     progress = { progress.readChapters.toFloat() / progress.totalChapters },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).height(4.dp),
                 )
                 Text(
                     "${progress.readChapters}/${progress.totalChapters}",

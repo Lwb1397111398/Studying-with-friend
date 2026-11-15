@@ -23,6 +23,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.studyfriend.app.data.db.DbValues
 import com.studyfriend.app.ui.screens.BookOverviewScreen
 import com.studyfriend.app.ui.screens.ChapterAssetsScreen
 import com.studyfriend.app.ui.screens.ChapterListScreen
@@ -134,7 +135,18 @@ fun AppNav() {
                         importVm.reset()
                         navController.navigate(Routes.IMPORT)
                     },
-                    onOpenBook = { bookId -> navController.navigate(Routes.book(bookId)) },
+                    // 体验优化轮：点书直达上次阅读位置——有阅读记忆（解析完成+lastReadChapterId）
+                    // 直接进阅读页（进页后位置记忆恢复到段）；没读过的书进章目录页挑选
+                    onOpenBook = { book ->
+                        val cid = book.lastReadChapterId
+                        if (book.status == DbValues.BOOK_READY && cid != null) {
+                            navController.navigate(Routes.read(cid))
+                        } else {
+                            navController.navigate(Routes.book(book.id))
+                        }
+                    },
+                    // 长按菜单「查看章节目录」：全书搜索/总览的入口还在章目录页
+                    onOpenChapters = { bookId -> navController.navigate(Routes.book(bookId)) },
                     onContinueRead = { chapterId -> navController.navigate(Routes.read(chapterId)) },
                 )
             }

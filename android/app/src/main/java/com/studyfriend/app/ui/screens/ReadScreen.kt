@@ -5,6 +5,10 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,9 +46,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -120,6 +126,8 @@ fun ReadScreen(
     var readFontSize by remember { mutableIntStateOf(SettingsRepository.DEFAULT_READ_FONT_SIZE) }
     var readLineHeight by remember { mutableFloatStateOf(SettingsRepository.DEFAULT_READ_LINE_HEIGHT) }
     var showFontSheet by remember { mutableStateOf(false) }
+    // 翻页模式（体验优化轮）：true=点屏幕两侧/左右滑翻一屏；watch 设置键，Aa 弹层切换即时生效
+    val pageMode by app.settingsRepo.readPageModeFlow().collectAsStateWithLifecycle(initialValue = false)
     LaunchedEffect(Unit) {
         readFontSize = app.settingsRepo.readFontSize()
         readLineHeight = app.settingsRepo.readLineHeight()
@@ -461,6 +469,32 @@ fun ReadScreen(
                     selection = null
                 }
             }
+
+            // 翻页模式（体验优化轮）：正文可视宽度 + 翻一屏 + 点按分区。
+            // 左 1/3=上一屏、右 1/3=下一屏、中间=切沉浸（滚动模式整屏单击都是切沉浸）；
+            // 左右滑超 1/6 屏宽翻页。翻页=按视口高度 88% 平滑滚动（留一点重叠方便接读），
+            // 滚停后既有位置记忆逻辑照常把可视首段写库
+            var contentWidthPx by remember { mutableIntStateOf(0) }
+            fun turnPage(dir: Int) {
+                val vh = listState.layoutInfo.viewportSize.height.toFloat()
+                if (vh <= 0f) return
+                scope.launch {
+                    listState.animateScrollBy(dir * vh * 0.88f, tween(340, easing = FastOutSlowInEasing))
+                }
+            }
+            fun handleBodyTap(pos: Offset) {
+                if (!pageMode) {
+                    chromeVisible = !chromeVisible
+                    return
+                }
+                val w = contentWidthPx
+                when {
+                    w <= 0 -> chromeVisible = !chromeVisible
+                    pos.x < w / 3f -> turnPage(-1)
+                    pos.x > w * 2f / 3f -> turnPage(1)
+                    else -> chromeVisible = !chromeVisible
+                }
+            }
             // P5 highlight 定位：段落异步到达后滚到节标题段（v1 只滚动不做高亮底色）；
             // 混排后 LazyColumn 下标 ≠ 段落下标，经 paraId 反查行下标
             LaunchedEffect(highlight, rows) {
@@ -606,8 +640,29 @@ fun ReadScreen(
                 state = listState,
                 modifier = Modifier
                     .fillMaxSize()
-                    // v7 沉浸模式：单击正文切换顶栏/工具行；图行点击由 FigureRow 消费不触发
-                    .pointerInput(Unit) { detectTapGestures(onTap = { chromeVisible = !chromeVisible }) },
+                    .onSizeChanged { contentWidthPx = it.width }
+                    // 翻页模式：左右滑翻页（水平拖动累积，松手超 1/6 屏宽翻一屏）；
+                    // 竖向滚动归 LazyColumn 自身，互不抢占
+                    .pointerInput(pageMode) {
+                        if (!pageMode) return@pointerInput
+                        var totalDrag = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { totalDrag = 0f },
+                            onDragEnd = {
+                                val threshold = size.width / 6f
+                                when {
+                                    totalDrag < -threshold -> turnPage(1)
+                                    totalDrag > threshold -> turnPage(-1)
+                                }
+                            },
+                        ) { change, dragAmount ->
+                            change.consume()
+                            totalDrag += dragAmount
+                        }
+                    }
+                    // 沉浸模式：单击正文切换顶栏/工具行（翻页模式经 handleBodyTap 分区）；
+                    // 图行点击由 FigureRow 消费不触发；段间空隙的 tap 从这里兜底进同一入口
+                    .pointerInput(Unit) { detectTapGestures(onTap = { handleBodyTap(it) }) },
             ) {
                 // P7 要点卡（折叠）：默认收起，「要点」chip 展开；随正文滚动不占固定空间
                 if (gistExpanded && !chapter?.gist.isNullOrBlank()) {
@@ -646,8 +701,9 @@ fun ReadScreen(
                                     selection = selection?.copy(anchor = anchor)
                                 },
                                 onDragStateChange = { selectionDragging = it },
-                                // v7 沉浸单击必须在文本手势层透传（SelectableText 的 detectTapGestures 消费 tap）
-                                onTap = { chromeVisible = !chromeVisible },
+                                // 沉浸单击/翻页点按必须在文本手势层透传（SelectableText 的 detectTapGestures 消费 tap），
+                                // 翻页模式带坐标分区（SelectableText 透传 Text 本地坐标）
+                                onTap = { pos -> handleBodyTap(pos) },
                             )
                             val unit = anchorById[row.p.id]
                             if (unit != null) {
@@ -723,6 +779,11 @@ fun ReadScreen(
         FontSizeSheet(
             fontSize = readFontSize,
             lineHeightMult = readLineHeight,
+            pageMode = pageMode,
+            onPageModeChange = { on ->
+                // 开关即存（Flow watch 即时生效，阅读方式切换不用等关弹层）
+                scope.launch { app.settingsRepo.saveReadPageMode(on) }
+            },
             onChange = { size, line -> readFontSize = size; readLineHeight = line },
             onDismiss = {
                 showFontSheet = false
