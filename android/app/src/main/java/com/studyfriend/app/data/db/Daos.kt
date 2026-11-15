@@ -396,6 +396,10 @@ interface ReviewItemDao {
     @Query("SELECT * FROM review_items WHERE bookId = :bookId AND done = 0 ORDER BY dueAt")
     suspend fun pendingByBook(bookId: Long): List<ReviewItemEntity>
 
+    /** 单卡读取（撤销评分恢复后回读验证 + 潜在的未来单卡操作） */
+    @Query("SELECT * FROM review_items WHERE id = :id")
+    suspend fun byId(id: Long): ReviewItemEntity?
+
     /** 重生成总结前清掉同章全部排期行（含已完成）：唯一键含 title，章改名后 IGNORE 挡不住；走完 30 天的 done 行也无读取方，
      *  重生成即开启新一轮 1/3/7/14/30 周期（最终 QA P2-6 + 复审补充项） */
     @Query("DELETE FROM review_items WHERE chapterId = :chapterId")
@@ -416,6 +420,17 @@ interface ReviewLogDao {
 
     @Query("SELECT COUNT(*) FROM review_log WHERE itemId = :itemId")
     suspend fun countByItem(itemId: Long): Int
+
+    /** 撤销评分（P1 复习两小招）：全库最新一条评分日志（无日志=null，撤销入口隐藏） */
+    @Query("SELECT * FROM review_log ORDER BY id DESC LIMIT 1")
+    suspend fun latest(): ReviewLogEntity?
+
+    /** 该卡的上一条评分日志（撤销后卡片应恢复到这条日志「评分前」的状态；无=卡片是新卡） */
+    @Query("SELECT * FROM review_log WHERE itemId = :itemId ORDER BY id DESC LIMIT 1 OFFSET 1")
+    suspend fun previousForItem(itemId: Long): ReviewLogEntity?
+
+    @Query("DELETE FROM review_log WHERE id = :id")
+    suspend fun deleteById(id: Long)
 }
 
 /** 书架徽标投影：每本书的到期章数（M6 计划 §2.4） */

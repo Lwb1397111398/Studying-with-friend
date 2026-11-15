@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.studyfriend.app.data.importer.TextLoader
+import com.studyfriend.app.ui.components.SectionCard
 
 private val encodingChoices = listOf(
     TextLoader.AUTO,
@@ -98,49 +99,71 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
 
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
 
-            OutlinedTextField(
-                value = bookTitle,
-                onValueChange = { vm.bookTitle = it },
-                label = { Text("书名") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedTextField(
-                value = author,
-                onValueChange = { vm.author = it },
-                label = { Text("作者（可选）") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(onClick = {
-                    pickFile.launch(
-                        arrayOf("text/*", "application/pdf", "application/zip", "application/x-zip-compressed"),
-                    )
-                }) {
-                    Text("选择 TXT / PDF / 图包")
-                }
-                OutlinedButton(onClick = { showPaste = true }) { Text("粘贴文本") }
+            // 书房分区卡改造（DESIGN.md 组件词汇）：与设置页/模型页同一语言
+            SectionCard {
+                Text("书籍信息", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "书名会显示在书架上；作者可留空",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = bookTitle,
+                    onValueChange = { vm.bookTitle = it },
+                    label = { Text("书名") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = author,
+                    onValueChange = { vm.author = it },
+                    label = { Text("作者（可选）") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
             }
 
-            if (!isPdf) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("编码：", style = MaterialTheme.typography.bodyMedium)
-                    // busy 期间禁用：否则选中新编码后 loadFile 被守卫拦截，下拉与实际解码编码不一致
-                    OutlinedButton(onClick = { encMenuOpen = true }, enabled = !busy) { Text(encoding) }
-                    DropdownMenu(expanded = encMenuOpen, onDismissRequest = { encMenuOpen = false }) {
-                        encodingChoices.forEach { choice ->
-                            DropdownMenuItem(
-                                text = { Text(choice) },
-                                onClick = {
-                                    encMenuOpen = false
-                                    vm.onEncodingChanged(choice)
-                                },
-                            )
+            SectionCard {
+                Text("选择内容", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "支持 TXT、PDF（扫描版走视觉转写）和 Kit 图包；也可以直接粘贴一段文字",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(onClick = {
+                        pickFile.launch(
+                            arrayOf("text/*", "application/pdf", "application/zip", "application/x-zip-compressed"),
+                        )
+                    }) {
+                        Text("选择文件")
+                    }
+                    OutlinedButton(onClick = { showPaste = true }) { Text("粘贴文本") }
+                }
+
+                if (!isPdf) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("TXT 编码：", style = MaterialTheme.typography.bodyMedium)
+                        // busy 期间禁用：否则选中新编码后 loadFile 被守卫拦截，下拉与实际解码编码不一致
+                        OutlinedButton(onClick = { encMenuOpen = true }, enabled = !busy) { Text(encoding) }
+                        Text(
+                            "乱码时换",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        DropdownMenu(expanded = encMenuOpen, onDismissRequest = { encMenuOpen = false }) {
+                            encodingChoices.forEach { choice ->
+                                DropdownMenuItem(
+                                    text = { Text(choice) },
+                                    onClick = {
+                                        encMenuOpen = false
+                                        vm.onEncodingChanged(choice)
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -154,12 +177,15 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
             }
 
             if (chapters.isNotEmpty()) {
-                Text(
-                    "识别到 ${chapters.size} 章，共 ${chapters.sumOf { it.paras.size }} 段",
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                Button(onClick = onNext, modifier = Modifier.fillMaxWidth()) {
-                    Text("下一步：确认目录")
+                SectionCard {
+                    Text("识别完成", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "识别到 ${chapters.size} 章，共 ${chapters.sumOf { it.paras.size }} 段",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Button(onClick = onNext, modifier = Modifier.fillMaxWidth()) {
+                        Text("下一步：确认目录")
+                    }
                 }
             }
 
@@ -193,6 +219,17 @@ fun ImportScreen(vm: ImportViewModel, onNext: () -> Unit) {
                         )
                     }
                 }
+            }
+
+            // 空态引导（书房语言）：页脚一句话告诉新手导入之后会发生什么
+            if (chapters.isEmpty() && phase == null && progress == null) {
+                Text(
+                    "导入后搭子会自动分章；读完一章做粗读标注，讲解与章末总结就能生成",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
             }
 
             Spacer(Modifier.height(24.dp))

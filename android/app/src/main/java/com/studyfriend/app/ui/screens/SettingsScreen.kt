@@ -195,6 +195,33 @@ fun SettingsScreen(
                 }
             }
 
+            // 每日阅读目标（P1-⑤）：复习统计卡的进度环与热力图色阶都以此为基准
+            SectionCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("每日阅读目标", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            "复习页统计卡会显示今日进度环，达成当天热力图格子会点亮",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(onClick = { vm.changeDailyGoal(vm.dailyGoal - 5) }) { Text("−") }
+                        Text(
+                            "${vm.dailyGoal} 分钟",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(horizontal = 14.dp),
+                        )
+                        OutlinedButton(onClick = { vm.changeDailyGoal(vm.dailyGoal + 5) }) { Text("+") }
+                    }
+                }
+            }
+
             // —— 应用更新（M7）：手机上直接升级，不用连电脑传 APK ——
             SectionCard {
                 Text("应用更新", style = MaterialTheme.typography.labelLarge)

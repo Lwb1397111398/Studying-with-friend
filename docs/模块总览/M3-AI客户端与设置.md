@@ -89,6 +89,8 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
   ③**UI 重做**：ModelsScreen 三张书房卡（档案/指派/本地识别）+ 编辑弹层（12dp 圆角输入、查找模型、测试连接、删除）+ 指派选择弹层（radio 列表+跟随主力/不启用选项）+ 档案行角色徽标与缺 Key 提示；SectionCard 提取为共用组件（ui/components）；设置页入口卡摘要改读档案体系；
   ④**测试**：SettingsRepoTest AI 部分重写 9 用例（CRUD/回退/迁移），Planner 播种 8 处改 seedMainProfile，NotePlannerTest 换模型用例改档案指派。迁移中修一处 bug：视觉档案有专属 Key 时平移专属密文（原写漏 else 分支）。
 
+- 2026-11-15 **P1-⑤ 激励统计轮新增设置项**：①「每日阅读目标」卡（讲解详略卡之后）：−/＋ 步进 5 分钟即点即存（`SettingsViewModel.changeDailyGoal`，coerceIn 5..600），KV `read_daily_goal_minutes` 默认 30——复习页统计卡进度环与热力图色阶的分母（见 M6 同日条）；②复习排序模式 KV `review_sort_mode`（`REVIEW_SORT_MODES=["risk","due","random"]`，`readReviewSortMode/saveReviewSortMode`）——复习页排序切换持久化（见 M6 同日条）。AI 配置零变化。
+
 - 2026-11-15 **UI 打磨轮：设置页卡片化**：分区从「细分割线」改为 surfaceContainer 圆角 16dp 分区卡（SectionCard 私有组件，组头 labelLarge 在卡内），细线全删；朗读语速/朗读引擎/离线模型三块合进一张「朗读」卡（同一件事的三面）；备份与恢复、诊断各成一张卡。配置项与落库键零变化，纯视觉重排。模拟器浅/深两主题实测。本轮 SectionCard 已提取为 `ui/components/SectionCard.kt` 共用。
 
 - 2026-10-26 **数据安全与体验增量轮：设置页「备份与恢复」+「诊断」区块 + AiGate 排队**：

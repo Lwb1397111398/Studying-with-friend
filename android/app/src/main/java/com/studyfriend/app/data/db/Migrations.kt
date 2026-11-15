@@ -2,6 +2,7 @@ package com.studyfriend.app.data.db
 
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.studyfriend.app.data.importer.PhantomTocFilter
 
 // createSql 逐字段抄自 Room 生成的 schema 2.json（含 FK 子句/NOT NULL），漏抄会被迁移校验报红
 private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -221,7 +222,69 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
     }
 }
 
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // 简目假章清理（判据单源 PhantomTocFilter.decide，《民法物权_Kit图包》实录）：
+        // kit 章表把书前/书末目录页误切成的「第X章」假章——纯简目章整章剔除（段落连带，
+        // figures 挂章 CASCADE 但假章实测零图）；混合章（简目条目+书末注释汇总）只删简目段
+        // 并按首个非简目段改名。重导路径同判据由 KitBookParser 链路防御，存量书在这里修。
+        val chapterCur = db.query("SELECT id, title FROM chapters")
+        val chapterList = buildList {
+            while (chapterCur.moveToNext()) add(chapterCur.getLong(0) to (chapterCur.getString(1) ?: ""))
+        }
+        chapterCur.close()
+        for ((chapterId, title) in chapterList) {
+            val paraCur = db.query(
+                "SELECT id, text FROM paragraphs WHERE chapterId = ? AND role = 'BODY' ORDER BY idx",
+                arrayOf(chapterId.toString()),
+            )
+            val bodyRows = buildList {
+                while (paraCur.moveToNext()) add(paraCur.getLong(0) to (paraCur.getString(1) ?: ""))
+            }
+            paraCur.close()
+            when (val d = PhantomTocFilter.decide(title, bodyRows.map { it.second })) {
+                PhantomTocFilter.Decision.Keep -> Unit
+                PhantomTocFilter.Decision.DropWhole -> {
+                    db.execSQL("DELETE FROM paragraphs WHERE chapterId = ?", arrayOf(chapterId))
+                    db.execSQL("DELETE FROM chapters WHERE id = ?", arrayOf(chapterId))
+                }
+                is PhantomTocFilter.Decision.DropEntries -> {
+                    val secIds = bodyRows.filter { PhantomTocFilter.isSectionEntry(it.second) }.map { it.first }
+                    for (id in secIds) {
+                        db.execSQL("DELETE FROM paragraphs WHERE id = ?", arrayOf(id))
+                    }
+                    db.execSQL("UPDATE chapters SET title = ? WHERE id = ?", arrayOf(d.newTitle, chapterId))
+                }
+            }
+        }
+        // 删章后 books.lastReadChapterId 可能悬空（指向被删假章）——点书直达会进不存在的章
+        // 显示空内容（模拟器实测复现），悬空引用一律重置回「进章目录页」默认行为
+        db.execSQL(
+            "UPDATE books SET lastReadChapterId = NULL " +
+                "WHERE lastReadChapterId IS NOT NULL AND lastReadChapterId NOT IN (SELECT id FROM chapters)",
+        )
+        // 章 idx 连续化（删假章后 0/1/4/5... 有洞，章目录页编号观感差；idx 仅排序与展示用，
+        // 段落/复习项挂 chapterId 不挂 idx，重排无牵连）
+        val bookCur = db.query("SELECT DISTINCT bookId FROM chapters")
+        val bookIds = mutableListOf<Long>()
+        while (bookCur.moveToNext()) bookIds.add(bookCur.getLong(0))
+        bookCur.close()
+        for (bookId in bookIds) {
+            val idCur = db.query(
+                "SELECT id FROM chapters WHERE bookId = ? ORDER BY idx",
+                arrayOf(bookId.toString()),
+            )
+            val orderedIds = mutableListOf<Long>()
+            while (idCur.moveToNext()) orderedIds.add(idCur.getLong(0))
+            idCur.close()
+            orderedIds.forEachIndexed { newIdx, id ->
+                db.execSQL("UPDATE chapters SET idx = ? WHERE id = ?", arrayOf(newIdx, id))
+            }
+        }
+    }
+}
+
 val MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
+    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
 )

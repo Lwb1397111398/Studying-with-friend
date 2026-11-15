@@ -40,6 +40,17 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     var reviewReminder by mutableStateOf(true)
         private set
 
+    /** 每日阅读目标分钟（P1-⑤）：进度环/热力图色阶基准；步进调节即点即存 */
+    var dailyGoal by mutableStateOf(SettingsRepository.DEFAULT_READ_GOAL)
+        private set
+
+    fun changeDailyGoal(min: Int) {
+        val clamped = min.coerceIn(SettingsRepository.READ_GOAL_MIN, SettingsRepository.READ_GOAL_MAX)
+        if (clamped == dailyGoal) return
+        dailyGoal = clamped
+        viewModelScope.launch { repo.saveDailyGoalMinutes(clamped) }
+    }
+
     // —— 备份与恢复（数据安全轮）——
     private val backupManager: BackupManager by lazy {
         val app = getApplication<StudyApp>()
@@ -213,6 +224,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { themeMode = repo.themeMode() }
         viewModelScope.launch { ttsRate = repo.ttsRate() }
         viewModelScope.launch { reviewReminder = repo.reviewReminderEnabled() }
+        viewModelScope.launch { dailyGoal = repo.readDailyGoalMinutes() }
         viewModelScope.launch { ttsEngine = repo.ttsEngineMode() }
         refreshTtsModel()
         // 下载结束（成功/失败/中断）后刷新就绪状态与已下字节

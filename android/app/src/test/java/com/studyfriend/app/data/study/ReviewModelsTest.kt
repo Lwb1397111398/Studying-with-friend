@@ -2,6 +2,7 @@ package com.studyfriend.app.data.study
 
 import com.studyfriend.app.data.db.WrongAttempt
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -77,5 +78,26 @@ class ReviewModelsTest {
         )
         assertEquals(1, out.size)
         assertEquals(1, out[0].qIndex)
+    }
+
+    // ---- 激励统计里程碑（P1-⑤）----
+
+    @Test
+    fun streakMilestone_hitExactly() {
+        assertEquals(7, streakMilestoneHit(7))
+        assertEquals(30, streakMilestoneHit(30))
+        assertEquals(100, streakMilestoneHit(100))
+        assertEquals(365, streakMilestoneHit(365))
+        assertNull(streakMilestoneHit(6))
+        assertNull(streakMilestoneHit(8))
+        assertNull(streakMilestoneHit(101))
+    }
+
+    @Test
+    fun nextStreakMilestone_distance() {
+        assertEquals(7, nextStreakMilestone(0))
+        assertEquals(30, nextStreakMilestone(7))
+        assertNull(nextStreakMilestone(365))
+        assertNull(nextStreakMilestone(400))
     }
 }

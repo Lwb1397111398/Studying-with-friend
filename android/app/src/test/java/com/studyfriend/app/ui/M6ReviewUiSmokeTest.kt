@@ -1,8 +1,12 @@
 package com.studyfriend.app.ui
 
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import com.studyfriend.app.StudyApp
@@ -115,6 +119,21 @@ class M6ReviewUiSmokeTest {
         compose.onAllNodesWithText(text, substring = true)[0].assertExists()
     }
 
+    /** 把目标滚进视口（Robolectric 320×470 小视口：统计卡+热力图堆叠后列表区只剩几十 px，
+     *  懒列表屏外内容不进语义树——M4b 总览决策 9 同款先例，断言/点击屏外节点前先滚） */
+    private fun scrollTo(text: String, substring: Boolean = false) {
+        // Room Flow 首发射前列表是空态（无滚动容器），先等滚动容器出现再滚
+        compose.waitUntil(5_000) {
+            compose.onAllNodes(hasVerticalScrollAction()).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNode(hasVerticalScrollAction()).performScrollToNode(hasText(text, substring = substring))
+    }
+
+    /** 只匹配带纵向滚动轴的容器（抄 M4aUiSmokeTest 同名匹配器） */
+    private fun hasVerticalScrollAction() = SemanticsMatcher("vertical scroll") {
+        it.config.contains(SemanticsProperties.VerticalScrollAxisRange)
+    }
+
     private fun setContent() {
         compose.setContent { StudyFriendTheme { ReviewScreen() } }
     }
@@ -128,11 +147,14 @@ class M6ReviewUiSmokeTest {
         val itemId = reviewItem(chId, "复习章", intervalIdx = 1, stability = 3.0)
 
         setContent()
+        scrollTo("复习章")
         awaitText("复习章")
         compose.onNodeWithText("复习章").performClick()
+        scrollTo("善意取得的构成要件？")
         awaitText("善意取得的构成要件？")
         compose.onNodeWithText("看答案").performClick()
         awaitText("参考答案：无权处分+善意+合理价格+登记")
+        scrollTo("记得")
         compose.onNodeWithText("记得").performClick()
 
         // 行从 dueList Flow 消失（P0-①：FSRS 排出的间隔 > 0 天，不再到期 → 空态）
@@ -165,9 +187,12 @@ class M6ReviewUiSmokeTest {
         val itemId = reviewItem(chId, "空资产章", intervalIdx = 3)
 
         setContent()
+        scrollTo("空资产章")
         awaitText("空资产章")
         compose.onNodeWithText("空资产章").performClick()
+        scrollTo("这一章的内容还记得多少？")
         awaitText("这一章的内容还记得多少？")
+        scrollTo("忘了")
         compose.onNodeWithText("忘了").performClick()
 
         awaitText("今天没有要复习的")
@@ -197,6 +222,8 @@ class M6ReviewUiSmokeTest {
         )
 
         setContent()
+        // 去重按 dueAt 序保留首行（「双排期章（旧）」），精确匹配找不到——宽松滚到该行
+        scrollTo("双排期章", substring = true)
         awaitText("双排期章")
         compose.waitUntil(3_000) {
             // distinctBy (bookId, chapterId) 后只渲染一行
@@ -231,14 +258,18 @@ class M6ReviewUiSmokeTest {
 
         setContent()
         compose.onNodeWithText("错题本").performClick()
+        scrollTo("只错过一次的题干（保留）")
         awaitText("只错过一次的题干（保留）")
+        scrollTo("另一章的题干（保留）")
         awaitText("另一章的题干（保留）")
         // "先错后对"的题已出列：题干不得出现
         compose.waitUntil(3_000) {
             compose.onAllNodesWithText("先错后对的题干（应出列）").fetchSemanticsNodes().isEmpty()
         }
         // 展开详情：正确答案与当时反馈可见（章一行展开不影响章二行）
+        scrollTo("只错过一次的题干（保留）")
         compose.onNodeWithText("只错过一次的题干（保留）").performClick()
+        scrollTo("参考答案：答案B")
         awaitText("参考答案：答案B")
         awaitText("当时反馈：别混淆两章概念")
     }

@@ -35,3 +35,14 @@ fun latestWrongAttempts(all: List<WrongAttempt>): List<WrongAttempt> = all
     .map { it.value.maxBy { a -> a.createdAt } }
     .filter { it.verdict == "WRONG" }
     .sortedWith(compareBy({ it.bookId }, { it.chapterId }, { it.qIndex }))
+
+// ---------- 激励统计（P1-⑤）：streak 里程碑 ----------
+
+/** 连续阅读里程碑表：达成当天在复习统计卡上庆祝展示 */
+val STREAK_MILESTONES = listOf(7, 30, 100, 365)
+
+/** streak 恰好达成里程碑的天数（当天），非达成日返回 null */
+fun streakMilestoneHit(streakDays: Int): Int? = STREAK_MILESTONES.firstOrNull { it == streakDays }
+
+/** 下一个尚未达到的里程碑（已越过全部里程碑时返回 null） */
+fun nextStreakMilestone(streakDays: Int): Int? = STREAK_MILESTONES.firstOrNull { it > streakDays }

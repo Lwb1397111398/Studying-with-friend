@@ -1,15 +1,21 @@
 package com.studyfriend.app.ui.screens
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -29,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -40,8 +47,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -66,6 +80,8 @@ import com.studyfriend.app.data.study.DedupedTerm
 import com.studyfriend.app.data.study.buildTermGroups
 import com.studyfriend.app.data.study.dedupeBookTerms
 import com.studyfriend.app.data.study.latestWrongAttempts
+import com.studyfriend.app.data.study.nextStreakMilestone
+import com.studyfriend.app.data.study.streakMilestoneHit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -124,41 +140,91 @@ fun ReviewScreen() {
     }
 
         Column(Modifier.fillMaxSize()) {
-        // 体验增量轮：阅读统计卡（今日/连续/累计）——进页查一次（阅读页按分钟入账）
+        // P1-⑤ 激励统计：统计卡（今日目标环/连续/累计）+ 热力图卡，refreshKey 让撤销评分后重查
+        var statsRefresh by remember { mutableIntStateOf(0) }
         val today = remember { java.time.LocalDate.now().toString() }
-        val stats by produceState<ReadingSummary?>(initialValue = null) {
+        val stats by produceState<ReadingSummary?>(initialValue = null, statsRefresh) {
             val byDay = app.database.readingStatDao().minutesByDay()
             value = ReadingSummary(
                 todayMinutes = byDay.firstOrNull { it.day == today }?.minutes ?: 0,
                 streakDays = computeStreak(byDay.map { it.day }.toSet(), java.time.LocalDate.now()),
                 totalMinutes = byDay.sumOf { it.minutes },
+                byDay = byDay,
             )
         }
-        ReadingStatsCard(stats)
+        val goalMinutes by produceState(initialValue = DEFAULT_GOAL_MINUTES, statsRefresh) {
+            value = app.settingsRepo.readDailyGoalMinutes()
+        }
+        val canUndo by produceState(initialValue = false, statsRefresh) {
+            value = app.database.reviewLogDao().latest() != null
+        }
+        ReadingStatsCard(stats, goalMinutes)
+        // P1 复习两小招：一键撤销上次评分（有评分日志才显示；撤销后 refreshKey 触发列表与统计重查）
+        if (canUndo) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = {
+                    app.appScope.launch {
+                        val ok = repo.undoLastReview()
+                        withContext(Dispatchers.Main) {
+                            if (ok) {
+                                statsRefresh++
+                                android.widget.Toast.makeText(
+                                    app, "已撤销上次评分", android.widget.Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                        }
+                    }
+                }) { Text("撤销上次评分") }
+            }
+        }
+        HeatMapCard(summary = stats, goalMinutes = goalMinutes)
         ReviewTabs(selected = tab, onSelect = { tab = it })
 
-        when (tab) {
-            0 -> DuePane(repo = repo, onStart = { due ->
-                // 会话状态写回切主线程（与项目线程纪律一致）
-                app.appScope.launch {
-                    val s = buildSession(repo, due)
-                    withContext(Dispatchers.Main) { session = s }
-                }
-            })
-            1 -> WrongBookPane(repo = repo, onRetest = { rows ->
-                wrongSession = WrongSession(rows.first().bookTitle, rows)
-            })
-            else -> TermsPane(repo = repo)
+        // P1 复习两小招：排序模式持久化（坏值回退 risk）
+        var sortMode by remember { mutableStateOf("risk") }
+        LaunchedEffect(Unit) { sortMode = app.settingsRepo.readReviewSortMode() }
+        val setSortMode: (String) -> Unit = { mode ->
+            sortMode = mode
+            app.appScope.launch { app.settingsRepo.saveReviewSortMode(mode) }
+        }
+
+        // 列表区吃掉头部卡之外的剩余高度：头部堆叠（统计+热力图+页签）再高也压不扁列表，
+        // Robolectric 小视口下 LazyColumn 不会落到 0 高不进语义树（2026-11-15 回归根因）
+        Box(Modifier.weight(1f)) {
+            when (tab) {
+                0 -> DuePane(
+                    repo = repo,
+                    onStart = { due ->
+                        // 会话状态写回切主线程（与项目线程纪律一致）
+                        app.appScope.launch {
+                            val s = buildSession(repo, due)
+                            withContext(Dispatchers.Main) { session = s }
+                        }
+                    },
+                    sortMode = sortMode,
+                    onSortModeChange = setSortMode,
+                )
+                1 -> WrongBookPane(repo = repo, onRetest = { rows ->
+                    wrongSession = WrongSession(rows.first().bookTitle, rows)
+                })
+                else -> TermsPane(repo = repo)
+            }
         }
     }
 }
 
-/** 统计卡数据（体验增量轮）：minutesByDay 一次查出后内存汇总 */
+/** 统计卡数据（体验增量轮）：minutesByDay 一次查出后内存汇总；P1-⑤ byDay 供热力图复用 */
 private data class ReadingSummary(
     val todayMinutes: Int,
     val streakDays: Int,
     val totalMinutes: Int,
+    val byDay: List<com.studyfriend.app.data.db.DayMinutes> = emptyList(),
 )
+
+private const val DEFAULT_GOAL_MINUTES = 30
 
 /** 时长展示：< 60 分钟显示「x 分钟」，满一小时起显示「x.x 小时」（0.1 小时这种读不懂的数不出现） */
 private fun formatMinutes(minutes: Int): String = when {
@@ -166,9 +232,9 @@ private fun formatMinutes(minutes: Int): String = when {
     else -> "$minutes 分钟"
 }
 
-/** 阅读统计卡（2026-11-15 UI 打磨轮）：一张卡三格，今日格主色强调 */
+/** 阅读统计卡（2026-11-15 UI 打磨轮 + P1-⑤）：一张卡三格，今日格带每日目标进度环 */
 @Composable
-private fun ReadingStatsCard(stats: ReadingSummary?) {
+private fun ReadingStatsCard(stats: ReadingSummary?, goalMinutes: Int) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
         shape = RoundedCornerShape(16.dp),
@@ -177,15 +243,36 @@ private fun ReadingStatsCard(stats: ReadingSummary?) {
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Row(Modifier.fillMaxWidth().padding(vertical = 14.dp)) {
+            // 今日格：目标进度环 + 时长（达成目标后环满圈）
+            Row(
+                Modifier.weight(1.2f),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ProgressRing(
+                    progress = ((stats?.todayMinutes ?: 0).toFloat() / goalMinutes).coerceIn(0f, 1f),
+                    goalMet = (stats?.todayMinutes ?: 0) >= goalMinutes,
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        formatMinutes(stats?.todayMinutes ?: 0),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        "目标 $goalMinutes 分",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             StatCell(
-                label = "今日",
-                value = formatMinutes(stats?.todayMinutes ?: 0),
-                emphasized = true,
-                modifier = Modifier.weight(1f),
-            )
-            StatCell(
-                label = "连续",
+                label = if (streakMilestoneHit(stats?.streakDays ?: 0) != null)
+                    "连续 🎉达成" else "连续",
                 value = "${stats?.streakDays ?: 0} 天",
+                emphasized = streakMilestoneHit(stats?.streakDays ?: 0) != null,
                 modifier = Modifier.weight(1f),
             )
             StatCell(
@@ -193,6 +280,147 @@ private fun ReadingStatsCard(stats: ReadingSummary?) {
                 value = formatMinutes(stats?.totalMinutes ?: 0),
                 modifier = Modifier.weight(1f),
             )
+        }
+    }
+}
+
+/** 每日目标进度环（P1-⑤）：38dp 圆环，达成后满圈琥珀色 + 中心对勾 */
+@Composable
+private fun ProgressRing(progress: Float, goalMet: Boolean) {
+    val track = MaterialTheme.colorScheme.surfaceVariant
+    val arcColor = if (goalMet) Color(0xFFFFB74D) else MaterialTheme.colorScheme.primary
+    Box(contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(38.dp)) {
+            val stroke = 4.dp.toPx()
+            val inset = stroke / 2
+            drawArc(
+                color = track,
+                startAngle = 0f, sweepAngle = 360f, useCenter = false,
+                style = Stroke(width = stroke),
+                topLeft = Offset(inset, inset),
+                size = Size(size.width - stroke, size.height - stroke),
+            )
+            if (progress > 0f) {
+                drawArc(
+                    color = arcColor,
+                    startAngle = -90f, sweepAngle = 360f * progress, useCenter = false,
+                    style = Stroke(width = stroke, cap = StrokeCap.Round),
+                    topLeft = Offset(inset, inset),
+                    size = Size(size.width - stroke, size.height - stroke),
+                )
+            }
+        }
+        if (goalMet) {
+            Text("✓", style = MaterialTheme.typography.labelMedium, color = Color(0xFFFFB74D))
+        }
+    }
+}
+
+/** 热力图卡（P1-⑤，koreader/AnkiDroid 格子风）：近 17 周每日阅读分钟，Canvas 自绘格子矩阵。
+ *  色阶按「当日分钟 ÷ 每日目标」分四档；点格子显示当日数据；副标题提示距下一里程碑天数。 */
+@Composable
+private fun HeatMapCard(summary: ReadingSummary?, goalMinutes: Int) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            var selectedInfo by remember { mutableStateOf<String?>(null) }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("近 17 周", style = MaterialTheme.typography.titleSmall)
+                    val streak = summary?.streakDays ?: 0
+                    val next = nextStreakMilestone(streak)
+                    Text(
+                        selectedInfo
+                            ?: next?.let { "连续 $streak 天 · 距 ${it} 天里程碑还差 ${it - streak} 天" }
+                            ?: "连续 $streak 天，坚持得漂亮",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                // 图例：少 → 多
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("少", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    listOf(0f, 0.35f, 0.65f, 1f).forEach { a ->
+                        Box(
+                            Modifier
+                                .padding(horizontal = 2.dp)
+                                .size(10.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(
+                                    if (a == 0f) MaterialTheme.colorScheme.surfaceVariant
+                                    else MaterialTheme.colorScheme.primary.copy(alpha = a),
+                                ),
+                        )
+                    }
+                    Text("多", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            val emptyColor = MaterialTheme.colorScheme.surfaceVariant
+            val primary = MaterialTheme.colorScheme.primary
+            ReadingHeatMap(
+                byDay = summary?.byDay.orEmpty(),
+                goalMinutes = goalMinutes,
+                emptyColor = emptyColor,
+                lowColor = primary.copy(alpha = 0.30f),
+                midColor = primary.copy(alpha = 0.62f),
+                highColor = primary,
+                onPickDay = { info -> selectedInfo = info },
+            )
+        }
+    }
+}
+
+/** 格子矩阵：列=周（周一顶行），近 17 周含本周；未来日期不画 */
+@Composable
+private fun ReadingHeatMap(
+    byDay: List<com.studyfriend.app.data.db.DayMinutes>,
+    goalMinutes: Int,
+    emptyColor: Color,
+    lowColor: Color,
+    midColor: Color,
+    highColor: Color,
+    onPickDay: (String) -> Unit,
+) {
+    val cell = 15.dp
+    val gap = 3.dp
+    val weeks = 17
+    val minutesMap = remember(byDay) { byDay.associate { it.day to it.minutes } }
+    // 本周周一（中国习惯周一为一周之首），列 0 = 16 周前的周一
+    val mondayThisWeek = remember { java.time.LocalDate.now().minusDays((java.time.LocalDate.now().dayOfWeek.value - 1).toLong()) }
+    val gridStart = remember { mondayThisWeek.minusWeeks((weeks - 1).toLong()) }
+    val density = LocalDensity.current
+    val dayOf = { col: Int, row: Int -> gridStart.plusWeeks(col.toLong()).plusDays(row.toLong()) }
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(cell * 7 + gap * 6),
+    ) {
+        val cellPx = (cell + gap).toPx()
+        val side = cell.toPx()
+        for (col in 0 until weeks) {
+            for (row in 0..6) {
+                val d = dayOf(col, row)
+                if (d.isAfter(java.time.LocalDate.now())) continue
+                val m = minutesMap[d.toString()] ?: 0
+                val color = when {
+                    m == 0 -> emptyColor
+                    m < goalMinutes / 2 -> lowColor
+                    m < goalMinutes -> midColor
+                    else -> highColor
+                }
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(col * cellPx, row * cellPx),
+                    size = Size(side, side),
+                    cornerRadius = CornerRadius(side * 0.2f),
+                )
+            }
         }
     }
 }
@@ -267,7 +495,12 @@ private suspend fun buildSession(repo: BookRepository, due: DueItem): ReviewSess
 // ---------- Tab 0：今日复习 ----------
 
 @Composable
-private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
+private fun DuePane(
+    repo: BookRepository,
+    onStart: (DueItem) -> Unit,
+    sortMode: String,
+    onSortModeChange: (String) -> Unit,
+) {
     // now 进页固化：跨天停留不翻转，重进页面重新收集拿新 now
     val now = remember { System.currentTimeMillis() }
     val due by repo.dueListWithBookFlow(now)
@@ -277,10 +510,16 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
     val visible = remember(due) {
         due.distinctBy { if (it.item.itemType == com.studyfriend.app.data.db.DbValues.ITEM_TERM) "term_${it.item.id}" else it.item.bookId to it.item.chapterId }
     }
-    // P0-① 「最快要忘优先」：按当前记住概率升序（没复习过的新卡概率 0 排最前），同概率到期早者先
-    val sorted = remember(visible) {
-        val risk = visible.associate { it.item.id to Fsrs.retrievability(it.item, now) }
-        visible.sortedWith(compareBy({ risk[it.item.id] ?: 0.0 }, { it.item.dueAt }))
+    // P1 复习两小招：排序切换——risk=最快要忘优先（默认）/ due=到期序 / random=随机（进页随机一次不跳动）
+    val sorted = remember(visible, sortMode) {
+        when (sortMode) {
+            "due" -> visible.sortedBy { it.item.dueAt }
+            "random" -> visible.shuffled(java.util.Random(now))
+            else -> {
+                val risk = visible.associate { it.item.id to Fsrs.retrievability(it.item, now) }
+                visible.sortedWith(compareBy({ risk[it.item.id] ?: 0.0 }, { it.item.dueAt }))
+            }
+        }
     }
     if (visible.isEmpty()) {
         EmptyState(
@@ -295,6 +534,42 @@ private fun DuePane(repo: BookRepository, onStart: (DueItem) -> Unit) {
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        item(key = "sort_row") {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "排序",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                listOf(
+                    "risk" to "最快要忘",
+                    "due" to "到期序",
+                    "random" to "随机",
+                ).forEach { (mode, label) ->
+                    val sel = sortMode == mode
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(
+                                if (sel) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                            )
+                            .clickable { onSortModeChange(mode) }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (sel) MaterialTheme.colorScheme.onSecondaryContainer
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
         items(sorted, key = { it.item.id }) { d ->
             val overdueDays = ((now - d.item.dueAt) / DAY_MS).toInt()
             Surface(

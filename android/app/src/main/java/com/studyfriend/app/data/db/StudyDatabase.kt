@@ -23,7 +23,7 @@ import androidx.room.RoomDatabase
         ReadingStatEntity::class,
         ReviewLogEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 abstract class StudyDatabase : RoomDatabase() {

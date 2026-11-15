@@ -305,6 +305,31 @@ class BookRepository(
     }
     suspend fun pendingReviews(bookId: Long) = db.reviewItemDao().pendingByBook(bookId)
 
+    /**
+     * 一键撤销上次评分（P1 复习两小招，AnkiDroid 思路防误触）：取最新评分日志，把该卡恢复到
+     * 「评分前」状态并删掉这行日志。恢复口径：被撤销日志**自己**的 stateBefore/stabilityBefore/
+     * difficultyBefore/dueBefore 就是评分前卡片的完整状态（undoSecondReview 测试锁定——上一条
+     * 日志的 before 是更早的状态，用错了会把卡倒退两轮）；上次复习时间无 before 字段可记，
+     * 取上一条日志的 reviewedAt（无上一条=首评=新卡，置 null）。无任何评分日志返回 false。
+     * intervalIdx 列无逻辑消费方（P0-① 后仅存档），不回写。
+     */
+    suspend fun undoLastReview(): Boolean = db.withTransaction {
+        val log = db.reviewLogDao().latest() ?: return@withTransaction false
+        val prev = db.reviewLogDao().previousForItem(log.itemId)
+        db.reviewItemDao().markResult(
+            id = log.itemId,
+            intervalIdx = 0,
+            dueAt = log.dueBefore,
+            done = false,
+            fsrsState = log.stateBefore,
+            fsrsStability = log.stabilityBefore,
+            fsrsDifficulty = log.difficultyBefore,
+            fsrsLastReviewAt = prev?.reviewedAt,
+        )
+        db.reviewLogDao().deleteById(log.id)
+        true
+    }
+
     /** 术语卡盒（学习闭环轮）：全书有 keyTerms 的章（复习中心「术语」Tab） */
     suspend fun chaptersWithTerms() = db.chapterDao().chaptersWithTerms()
 }

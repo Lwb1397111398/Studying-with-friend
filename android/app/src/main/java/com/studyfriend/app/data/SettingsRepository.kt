@@ -324,6 +324,27 @@ class SettingsRepository(
         db.settingDao().upsert(SettingEntity(KEY_READ_PAGE_MODE, if (on) "true" else "false"))
     }
 
+    // ---- 每日阅读目标分钟（P1-⑤）：进度环/热力图色阶基准；坏值回退默认 ----
+
+    suspend fun readDailyGoalMinutes(): Int =
+        db.settingDao().get(KEY_READ_DAILY_GOAL)?.value?.toIntOrNull()
+            ?.takeIf { it in READ_GOAL_MIN..READ_GOAL_MAX } ?: DEFAULT_READ_GOAL
+
+    suspend fun saveDailyGoalMinutes(min: Int) {
+        if (min !in READ_GOAL_MIN..READ_GOAL_MAX) return
+        db.settingDao().upsert(SettingEntity(KEY_READ_DAILY_GOAL, min.toString()))
+    }
+
+    // ---- 复习到期排序（P1 复习两小招）：坏值回退 risk ----
+
+    suspend fun readReviewSortMode(): String =
+        db.settingDao().get(KEY_REVIEW_SORT)?.value?.takeIf { it in REVIEW_SORT_MODES } ?: "risk"
+
+    suspend fun saveReviewSortMode(mode: String) {
+        if (mode !in REVIEW_SORT_MODES) return
+        db.settingDao().upsert(SettingEntity(KEY_REVIEW_SORT, mode))
+    }
+
     // ---- 外观主题（功能补齐轮）：三态，默认跟随系统；MainActivity watch 本键即时生效 ----
 
     suspend fun themeMode(): String {
@@ -535,6 +556,14 @@ class SettingsRepository(
         const val TTS_ENGINE_LOCAL = "local"
         // 复习到期提醒（每日本地通知）
         const val KEY_REVIEW_REMINDER = "review_reminder"
+        // 每日阅读目标分钟（P1-⑤ 激励统计：进度环/热力图色阶基准）
+        const val KEY_READ_DAILY_GOAL = "read_daily_goal_minutes"
+        const val READ_GOAL_MIN = 5
+        const val READ_GOAL_MAX = 600
+        const val DEFAULT_READ_GOAL = 30
+        // 复习到期列表排序（P1 复习两小招：risk=最快要忘优先 / due=到期序 / random=随机）
+        const val KEY_REVIEW_SORT = "review_sort_mode"
+        val REVIEW_SORT_MODES = listOf("risk", "due", "random")
         val DETAIL_LEVELS = listOf("简略", "标准", "深入")
         const val DEFAULT_BASE = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"

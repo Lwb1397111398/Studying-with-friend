@@ -34,6 +34,7 @@ import com.studyfriend.app.data.importer.KitFigureMeta
 import com.studyfriend.app.data.importer.KitMeta
 import com.studyfriend.app.data.importer.KitZipReader
 import com.studyfriend.app.data.importer.ParsedChapter
+import com.studyfriend.app.data.importer.PhantomTocFilter
 import com.studyfriend.app.data.importer.PdfExtractResult
 import com.studyfriend.app.data.importer.PdfImportException
 import com.studyfriend.app.data.importer.PdfLoader
@@ -1036,10 +1037,15 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 chapters = emptyList()
                 return
             }
+            // KIT 简目假章防御：kit 章表可能把书前/书末目录页（逐章列「第X节」条目）误切成
+            // 「第X章」假章——《民法物权_Kit图包》实录。整章剔除/混合章删简目段改名（判据
+            // 与 DB 迁移 v12 同源 PhantomTocFilter），统计进 parseNote
+            val phantom = kit?.let { PhantomTocFilter.stripParsed(result) }
+            val afterPhantom = phantom?.chapters ?: result
             // P8 前置分块（仅 PDF 路径）：前置探针页级判定 → 「开篇」按内容拆成带名章
             // （封面/版权页/作者介绍/初版序/第二版序…）；失败/守卫不过零回归
             if (isPdf) phase = "识别书的开头结构"
-            val (structured, frontNote) = if (isPdf) applyFrontMatter(result) else result to null
+            val (structured, frontNote) = if (isPdf) applyFrontMatter(afterPhantom) else afterPhantom to null
             chapters = structured
             // 兜底提示与视觉统计可同时成立（无标题盲切 + 部分页排队视觉转写），拼接而非互斥
             val blindNote = when {
@@ -1060,6 +1066,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             }
             val kitNote = if (kit != null) {
                 "bookocr 成品书：章界已由电脑侧确认" +
+                    (phantom?.note()?.let { "；$it" } ?: "") +
                     if (kitFigures.isNotEmpty()) "，${kitFigures.size} 张插图原位导入" else ""
             } else {
                 null

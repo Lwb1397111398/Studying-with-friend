@@ -83,6 +83,9 @@ test/.../M4bUiSmokeTest.kt      3 例（Compose 冒烟）
 
 ## 最后更新
 
+- 2026-11-15 **P1-④② 讲解 prompt 法律向改写**（调研 `docs/调研/anx_ai_prompts_reference.dart` 全集存档，取其结构留我体系）：explain_note.txt 保留六标签格式/〔p编号〕规则/字数约束/学情注入/详略档位全部不动；新增①六类段落决策树（概念定义/构成要件/法条阐释/案例/学说争议/读者批注卡点，各类有明确的第一句讲法与展开顺序）；②约束清单五条（术语第一次出现给接地气解释；「谁对谁、谁欠谁」的权利义务框架展开；忠实红线——不编造原文没有的含义/法条编号/数字；空标签直接省略；**输出自检**——首字符必须是 `<标题>` 的 `<`、标签外禁止 markdown 标题行/开场白）。最后一条是评分对照抓出的修复：改写后首版在 glm-5.3 上 11 段中 2 段跑飞成无标签纯 markdown（App 端会解析失败），加硬约束后重生成验证格式回归。**防烧钱**：NOTE_VERSION 不动，旧讲解照常显示（缓存命中），新生成才走新 prompt。对照评分（11 段抽样均值 23.27→24.55，+1.27/25）见 `docs/基准集/评分对照记录.md`。
+
+
 - 2026-11-15 **P1-③ 引用溯源轮**（调研落地，SurfSense 白名单思路）：①explain_note.txt `<讲解>` 加〔p编号〕出处标记要求——编号必须来自 paragraphs 中出现过的编号，整篇 2~5 处；②`NotePlanner.runUnitOnce` 落库前 `ParaRef.stripInvalid` 剔除白名单外标记（软校验不整页重试零烧钱；白名单=texts.size，textsForPrompt 按 members 顺序产出只截尾——**标记编号 i ↔ paraIds[i] 严格对齐**）；③NoteCard 加 `onJumpPara` 参数：friendly 标记渲染成可点胶囊「段N」（`ui/components/ParaRefs.kt` 的 RefAwareText），点击经 ReadScreen rows 反查 `animateScrollToItem` 滚到段（TTS 跟随同款）；④**缓存零烧钱**：NOTE_VERSION 不动，旧讲解照常显示（无胶囊），新生成才带标记。**坑**：`InlineTextContent`/`appendInlineContent` 在 `androidx.compose.foundation.text` 不在 ui.text（Placeholder/PlaceholderVerticalAlign 才在 ui.text），jar 实查确认。
 - 2026-10-31 **优化轮批A1/A2+D2/D3**：①**讲解缓存失效真 bug 修复**——缓存判定从只比 promptVersion 改三条件：`existing.promptVersion == noteVersion(详略档位, 有学情) && existing.model == 实际讲解模型 && friendly 非空`；`noteVersion(detailLevel, hasLearnerContext)` 拼档位/学情后缀、`isCurrentNote` 前缀匹配（切「深入」档、换更强模型下一章立刻生效）；②**学情进讲解输入**——该章 para_memos 按 paraId 匹配 ≤10 条×60 字（MEMO_INPUT_MAX）拼 `unitMemos` 进单元输入 userJson `"memos"`，explain_note.txt prompt 加「读者学情」段；**防烧钱**：版本号只在该章有学情时才带后缀，无学情书缓存全命中零重讲；③**讲解自问落错题本**——讲解卡自测（ChapterAssetsScreen SelfCheckCard）三按钮「答对/模糊/答错」落 quiz_attempts `source="NOTE"`、`qIndex=NOTE_Q_BASE+i`（Room v10 见 M1），进错题重练数据源。
 

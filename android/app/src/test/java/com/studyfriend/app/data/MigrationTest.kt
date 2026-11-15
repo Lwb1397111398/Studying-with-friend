@@ -3,6 +3,7 @@ package com.studyfriend.app.data
 import androidx.room.testing.MigrationTestHelper
 import androidx.test.platform.app.InstrumentationRegistry
 import com.studyfriend.app.data.db.MIGRATION_10_11
+import com.studyfriend.app.data.db.MIGRATION_11_12
 import com.studyfriend.app.data.db.MIGRATION_8_9
 import com.studyfriend.app.data.db.MIGRATION_9_10
 import com.studyfriend.app.data.db.MIGRATIONS
@@ -411,6 +412,101 @@ fun migrate8To9_readingStatsUsable() {
             v11.query("SELECT rating FROM review_log WHERE itemId = 1").use { cur ->
                 assertTrue(cur.moveToFirst())
                 assertEquals(3, cur.getInt(0))
+            }
+        }
+    }
+
+    /** 简目假章清理（《民法物权_Kit图包》实录）：纯假章整章剔除、混合章删简目段改名、真章/法条章零误杀 */
+    @Test
+    fun migrate11To12_phantomTocChaptersCleaned() {
+        val dbName = "migration-test-1112.db"
+        helper.createDatabase(dbName, 11).use { v11 ->
+            v11.execSQL(
+                "INSERT INTO books (id, title, author, sourceType, filePath, status, totalChapters, " +
+                    "overviewJson, createdAt, updatedAt, lastReadChapterId) VALUES (1, '民法物权', '', 'TXT', '', 'READY', 1, NULL, 1, 1, 10)",
+            )
+            // 四类章：假章(idx2) / 真文章(idx4) / 混合章(idx31) / 法条章(idx14)
+            v11.execSQL(
+                "INSERT INTO chapters (id, bookId, idx, title, readState, level, calibrated) " +
+                    "VALUES (10, 1, 2, '第六章　担保物权', 'NOT_READ', 1, 0)",
+            )
+            v11.execSQL(
+                "INSERT INTO chapters (id, bookId, idx, title, readState, level, calibrated) " +
+                    "VALUES (11, 1, 4, '第一章　总　　论', 'NOT_READ', 1, 0)",
+            )
+            v11.execSQL(
+                "INSERT INTO chapters (id, bookId, idx, title, readState, level, calibrated) " +
+                    "VALUES (12, 1, 31, '第七章　占有', 'NOT_READ', 1, 0)",
+            )
+            v11.execSQL(
+                "INSERT INTO chapters (id, bookId, idx, title, readState, level, calibrated) " +
+                    "VALUES (13, 1, 14, '第一章　通　　则', 'NOT_READ', 1, 0)",
+            )
+            // 假章：4 段全「第X节」目录条目
+            val secEntries = listOf("第一节　概说", "第二节　抵押权", "第三节　质权", "第四节　留置权")
+            secEntries.forEachIndexed { i, t ->
+                v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (10, $i, '$t', 'BODY', 'NONE')")
+            }
+            // 真文章：第一段「第一节」+ 大量非简目段
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (11, 0, '第一节　物权法的意义和性质', 'BODY', 'NONE')")
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (11, 1, '人类须利用物质以谋生活，物质有限，为定分止争，促进对物有效率的使用。', 'BODY', 'NONE')")
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (11, 2, '物权，顾名思义，系指对物的权利。', 'BODY', 'NONE')")
+            // 混合章：8 段简目 + 「注释」 + 2 万字引注大段
+            val bigNote = "1.（一）私法性质与公法规定。" + "引注内容".repeat(700)
+            val mixedSecs = listOf("第一节　概说", "第二节　占有的基本理论", "第三节　占有的分类", "第四节　占有的取得和消灭", "第五节　占有的效力", "第六节　占有人与恢复请求人的权利义务", "第七节　占有的保护", "第八节　准占有附录一　土地权状及登记誊本")
+            mixedSecs.forEachIndexed { i, t ->
+                v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (12, $i, '$t', 'BODY', 'NONE')")
+            }
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (12, 8, '注释', 'BODY', 'NONE')")
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (12, 9, '$bigNote', 'BODY', 'NONE')")
+            // 法条章：「第X条」+ 条文，无「第X节」段
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (13, 0, '第757条　（物权法定主义）', 'BODY', 'NONE')")
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (13, 1, '物权除依法律或习惯外，不得创设。', 'BODY', 'NONE')")
+            v11.execSQL("INSERT INTO paragraphs (chapterId, idx, text, role, aiAction) VALUES (13, 2, '第758条　（登记生效要件主义）', 'BODY', 'NONE')")
+        }
+        helper.runMigrationsAndValidate(dbName, 12, true, MIGRATION_11_12).use { v12 ->
+            // 假章：章与段落全没
+            v12.query("SELECT COUNT(*) FROM chapters WHERE id = 10").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(0, cur.getInt(0))
+            }
+            v12.query("SELECT COUNT(*) FROM paragraphs WHERE chapterId = 10").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(0, cur.getInt(0))
+            }
+            // 真文章：章与段落原样
+            v12.query("SELECT COUNT(*) FROM paragraphs WHERE chapterId = 11").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(3, cur.getInt(0))
+            }
+            // 混合章：改名「注释」、简目段删净、注释段保留
+            v12.query("SELECT title FROM chapters WHERE id = 12").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals("注释", cur.getString(0))
+            }
+            v12.query("SELECT COUNT(*) FROM paragraphs WHERE chapterId = 12").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(2, cur.getInt(0))
+            }
+            v12.query("SELECT text FROM paragraphs WHERE chapterId = 12 ORDER BY idx").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals("注释", cur.getString(0))
+            }
+            // 法条章：零误杀
+            v12.query("SELECT COUNT(*) FROM paragraphs WHERE chapterId = 13").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertEquals(3, cur.getInt(0))
+            }
+            // 悬空的 lastReadChapterId（指向被删假章 id=10）重置 NULL；真章引用不动
+            v12.query("SELECT lastReadChapterId FROM books WHERE id = 1").use { cur ->
+                assertTrue(cur.moveToFirst())
+                assertTrue("悬空阅读位置应重置", cur.isNull(0))
+            }
+            // 章 idx 连续化：0..2（开篇不在测试数据里，剩目录删掉的假章腾位后真章重排）
+            v12.query("SELECT idx FROM chapters WHERE bookId = 1 ORDER BY idx").use { cur ->
+                val idxs = mutableListOf<Int>()
+                while (cur.moveToNext()) idxs.add(cur.getInt(0))
+                assertEquals("idx 应从 0 起连续", List(idxs.size) { it }, idxs)
             }
         }
     }
