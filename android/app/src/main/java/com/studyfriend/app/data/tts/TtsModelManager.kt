@@ -40,11 +40,13 @@ object TtsModelManager {
     /** 一个待下载文件：仓库内相对路径（可能带子目录）+ 预期字节数（完整性下限） */
     data class TtsFile(val relPath: String, val bytes: Long)
 
-    // 清单即仓库实况（听的思维 2026-09 核对）：大文件在前、espeak 语音数据垫底
+    // 清单即仓库实况（听的思维 2026-09 核对；2026-11-15 全量 373 项对账修正：
+    // hf-mirror 迁 Xet 存储后 model.int8.onnx 重建缩了 95096B、lexicon-zh.txt 涨了 666B，
+    // 其余 371 项经模拟器全量下载通过下限校验维持原值）：大文件在前、espeak 语音数据垫底
     val TTS_FILES: List<TtsFile> = listOf(
-        TtsFile("model.int8.onnx", 114299010L),
+        TtsFile("model.int8.onnx", 114203914L),
         TtsFile("voices.bin", 53790720L),
-        TtsFile("lexicon-zh.txt", 2119465L),
+        TtsFile("lexicon-zh.txt", 2120131L),
         TtsFile("lexicon-us-en.txt", 5956885L),
         TtsFile("lexicon-gb-en.txt", 6366635L),
         TtsFile("date-zh.fst", 59154L),
@@ -569,13 +571,21 @@ object TtsModelManager {
         dst.parentFile?.mkdirs()
         val part = File(dir, "$relPath.part")
         var lastError: Exception? = null
-        repeat(3) { attempt ->
+        var attempt = 0
+        while (attempt < 3) {
             try {
                 var start = if (part.exists()) part.length() else 0L
                 val conn = open(url)
                 if (start > 0) conn.setRequestProperty("Range", "bytes=$start-")
                 try {
                     val code = conn.responseCode
+                    if (code == 416 && part.exists()) {
+                        // .part 比远端文件还长：源站文件被更新变小（2026-11 Xet 迁移实测
+                        // model.int8.onnx 缩了 95KB）。弃 .part 从 0 重下，不耗重试次数；
+                        // start 归零后不会再 416，此分支有界
+                        part.delete()
+                        continue
+                    }
                     if (code != 200 && code != 206) throw java.io.IOException("HTTP $code")
                     // 200 = 服务端不认 Range（换源/不支持），弃 .part 从头下
                     val append = code == 206 && start > 0
@@ -617,7 +627,8 @@ object TtsModelManager {
                 throw e
             } catch (e: Exception) {
                 lastError = e
-                if (attempt < 2) delay(2000L * (attempt + 1))
+                attempt++
+                if (attempt < 3) delay(2000L * attempt)
             }
         }
         throw lastError ?: java.io.IOException("下载失败")
