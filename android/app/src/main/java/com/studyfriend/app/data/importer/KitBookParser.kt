@@ -92,12 +92,14 @@ object KitBookParser {
 
     /**
      * 书名预填：KIT 元数据 title（电脑侧 init 的工程名=真书名）优先；zip 图包文件名固定
-     * 带「_Kit图包」尾巴，直接用文件名会把尾巴带进书名——kitTitle 空白走文件名兜底时
-     * 也把已知尾巴剥掉。纯 JVM 供单测。
+     * 带「_Kit图包」尾巴、2026-11-15 起还带「导入这个_」前缀（电脑侧 pack 产出标记，防与
+     * txt/插图版 PDF 混淆），kitTitle 空白走文件名兜底时把已知标记都剥掉。纯 JVM 供单测。
      */
     fun preferredTitle(kitTitle: String?, fileName: String): String =
         kitTitle?.takeIf { it.isNotBlank() }
-            ?: fileName.substringBeforeLast('.').removeSuffix("_Kit图包").ifBlank { "未命名" }
+            ?: fileName.substringBeforeLast('.')
+                .removeSuffix("_Kit图包").removePrefix("导入这个_")
+                .ifBlank { "未命名" }
 
     /** 按章表切章。[body] 须已剥元数据块。锚定规则：anchor（标题行前 8 字）为主判据、
      * 起始页号过闸（blockPage >= p，同源页号恰相等，闸的作用是拦住目录页同文条目误锚），

@@ -2672,7 +2672,8 @@ def pack_zip(job: Path, m: dict, txt_file: Path, figs_by_page: dict[int, list[di
             "chapters": [{"t": c["t"], "p": c["p"], "lv": c["lv"], "r": c["r"], "a": c["a"]}
                          for c in (m.get("chapters") or [])],
             "figures": fig_entries}
-    out_zip = job / "output" / f"{m['name']}_Kit图包.zip"
+    # 文件名自带「导入这个」标记：手机导入就传 zip（防和 txt/插图版 PDF 混淆）
+    out_zip = job / "output" / f"导入这个_{m['name']}_Kit图包.zip"
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("kit.json", json.dumps(meta, ensure_ascii=False, indent=1))
         z.write(txt_file, "book.txt")

@@ -236,4 +236,13 @@ class KitBookParserTest {
         assertEquals("民法物权", KitBookParser.preferredTitle("  ", "民法物权_Kit图包.zip"))
         assertEquals("未命名", KitBookParser.preferredTitle(null, ""))
     }
+
+    @Test
+    fun preferredTitle_stripsImportMarkerPrefix() {
+        // 2026-11-15 起 pack 产出带「导入这个_」前缀，文件名兜底不得把标记带进书名
+        assertEquals(
+            "民法思维-王泽鉴2022",
+            KitBookParser.preferredTitle(null, "导入这个_民法思维-王泽鉴2022_Kit图包.zip"),
+        )
+    }
 }

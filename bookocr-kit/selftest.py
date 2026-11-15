@@ -267,7 +267,7 @@ def main() -> None:
     o = run("pack _selftest")
     txt = JOB / "output" / "_selftest.txt"
     pdf = JOB / "output" / "_selftest_插图版.pdf"
-    zipf = JOB / "output" / "_selftest_Kit图包.zip"
+    zipf = JOB / "output" / "导入这个__selftest_Kit图包.zip"  # 与 pack 产出同款格式：导入这个_{书名}_Kit图包.zip
     check(txt.exists() and "txt →" in o, "txt 产出")
     check(pdf.exists() and "插图版 PDF →" in o, "插图版 PDF 产出")
     check(zipf.exists() and "KIT 图包 →" in o, "KIT 图包 zip 产出")

@@ -94,7 +94,7 @@ description: 识别扫描版 PDF 书籍为可导入阅读 App 的 txt / 插图�
    ```
    python bookocr-kit/bookocr.py pack <书名>
    ```
-   产出 `jobs/<书名>/output/` 下三件：`书名.txt`（头部带章界元数据块——App 识别到即按电脑侧章表直入）、`书名_插图版.pdf`（没装 reportlab 则跳过）、`书名_Kit图包.zip`（**推荐手机导入用这个**：kit.json 章表+图清单 + book.txt + 裁好的真图，App 一个文件直入、阅读页图文混排）。忘跑 chapters 会被拦（或 `pack --auto-chapters` 一条龙）；图版页没 patch 也会被拦（先 `patch`，确要占位打包加 `--force`）。
+   产出 `jobs/<书名>/output/` 下三件：`书名.txt`（头部带章界元数据块——App 识别到即按电脑侧章表直入）、`书名_插图版.pdf`（没装 reportlab 则跳过）、**`导入这个_书名_Kit图包.zip`（手机导入就传它——文件名以「导入这个」开头的 zip 就是它**：kit.json 章表+图清单 + book.txt + 裁好的真图，App 一个文件直入、阅读页图文混排）。忘跑 chapters 会被拦（或 `pack --auto-chapters` 一条龙）；图版页没 patch 也会被拦（先 `patch`，确要占位打包加 `--force`）。
 9. **汇报**（人话，给老板）：总页数、总字数、图张数（含 figure-desc 补语义情况）、**章数与疑点裁决情况**、产出文件完整路径、一句「微信传 zip 图包到手机 → 书架点导入书籍 → 选文件，App 自动按电脑侧章表分章、插图原位显示」。附 token 粗账（pull 批零消耗；figure-desc 走识图 API、每图一次小图调用；aivision 批 10 页约 23 秒；子代理批约 50 万 token/10 页）。
 
 ## 断点续转（会话中断/换会话/换 agent）

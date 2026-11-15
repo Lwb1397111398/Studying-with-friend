@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 # 代码索引缓存
 .codegraph/
+# 本机 agent 配置
+.zcode/
