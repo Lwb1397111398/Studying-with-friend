@@ -447,7 +447,7 @@ def main() -> None:
         "〔图：第3页示意〕",                               # 结构行须原样保留
         "",
         "〔页4〕",
-        "第4页测试一。当事人订立合同，应当具有相应的民事权利能力。",
+        "第4页测试一。当事人订立合同，应当具有相应的民事权利能力。利用他人灯塔捕鱼竺亦属如此。",  # 行内单残留字
         "",
     ]
     (JOBP / "batches" / "b001.txt").write_text("\n".join(parts), encoding="utf-8")
@@ -472,6 +472,8 @@ def main() -> None:
     m_pf = json.loads((JOBP / "manifest.json").read_text(encoding="utf-8"))
     check(3 in (m_pf["batches"]["b001"].get("needs_vision") or []),
           "junk≥2段整页标记 needs_vision（reocr 闭环入口）")
+    check(4 in (m_pf["batches"]["b001"].get("needs_vision") or []),
+          "行内单残留字也触发 needs_vision 标记（收紧闭环）")
     check("fix" in o or "修复" in o, "规则层运行成功")
     check((JOBP / "proofread" / "changes.json").exists(), "changes.json 落盘")
     ch = json.loads((JOBP / "proofread" / "changes.json").read_text(encoding="utf-8"))
@@ -496,6 +498,32 @@ def main() -> None:
     check(r.returncode == 0, "AI Stub 全链路跑通")
     rep = (JOBP / "proofread" / "proofread_report.md").read_text(encoding="utf-8")
     check("AI" in rep or "ai" in rep, "报告含 AI 层记录")
+
+    # ---- Vision 精校 Stub 链路 ----
+    v_stub = JOBP / "vision_stub.json"
+    v_stub.write_text(json.dumps({
+        "edits": [{"find": "捕鱼竺亦属如此", "replace": "捕鱼亦属如此"}],
+        "merges": []
+    }, ensure_ascii=False), encoding="utf-8")
+    (JOBP / "images").mkdir(exist_ok=True)
+    import pymupdf as _fitz
+    _doc = _fitz.open()
+    _pg = _doc.new_page(width=100, height=100)
+    _pix = _pg.get_pixmap()
+    _pix.save(str(JOBP / "images" / "0004.png"))
+    env_v = dict(os.environ, PROOFREAD_VISION_STUB=str(v_stub))
+    r_v = subprocess.run([PY, str(KIT / "proofread.py"), "_selftest_pf", "--pages", "4",
+                          "--vision", "--no-backup"], capture_output=True, text=True,
+                         encoding="utf-8", cwd=str(KIT), env=env_v)
+    check(r_v.returncode == 0, "Vision 精校 Stub 链路执行成功")
+    txt = (JOBP / "batches" / "b001.txt").read_text(encoding="utf-8")
+    check("捕鱼亦属如此" in txt and "捕鱼竺亦属如此" not in txt, "Vision 层：行内残留字符被受控修复")
+    m_pf_after = json.loads((JOBP / "manifest.json").read_text(encoding="utf-8"))
+    check(4 not in (m_pf_after["batches"]["b001"].get("needs_vision") or []),
+          "Vision 修复复验通过：needs_vision 清零")
+    ch_v = json.loads((JOBP / "proofread" / "changes.json").read_text(encoding="utf-8"))
+    check(any(f.get("rule") == "vision" for v in ch_v.values() for f in v),
+          "changes.json 记录 rule=vision")
 
     print("== 清理 ==")
 

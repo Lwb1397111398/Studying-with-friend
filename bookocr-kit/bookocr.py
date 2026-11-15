@@ -333,25 +333,29 @@ def cmd_next(a: argparse.Namespace) -> None:
 # ---------------------------------------------------------------- aivision（直连视觉 API 并发识别）
 
 def _load_vision_api() -> tuple[str, str, str]:
-    """视觉 API 三键（base_url, api_key, model）：kit 目录 apis.json 优先（换电脑自配，不入库），
-    回退本机 Agent Manager 档案库挑第一个 caps 含 vision 的启用档案。key 只在内存流转，不打印。"""
+    """视觉 API 三键（base_url, api_key, model）：本机 Agent Manager 档案库挑 caps 含 vision 的启用档案优先，
+    或 kit 目录 apis.json（需含有效配置）。key 只在内存流转，不打印。"""
+    am = Path(r"E:\AI Agent\Agent Manager\ai-apis.json")
+    if not am.exists():
+        am = Path(r"C:\Agent\AImanager\ai-apis.json")
+    if am.exists():
+        try:
+            items = json.loads(am.read_text(encoding="utf-8"))
+            items = items if isinstance(items, list) else items.get("apis", [])
+            for a in items:
+                if isinstance(a, dict) and "vision" in (a.get("caps") or []) and a.get("enabled", True):
+                    model = a.get("default_model") or (a.get("models") or [None])[0]
+                    if a.get("base_url") and a.get("api_key") and model:
+                        return a["base_url"], a["api_key"], model
+        except Exception:
+            pass
     local = KIT / "apis.json"
     if local.exists():
         cfg = json.loads(local.read_text(encoding="utf-8"))
         model = cfg.get("default_model") or (cfg.get("models") or [None])[0]
-        if not (cfg.get("base_url") and cfg.get("api_key") and model):
-            die("apis.json 需要 base_url / api_key / default_model 三键")
-        return cfg["base_url"], cfg["api_key"], model
-    am = Path(r"C:\Agent\AImanager\ai-apis.json")
-    if not am.exists():
-        die(f"没有视觉 API 配置：把 {{base_url, api_key, default_model}} 写入 {local}（OpenAI 兼容格式；该文件已 gitignore）")
-    items = json.loads(am.read_text(encoding="utf-8"))
-    items = items if isinstance(items, list) else items.get("apis", [])
-    for a in items:
-        if isinstance(a, dict) and "vision" in (a.get("caps") or []) and a.get("enabled", True):
-            model = a.get("default_model") or (a.get("models") or [None])[0]
-            return a["base_url"], a["api_key"], model
-    die("本机档案库里没有 caps 含 vision 的启用档案；在 apis.json 手工配一个")
+        if cfg.get("base_url") and cfg.get("api_key") and model:
+            return cfg["base_url"], cfg["api_key"], model
+    die(f"没有视觉 API 配置：本机档案库里没有 caps 含 vision 的启用档案，且未在 {local} 配置三键")
 
 
 def _aivision_page(base: str, key: str, model: str, spec: str, img: Path, pageno: int, timeout: int = 180) -> str:
@@ -1922,9 +1926,10 @@ CH_WORD_FRONT = ("前言", "序言", "自序", "再版序", "初版序", "重排
                  "开场白", "凡例", "作者简介", "出版说明", "编译说明")
 CH_WORD_BACK = ("结语", "结论", "结束语", "后记", "再版后记", "译后记", "附录", "参考文献",
                 "参考书目", "致谢", "谢辞", "索引", "大事记", "年表")
-TOC_TITLE_RE = re.compile(r"^(目\s*录|目\s*次|contents)\s*$", re.I)
-# 目录条目行：标题 + 可选点线 + 行尾页码（行尾带数字的行一律视为目录形态，不当标题）
-TOC_ENTRY_RE = re.compile(r"^(.{2,60}?)[\s.·•…\-—]*?(\d{1,4})\s*$")
+TOC_TITLE_RE = re.compile(r"^(目\s*录|目\s*次|简\s*目|要\s*目|总\s*目|contents)\s*$", re.I)
+# 目录条目行：标题 + 可选点线 + 行尾页码——裸数字或全/半角括号包裹（如「（10）」，王泽鉴民法研究系列简目样式）
+# 行尾带数字/（数字）的行一律视为目录形态，不当标题
+TOC_ENTRY_RE = re.compile(r"^(.{2,60}?)[\s.·•…\-—]*?[(（]?(\d{1,4})[)）]?\s*$")
 SEC_NUM_RE = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十百千]+\s*[节讲]")
 _ZH_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
               "七": 7, "八": 8, "九": 9, "两": 2}
@@ -2080,12 +2085,15 @@ def _reconcile(book: dict[int, list[str]], chapters: list[dict], toc: dict) -> t
     entries = toc["entries"]
 
     # 目录条目 ↔ 章：difflib 相似度，每条目取最高分章
+    # 对账池 = 全部正文条目（lv1 章 + lv2 节）：节级目录条目只能与节级章配对，
+    # 只拿 lv1 对账会让每条节条目都成 toc_miss 疑点（历史台账膨胀的根源）
     best: dict[int, tuple[int, float]] = {}
+    pool = [c for c in chapters if c["r"] != "TOC"]
     for ei, (et, _) in enumerate(entries):
         ne = _norm_t(et)
         if not ne:
             continue
-        for ci, c in enumerate(lv1):
+        for ci, c in enumerate(pool):
             r = difflib.SequenceMatcher(None, ne, _norm_t(c["t"])).ratio()
             if ei not in best or r > best[ei][1]:
                 best[ei] = (ci, r)
@@ -2093,14 +2101,14 @@ def _reconcile(book: dict[int, list[str]], chapters: list[dict], toc: dict) -> t
     offsets = []
     for ei, (ci, r) in best.items():
         if r >= 0.55:
-            offsets.append(lv1[ci]["p"] - entries[ei][1])
+            offsets.append(pool[ci]["p"] - entries[ei][1])
     off = statistics.mode(offsets) if offsets else None
     matched_n = sum(1 for _, r in best.values() if r >= 0.55)
     for ei, (et, ep) in enumerate(entries):
         ci, r = best.get(ei, (None, 0.0))
         if r >= 0.55:
             continue
-        near = f"（最接近：{lv1[ci]['t'][:20]}@p{lv1[ci]['p']} 相似度 {r:.2f}）" if ci is not None else ""
+        near = f"（最接近：{pool[ci]['t'][:20]}@p{pool[ci]['p']} 相似度 {r:.2f}）" if ci is not None else ""
         calc = (ep + off) if off is not None else None
         note = f"目录条目「{et[:30]} …{ep}」没切出对应章{near}"
         if calc:
@@ -2128,7 +2136,8 @@ def _reconcile(book: dict[int, list[str]], chapters: list[dict], toc: dict) -> t
     for i, c in enumerate(chapters):
         if c["r"] != "BODY" or c["lv"] != 1:
             continue
-        nxt_p = chapters[i + 1]["p"] if i + 1 < len(chapters) else 10 ** 9
+        # 章界=下一个同级（lv1）章的起始页；紧随其后的第一节不算界（同页起 → 跨度 0 会误报薄章）
+        nxt_p = min((d["p"] for d in chapters[i + 1:] if d["lv"] == 1), default=10 ** 9)
         chars = sum(v for p, v in page_chars.items() if c["p"] <= p < nxt_p)
         if chars < 50:
             warns.append({"id": f"thin:{c['p']}:{_norm_t(c['t'])[:10]}", "kind": "thin",
@@ -2795,6 +2804,7 @@ def main() -> None:
     p.add_argument("--all", action="store_true", help="全书所有 done 批")
     p.add_argument("--rules-only", action="store_true", help="只跑规则层，不调文本 API")
     p.add_argument("--no-ai", action="store_true", help="禁用 AI 层（与 --rules-only 等效）")
+    p.add_argument("--vision", action="store_true", help="视觉对照精校模式（对点名页对照原图受控修复）")
     p.add_argument("--dry-run", action="store_true", help="只出报告和标记，不写回批文件")
     p.add_argument("--workers", type=int, default=3, help="AI 层并发（默认 3，过高会 429）")
     p.add_argument("--no-backup", action="store_true", help="不备份原批")
