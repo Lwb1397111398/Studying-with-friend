@@ -143,6 +143,26 @@ class AiClientTest {
     }
 
     @Test
+    fun friendlyIo_humanizesByExceptionType() {
+        // 实景体验轮：连接层异常不再直接亮 Java 原文——按类型给人话建议，技术细节截短附后
+        val timeout = java.net.SocketTimeoutException(
+            "failed to connect to vsllm.com/2a03:2880:f131:83:face:b00c:0:25de (port 443) after 15000ms",
+        )
+        val msg = AiClient.friendlyIo(timeout)
+        assertTrue(msg.contains("连接超时"))
+        assertTrue(msg.contains("详情："))
+        // 原始消息截短，不让超长 IP 链路占满弹层
+        assertTrue(msg.length < 200)
+
+        assertTrue(AiClient.friendlyIo(java.net.UnknownHostException("x.example")).contains("域名解析失败"))
+        assertTrue(AiClient.friendlyIo(java.net.ConnectException("Connection refused")).contains("连不上服务器"))
+        // 读超时（非连接阶段）给「响应超时」文案
+        assertTrue(AiClient.friendlyIo(java.net.SocketTimeoutException("Read timed out")).contains("响应超时"))
+        // 无 message 异常不至于崩
+        assertTrue(AiClient.friendlyIo(java.io.IOException()).contains("网络连接失败"))
+    }
+
+    @Test
     fun chatJson_retryOnGarbage_thenSuccess() {
         val calls = AtomicInteger(0)
         val lastBody = ConcurrentLinkedQueue<String>()

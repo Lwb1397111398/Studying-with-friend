@@ -23,7 +23,11 @@ import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.addJsonObject
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.ConnectException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import kotlin.coroutines.coroutineContext
 
 /** AI 调用失败，message 为可直接展示的中文；httpCode 非 2xx 时携带（M4 粗读用于区分可否重试） */
@@ -94,7 +98,7 @@ object AiClient {
             } catch (e: AiException) {
                 throw e
             } catch (e: IOException) {
-                throw AiException("网络异常：${e.message ?: "连接失败"}")
+                throw AiException(friendlyIo(e))
             } catch (e: Exception) {
                 throw AiException("拉取模型列表失败：${e.message ?: "未知错误"}")
             } finally {
@@ -185,7 +189,7 @@ object AiClient {
             } catch (e: IOException) {
                 // disconnect 触发的"取消型" IOException 还原为取消，不冒充网络错误
                 if (job?.isCancelled == true) throw CancellationException("cancelled")
-                throw AiException("网络异常：${e.message ?: "连接失败"}")
+                throw AiException(friendlyIo(e))
             } catch (e: Exception) {
                 if (job?.isCancelled == true) throw CancellationException("cancelled")
                 throw AiException("请求失败：${e.message ?: "未知错误"}")
@@ -345,6 +349,26 @@ object AiClient {
         404 -> "接口路径不存在，检查 API 地址"
         429 -> "请求太频繁或额度用尽"
         else -> "请求失败（HTTP $code）${if (body.isNotBlank()) "：$body" else ""}"
+    }
+
+    /**
+     * 连接层错误人话化（实景体验轮 2026-11-21）：此前直接把 Java 异常原文亮给用户
+     * （实测「网络异常： failed to connect to vsllm.com/2a03:2880:… after 15000ms」）。
+     * 按异常类型给可操作的人话建议，技术细节截短附后供反馈排查。
+     */
+    internal fun friendlyIo(e: IOException): String {
+        val detail = (e.message ?: "").take(120)
+        val msg = e.message ?: ""
+        val hint = when (e) {
+            is UnknownHostException -> "域名解析失败——检查 API 地址拼写，或当前网络访问不了该域名"
+            is ConnectException -> "连不上服务器——检查网络，或该地址需要代理才能访问"
+            is SocketTimeoutException ->
+                if (msg.contains("connect", ignoreCase = true)) "连接超时——网络不通、服务器无响应，或该地址需要代理"
+                else "服务器响应超时——稍后重试，或换更快的模型"
+            is SSLException -> "HTTPS 握手失败——检查 API 地址是否正确、端口是否被拦截"
+            else -> "网络连接失败——检查网络后重试"
+        }
+        return if (detail.isBlank()) hint else "$hint（详情：$detail）"
     }
 
     /** 只读错误响应前 300 字节（低内存友好），errorStream 缺失返回空串 */

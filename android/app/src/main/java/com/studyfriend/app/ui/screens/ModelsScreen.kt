@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -27,6 +28,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -397,20 +399,28 @@ private fun OcrCard(vm: ModelsViewModel) {
 
 // ============ 档案编辑弹层 ============
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EditorDialog(vm: ModelsViewModel) {
     vm.editor?.let { ed ->
-        AlertDialog(
-            onDismissRequest = { vm.closeEditor() },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-            modifier = Modifier.widthIn(max = 560.dp),
-            title = { Text(if (ed.isNew) "新建档案" else "编辑档案") },
-            text = {
-                Column(
-                    Modifier.verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    ModelInput(
+        // 底部抽屉（实景体验轮 2026-11-21）：原 AlertDialog 在键盘弹出时保存按钮被键盘
+        // 盖住（compose ui 1.7 的 DialogProperties 无 softInputMode，窗默认 ADJUST_PAN，
+        // imePadding/RESIZE workaround 都救不动 M3 AlertDialog 不收缩的 text 区）。
+        // 换项目内久经键盘考验的 ModalBottomSheet（随手问/Aa 弹层同款）——sheet 内容随
+        // 键盘收缩，内嵌取消/保存按钮始终可达；Gboard 吞 BACK 的问题随弹层形态一并消失
+        ModalBottomSheet(onDismissRequest = { vm.closeEditor() }) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    if (ed.isNew) "新建档案" else "编辑档案",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                ModelInput(
                         value = ed.name,
                         onValueChange = { v -> vm.updateEditor { it.copy(name = v) } },
                         label = "档案名称",
@@ -482,17 +492,21 @@ private fun EditorDialog(vm: ModelsViewModel) {
                             ),
                         ) { Text("删除此档案") }
                     }
+                // 取消/保存放在 sheet 内容底部：键盘弹出时 sheet 收缩，按钮始终在可视区内
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp, bottom = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = { vm.closeEditor() }) { Text("取消") }
+                    Button(onClick = { vm.saveEditor() }, enabled = !vm.editorBusy) {
+                        Text(if (vm.editorBusy) "保存中…" else "保存")
+                    }
                 }
-            },
-            confirmButton = {
-                Button(onClick = { vm.saveEditor() }, enabled = !vm.editorBusy) {
-                    Text(if (vm.editorBusy) "保存中…" else "保存")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { vm.closeEditor() }) { Text("取消") }
-            },
-        )
+            }
+        }
     }
 }
 

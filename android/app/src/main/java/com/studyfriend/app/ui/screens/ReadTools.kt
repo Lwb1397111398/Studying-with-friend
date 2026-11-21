@@ -465,7 +465,11 @@ internal fun SelectionFloatBar(
     val barWpx = with(density) { 356.dp.toPx() }.toInt()
     val barHpx = with(density) { 52.dp.toPx() }.toInt()
     val gap = with(density) { 8.dp.toPx() }.toInt()
-    val x = (anchor.x - boxOrigin.x - barWpx / 2).coerceIn(0, (screenWpx - barWpx).coerceAtLeast(0))
+    // 水平方向留 16dp 屏幕安全边距（实景体验轮 2026-11-21：此前钳 0~屏宽，选中屏幕左端的
+    // 文字时浮条「问含义」按钮顶死屏幕边，窄屏/全面屏手势区观感差）
+    val edge = with(density) { 16.dp.toPx() }.toInt()
+    val x = (anchor.x - boxOrigin.x - barWpx / 2)
+        .coerceIn(edge, (screenWpx - barWpx - edge).coerceAtLeast(edge))
     val y = (anchor.y - boxOrigin.y - barHpx - gap).coerceAtLeast(0)
     // dismissOnClickOutside 必须显式关：部分 Compose 版本非 focusable Popup 也会把浮条外
     // 的按下判成 outside → onDismissRequest 清选区，拖把手 down 一落选区就没了（模拟器实测）

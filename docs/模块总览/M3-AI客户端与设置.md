@@ -81,6 +81,8 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
 
 ## 最后更新
 
+- 2026-11-21 **实景体验轮第三波（本轮，主测《债法原理-王泽鉴2022》装机）两件**：①**连接层错误人话化**——`AiClient.friendlyIo(e)` 新增：按 IOException 类型给人话建议（UnknownHost→域名解析失败/ConnectException→连不上服务器/SocketTimeout→连接超时或响应超时（按 message 含 connect 区分）/SSLException→HTTPS 握手失败/其余→网络连接失败），技术细节截 120 字附「（详情：…）」；chat 与 listModels 两处 `catch (IOException)` 从「网络异常：${e.message}」改走 friendlyIo——装机实录随手问把 OkHttp 连接超时 Java 原文（`failed to connect to vsllm.com/2a03:2880:… after 15000ms`）整段亮给用户。AiClientTest +1 例（4 类型断言+长度上限）。②**编辑档案弹层换 ModalBottomSheet**——原 AlertDialog 在键盘弹出时保存按钮被键盘盖住（compose ui 1.7 DialogProperties 无 softInputMode 参数、窗默认 ADJUST_PAN，decorFitsSystemWindows=false+imePadding+DialogWindowProvider 改 RESIZE 三招都救不动 M3 AlertDialog 不收缩的 text 区，dumpsys 实测三次复现）；换项目内久经键盘考验的 ModalBottomSheet（随手问/Aa 弹层同款），表单字段原样、取消/保存内嵌 sheet 底部，键盘弹出内容收缩按钮全程可达。装机复测：抽屉形态全字段+保存按钮可见（截图 bookocr-kit/.e2e/user_exp3/09_fix_save_reachable.png）。
+
 - 2026-11-21 **实景体验轮第二波设置页一件**：AI 模型卡未配置文案「主力：gpt-4o-mini（未配置 API Key）」→「主力：未配置 API Key，点进去填好就能用」——装机实录新装机显示默认档案模型名是噪音（Key 都没填，模型名没有意义），文案改动作引导（SettingsScreen.kt）。已配置时仍显示「主力：<模型名>」不变。
 
 - 2026-11-15 **P0-② 降档梯子轮**：AiClient.chatJson 加「JSON mode→纯 prompt+剥壳提取→校验重试」降档链（详见功能清单「JSON 剥壳与修复重试」行）；`ChatRequest` 加 `jsonMode` 字段（默认 false 零回归面）；chatJson 签名 validate 挂 onDelta 前（保持全部既有尾随 lambda 调用语义）；`AiClientChatJsonFn` 适配器改 onDelta 命名传参。AiClientTest +3 例（response_format 进请求体 / 400 降档不再带 / 校验失败纠正语重试后抛结构不合格）。接入方：QuizJudge（M5 同日条）。粗读归并等其余 chatJson 调用方行为零变化（后续任务按需接入 jsonMode）。

@@ -43,6 +43,15 @@ class ParaHeadingsTest {
     }
 
     @Test
+    fun l2_kuanOcrVariants() {
+        // 《债法原理》装机实录：扫描书把「第」认成「笫/苐」高频混淆字，款级标题不能漏判
+        assertEquals(2, ParaHeadings.level("笫一款债之意义"))
+        assertEquals(2, ParaHeadings.level("苐二款债法的编制体系"))
+        // 混淆字形态同样守并列句防护
+        assertEquals(0, ParaHeadings.level("笫三款、第四款规定的适用"))
+    }
+
+    @Test
     fun l2_kuanGuards() {
         // 「第三款、第四款规定的适用」并列句：款后接顿号 → 正文
         assertEquals(0, ParaHeadings.level("第三款、第四款规定的适用"))
