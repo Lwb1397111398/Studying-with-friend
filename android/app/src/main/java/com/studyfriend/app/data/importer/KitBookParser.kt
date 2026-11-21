@@ -157,7 +157,66 @@ object KitBookParser {
             }
             if (paras.isNotEmpty()) result.add(ParsedChapter(def.title, paras))
         }
-        return result
+        return filterFrontMatter(result)
+    }
+
+    /** 简目形态行：以「/ 075」式页码尾巴收尾（编扉页/分编目录页的行特征，实景轮 2026-11-21） */
+    private val RE_TOC_TAIL = Regex("""/\s*\d{1,4}\s*$""")
+
+    /** 编级标题：第X编（编扉页残片判据用） */
+    private val RE_VOLUME_TITLE = Regex("""^第[一二三四五六七八九十百]+编""")
+
+    /** 目录/扉页行的无标点特征：不含任何句读标点（正文段几乎必有标点） */
+    private val RE_NO_PUNCT = Regex("""^[^，。；：！？、,.;:!?]*$""")
+
+    /**
+     * 编扉页假章剔除（实景体验轮 2026-11-21）：《民法总论_Kit图包》实录——书前部的
+     * 「编扉页」（印编名+该编简目，1~5 页）被电脑侧标 BODY 成章，与后文真章重名混排、
+     * 顺序错乱，用户点进去全是目录行。三类判据（只动 KIT 链路，TXT/PDF 不经此处）：
+     * 1. 编级残片：章名「第X编」且全文 <200 字（p30 扉页碎页 3 段 23 字实录）；
+     * 2. 简目形态章：段数 ≥5、中位段长 ≤40 字，且满足其一——
+     *    a) ≥70% 段以「/ 页码」尾巴收尾（分编总目录页实录：p18~29「第一章 民法基础 / 003」）；
+     *    b) ≥70% 段无句读标点且全文 <3000 字（编扉页纯标题行实录：p15~17「第三章 法律行为
+     *       的本质」无页码尾巴；无标点占比约束下正文章不可能命中）；
+     * 3. 重名兜底：剔除后仍同名的 BODY 章（「第九章　代理」扉页行 1 段 vs 正文 354 段
+     *    实录），保留总字数最大者。目录/序言章（TOC/FRONT）不参与。
+     * 全部判据为保守约束（宁漏不误杀），纯函数供单测。
+     */
+    internal fun filterFrontMatter(chapters: List<ParsedChapter>): List<ParsedChapter> {
+        val isBody = chapters.map { it.paras.firstOrNull()?.role == DbValues.ROLE_BODY }
+        val drop = BooleanArray(chapters.size)
+        chapters.forEachIndexed { i, ch ->
+            if (!isBody[i]) return@forEachIndexed
+            // 判据 1：编级残片（「第X编」且全文 <200 字）
+            val chars = ch.paras.sumOf { it.text.length }
+            if (chars < 200 && RE_VOLUME_TITLE.containsMatchIn(ch.title.trim())) {
+                drop[i] = true
+                return@forEachIndexed
+            }
+            // 判据 2：简目形态章（段数 ≥5 + 中位段长 ≤40 + 页码尾巴/无标点短行两形态其一）
+            if (ch.paras.size >= 5) {
+                val lens = ch.paras.map { it.text.length }.sorted()
+                val median = lens[lens.size / 2]
+                if (median <= 40) {
+                    val tailHits = ch.paras.count { RE_TOC_TAIL.containsMatchIn(it.text.trim()) }
+                    val noPunctHits = ch.paras.count { RE_NO_PUNCT.matches(it.text.trim()) }
+                    val tailOk = tailHits * 10 >= ch.paras.size * 7
+                    val noPunctOk = noPunctHits * 10 >= ch.paras.size * 7 && chars < 3000
+                    if (tailOk || noPunctOk) drop[i] = true
+                }
+            }
+        }
+        // 判据 3：重名兜底——幸存 BODY 章去空白同名时只留总字数最大者
+        val survivors = chapters.withIndex().filter { (i, _) -> isBody[i] && !drop[i] }
+        val byTitle = survivors.groupBy { (_, ch) -> ch.title.filter { c -> !c.isWhitespace() } }
+        for ((i, ch) in survivors) {
+            val key = ch.title.filter { c -> !c.isWhitespace() }
+            val group = byTitle.getValue(key)
+            if (group.size <= 1) continue
+            val best = group.maxBy { (_, c) -> c.paras.sumOf { p -> p.text.length } }
+            if (best.index != i) drop[i] = true
+        }
+        return chapters.filterIndexed { i, _ -> !drop[i] }
     }
 
     /** kit 章表 role → ParagraphEntity role（TOC 章整章段标 TOC：次级展示 + AI 跳过） */

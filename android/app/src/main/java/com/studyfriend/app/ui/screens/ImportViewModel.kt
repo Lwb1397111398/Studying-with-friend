@@ -420,10 +420,15 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 editedTitles.clear()
                 deleted = emptySet()
                 drainImportDone()
-                if (bookTitle.isBlank()) {
-                    // KIT 书优先用电脑侧元数据书名（zip 图包文件名固定带「_Kit图包」尾巴，
-                    // 直接取文件名会把尾巴带进书名）
-                    bookTitle = KitBookParser.preferredTitle(kitMeta?.title, name)
+                // KIT 书用电脑侧元数据书名直接覆盖（实景轮 2026-11-21：kit.json title 是
+                // 电脑侧权威书名，用户在导入页随手填的占位名应被替换，不满意可在书架重命名）；
+                // 无元数据时保持原状——只在书名空白时用文件名兜底（zip 图包文件名固定带
+                // 「_Kit图包」尾巴，直接取文件名会把尾巴带进书名）
+                val kitTitle = kitMeta?.title?.takeIf { it.isNotBlank() }
+                bookTitle = when {
+                    kitTitle != null -> kitTitle
+                    bookTitle.isBlank() -> KitBookParser.preferredTitle(null, name)
+                    else -> bookTitle
                 }
                 parse()
                 // 批B：大书 OCR/提取期间用户可离开导入页（识别在 viewModelScope 后台继续）；

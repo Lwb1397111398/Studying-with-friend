@@ -146,33 +146,50 @@ class RoughReadPlanner(
         var interruptedAt: Int? = null
         var interruptedReason: String? = null
 
+        var markedReading = false
         if (!mergeOnly) {
-            if (chapter.readState != "DONE") db.chapterDao().updateReadState(chapterId, "READING")
+            if (chapter.readState != "DONE") {
+                db.chapterDao().updateReadState(chapterId, "READING")
+                markedReading = true
+            }
 
-            for ((bi, block) in blocks.withIndex()) {
-                coroutineContext.ensureActive()
-                val allMarked = block.paragraphs.all { it.aiAction != AiAction.NONE.name }
-                if (!force && allMarked) {
-                    done++
-                    onProgress(done, blocks.size)
-                    continue
+            try {
+                for ((bi, block) in blocks.withIndex()) {
+                    coroutineContext.ensureActive()
+                    val allMarked = block.paragraphs.all { it.aiAction != AiAction.NONE.name }
+                    if (!force && allMarked) {
+                        done++
+                        onProgress(done, blocks.size)
+                        continue
+                    }
+                    try {
+                        val outcome = runBlockWithRetry(block, bi, systemPrompt, blocks.size, chapterChars, noteLlm)
+                        coroutineContext.ensureActive() // 重试间隙取消：立即退出，已完成块保留
+                        applyDecisions(block, outcome.decisions)
+                        blockGists[bi] = outcome.plan.gist.take(200)
+                        blockTerms[bi] = outcome.plan.keyTerms.take(10)
+                            .map { KeyTermsCodec.TermPlain(it.term.take(30), it.plain.take(60)) }
+                        done++
+                        onProgress(done, blocks.size)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        interruptedAt = bi + 1 // 中断于第 N 块；已完成块已落库
+                        interruptedReason = e.message ?: (e::class.simpleName ?: "未知错误")
+                        break
+                    }
                 }
-                try {
-                    val outcome = runBlockWithRetry(block, bi, systemPrompt, blocks.size, chapterChars, noteLlm)
-                    coroutineContext.ensureActive() // 重试间隙取消：立即退出，已完成块保留
-                    applyDecisions(block, outcome.decisions)
-                    blockGists[bi] = outcome.plan.gist.take(200)
-                    blockTerms[bi] = outcome.plan.keyTerms.take(10)
-                        .map { KeyTermsCodec.TermPlain(it.term.take(30), it.plain.take(60)) }
-                    done++
-                    onProgress(done, blocks.size)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    interruptedAt = bi + 1 // 中断于第 N 块；已完成块已落库
-                    interruptedReason = e.message ?: (e::class.simpleName ?: "未知错误")
-                    break
-                }
+            } catch (e: CancellationException) {
+                // 取消且零成果：回滚「在读」，不留卡死态（实景轮 2026-11-21；有成果保留进度语义）
+                rollbackReadingIfNoProgress(chapter, done, markedReading)
+                throw e
+            }
+            // 中断且零成果（0 块完成、无 gist）：回滚「在读」→ 未读（实景轮 2026-11-21
+            // 实录——429 限流首块即挂，章永远卡「在读 0/0」，粗读按钮全禁用）。有部分
+            // 成果（done>0 或 gist 已有）时保留 READING：它真实反映「读到一半」的进度，
+            // 重跑时空转保护仍按段落 aiAction 续跑不烧钱。
+            if (interruptedAt != null && markedReading && done == 0 && chapter.gist == null) {
+                db.chapterDao().updateReadState(chapterId, DbValues.READ_NOT)
             }
         } else {
             done = blocks.size
@@ -211,6 +228,17 @@ class RoughReadPlanner(
 
     /** 全部块已完成但 gist 为空（上次归并前中断）或完成态重试：只跑归并，不受空转保护限制 */
     suspend fun runMergeOnly(chapterId: Long): RoughReadOutcome = run(chapterId, force = false, mergeOnly = true)
+
+    /** 取消且零成果时回滚「在读」→ 未读（防章永远卡在读中断态；有部分成果/原为完成态时不回滚） */
+    private suspend fun rollbackReadingIfNoProgress(
+        chapter: com.studyfriend.app.data.db.ChapterEntity,
+        doneBlocks: Int,
+        markedReading: Boolean,
+    ) {
+        if (markedReading && doneBlocks == 0 && chapter.gist == null) {
+            db.chapterDao().updateReadState(chapter.id, DbValues.READ_NOT)
+        }
+    }
 
     // ---------- 块执行 ----------
 

@@ -66,4 +66,23 @@ class BookAnalysisScopeTest {
         assertEquals(0, plan.targetCount)
         assertEquals(0, plan.skippedCount)
     }
+
+    @Test
+    fun tinyFragmentChapter_skippedByCharCount() {
+        // 实景轮 2026-11-21：切章错误的 Kit 书带 1 段几字的扉页残章——<50 字不烧 API
+        val plan = BookAnalysisScope.plan(
+            listOf("第一章 民法基础", "第九章　代理", "第三章　法律行为的本质"),
+            charCounts = listOf(34620, 5, 1153),
+        )
+        assertEquals(listOf(0, 2), plan.targets)
+        assertEquals(1, plan.skippedCount)
+        assertEquals("第九章　代理", plan.skipped[0].second)
+    }
+
+    @Test
+    fun charCountNull_disablesFragmentSkip() {
+        // 不传字数（旧调用方）行为不变：残章仍进分析清单
+        val plan = BookAnalysisScope.plan(listOf("第一章 民法基础", "第九章　代理"))
+        assertEquals(listOf(0, 1), plan.targets)
+    }
 }

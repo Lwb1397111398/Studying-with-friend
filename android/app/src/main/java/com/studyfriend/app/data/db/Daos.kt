@@ -233,6 +233,14 @@ interface ParagraphDao {
         ORDER BY c.idx, p.idx LIMIT :limit""",
     )
     suspend fun searchInBook(bookId: Long, pattern: String, limit: Int): List<SearchHit>
+
+    /** 每章正文字数汇总（一键分析残章跳过用；无段落的章不在结果里，按 0 处理） */
+    @Query(
+        """SELECT p.chapterId AS chapterId, SUM(LENGTH(p.text)) AS chars
+        FROM paragraphs p JOIN chapters c ON p.chapterId = c.id
+        WHERE c.bookId = :bookId GROUP BY p.chapterId""",
+    )
+    suspend fun charsByBook(bookId: Long): List<ChapterChars>
 }
 
 /** 搜索结果行（v7）：段命中 + 所属章信息（点结果跳章滚动到段） */
@@ -243,6 +251,12 @@ data class SearchHit(
     val chapterTitle: String,
     val paraIdx: Int,
     val text: String,
+)
+
+/** 每章字数行（一键分析残章跳过用） */
+data class ChapterChars(
+    val chapterId: Long,
+    val chars: Int?,
 )
 
 /** LIKE 模式串：转义用户输入里的 % _ \（ESCAPE '\' 口径），两端包 % 做包含匹配 */

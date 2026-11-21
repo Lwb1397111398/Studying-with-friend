@@ -81,7 +81,13 @@ class BookAnalysisRunner(
         if (chapters.isEmpty()) {
             return BookAnalysisState.Succeeded(bookId, "这本书还没有章节")
         }
-        val plan = BookAnalysisScope.plan(chapters.map { it.title })
+        // 残章跳过（实景轮 2026-11-21）：按每章字数把 1 段几字的扉页残章剔出分析清单，
+        // 粗读对这种章发分类请求纯烧 API 且产出无意义（0 段章 RoughReadPlanner 已兜）
+        val charsById = db.paragraphDao().charsByBook(bookId).associate { it.chapterId to (it.chars ?: 0) }
+        val plan = BookAnalysisScope.plan(
+            chapters.map { it.title },
+            chapters.map { charsById[it.id] ?: 0 },
+        )
         if (plan.targets.isEmpty()) {
             return BookAnalysisState.Succeeded(bookId, "没有识别出正文章节（全部是开篇/目录/后置件），无需分析")
         }

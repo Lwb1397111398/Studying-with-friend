@@ -245,4 +245,98 @@ class KitBookParserTest {
             KitBookParser.preferredTitle(null, "导入这个_民法思维-王泽鉴2022_Kit图包.zip"),
         )
     }
+
+    // ---- filterFrontMatter：编扉页假章剔除（实景体验轮 2026-11-21） ----
+
+    /** 正文段（长、无页码尾巴） */
+    private fun bodyPara(text: String) = ParsedPara(text, DbValues.ROLE_BODY)
+
+    /** 简目形态行（编扉页/分编目录页特征：「标题 / 075」页码尾巴） */
+    private fun tocLine(title: String, page: Int) =
+        ParsedPara("$title / ${"%03d".format(page)}", DbValues.ROLE_BODY)
+
+    @Test
+    fun frontMatter_dropsVolumeTocChapter_keepsRealChapter() {
+        // 《民法总论》实景：书前「第二编 法律行为」编简目章（简目行为主）与后文同名真章混排
+        val tocLines = (1..20).map { tocLine("第${it}节 概念_$it", 75 + it) }
+        val realParas = (1..100).map { bodyPara("这是第二章真正的正文第${it}段，内容足够长，包含标点和完整句子。") }
+        val chapters = listOf(
+            ParsedChapter("开篇", listOf(ParsedPara("序言正文。", DbValues.ROLE_FRONT))),
+            ParsedChapter("第二编 法律行为", tocLines), // 编简目假章
+            ParsedChapter("第二编 法律行为", realParas), // 同名真章
+        )
+        val out = KitBookParser.filterFrontMatter(chapters)
+        assertEquals(listOf("开篇", "第二编 法律行为"), out.map { it.title })
+        assertEquals(realParas, out[1].paras)
+    }
+
+    @Test
+    fun frontMatter_dropsTinyVolumeFragment() {
+        // 编级残片：「第一编 | 基础理论」3 段 23 字（p30 扉页碎页实录）
+        val chapters = listOf(
+            ParsedChapter("第一编 | 基础理论", listOf(bodyPara("第一编"), bodyPara("基础理论"), bodyPara("第一章"))),
+            ParsedChapter("第一章 民法基础", (1..30).map { bodyPara("民法基础正文第${it}段，内容充实，完整成句。") }),
+        )
+        val out = KitBookParser.filterFrontMatter(chapters)
+        assertEquals(listOf("第一章 民法基础"), out.map { it.title })
+    }
+
+    @Test
+    fun frontMatter_dedupesSameTitleBodyChapters() {
+        // 重名兜底：扉页行「第九章　代理」1 段 5 字 vs 正文「第九章　代　理」354 段——去空白同名，留大
+        val chapters = listOf(
+            ParsedChapter("第九章　代理", listOf(bodyPara("代理"))),
+            ParsedChapter("第九章　代　理", (1..50).map { bodyPara("代理正文第${it}段，讨论代理权的发生与消灭。") }),
+        )
+        val out = KitBookParser.filterFrontMatter(chapters)
+        assertEquals(1, out.size)
+        assertEquals(50, out[0].paras.size)
+    }
+
+    @Test
+    fun frontMatter_keepsNormalChaptersUntouched() {
+        // 正常书：正文段无页码尾巴、段长中位高——零误杀；目录/序言章不参与判定原样保留
+        val chapters = listOf(
+            ParsedChapter("目录", listOf(ParsedPara("第一章……4", DbValues.ROLE_TOC))),
+            ParsedChapter("第二版序", listOf(ParsedPara("序言。", DbValues.ROLE_FRONT))),
+            ParsedChapter("第一章 总则", (1..20).map { bodyPara("总则正文第${it}段，句子完整且篇幅正常，不出现页码尾巴。") }),
+        )
+        val out = KitBookParser.filterFrontMatter(chapters)
+        assertEquals(chapters.map { it.title }, out.map { it.title })
+    }
+
+    @Test
+    fun frontMatter_shortTocChapterConservative() {
+        // 保守约束：段数 <5 的简目形态章不剔（宁漏不误杀）；章名非编级——
+        // 编级超短章会命中判据 1 被剔（dropsTinyVolumeFragment 已覆盖）
+        val chapters = listOf(
+            ParsedChapter("第四部分 权利理论", (1..4).map { tocLine("第${it}节", 75) }),
+        )
+        val out = KitBookParser.filterFrontMatter(chapters)
+        assertEquals(1, out.size)
+    }
+
+    @Test
+    fun frontMatter_dropsPunctFreeShortLineChapter() {
+        // 编扉页纯标题行形态（p15~17 实录）：行无页码尾巴也无句读标点——2b 判据
+        val plainLines = (1..12).map { bodyPara("第${it}章 法律行为的本质_$it") }
+        val realParas = (1..50).map { bodyPara("这一编的正文第${it}段，带标点的完整句子，内容充实。") }
+        val out = KitBookParser.filterFrontMatter(
+            listOf(
+                ParsedChapter("第二编 法律行为", plainLines), // 扉页纯标题行假章
+                ParsedChapter("第一编 基础理论", realParas), // 同字数区间的真章对照（带标点不剔）
+            ),
+        )
+        assertEquals(listOf("第一编 基础理论"), out.map { it.title })
+    }
+
+    @Test
+    fun frontMatter_longMedianChaptersConservative() {
+        // 中位段长 >40 的章不剔（长段正文书零误杀，即使偶有几行带页码尾巴）
+        val paras = (1..20).map {
+            if (it <= 5) tocLine("第${it}节", 75) else bodyPara("这一段是完整的正文段落，长度超过四十个字的门槛线，因此中位数不满足简目章判据，应当保留。")
+        }
+        val out = KitBookParser.filterFrontMatter(listOf(ParsedChapter("第一章 总则", paras)))
+        assertEquals(1, out.size)
+    }
 }
