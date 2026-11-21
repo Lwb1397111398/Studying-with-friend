@@ -1,24 +1,30 @@
 package com.studyfriend.app.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -39,6 +45,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -109,6 +117,14 @@ internal fun ChapterToolsRow(
     var showRoughForceConfirm by remember { mutableStateOf(false) }
     var showNoteForceConfirm by remember { mutableStateOf(false) }
 
+    // 阅读主题包（第六波）：固定暗纸色（墨玉/纯黑）下全局浅色主题的 chip 文字/描边
+    // 对比不足（装机实录「粗读/朗读」暗琥珀压黑棕几乎不可见）——文字跟随纸色，
+    // 描边用主题次级色弱化一档；跟随主题时 Color.Unspecified 回退 M3 现状
+    val rt = LocalReadingTheme.current
+    val chipText = rt?.text ?: Color.Unspecified
+    val chipColors = AssistChipDefaults.assistChipColors(labelColor = chipText)
+    val chipBorder = rt?.let { BorderStroke(1.dp, it.secondary.copy(alpha = 0.55f)) }
+
     Column(Modifier.fillMaxWidth()) {
         // 工具 chips 行：横向可滚（窄屏四个 chip 放得下，保险起见可滚）
         Row(
@@ -131,6 +147,8 @@ internal fun ChapterToolsRow(
                 onClick = { if (allMarked) showRoughForceConfirm = true else onStart() },
                 enabled = paragraphCount > 0 && !pureToc && !roughBusy && !runningOther,
                 label = { Text(roughLabel) },
+                colors = chipColors,
+                border = chipBorder,
             )
             // 讲解 chip：无可讲解单元（纯目录章等）不显示
             if (noteUnitCount > 0) {
@@ -147,21 +165,30 @@ internal fun ChapterToolsRow(
                     },
                     enabled = !noteBusy,
                     label = { Text(noteLabel) },
+                    colors = chipColors,
+                    border = chipBorder,
                 )
             }
             // 章末总结入口：本章已粗读标注即可进入（M5 §3.7）
             if (markedCount > 0) {
-                AssistChip(onClick = onOpenSummary, label = { Text("总结") })
+                AssistChip(onClick = onOpenSummary, label = { Text("总结") }, colors = chipColors, border = chipBorder)
             }
             // 要点卡开关：本章要点存在才显示
             if (hasGist) {
-                AssistChip(onClick = onToggleGist, label = { Text(if (gistExpanded) "收起要点" else "要点") })
+                AssistChip(
+                    onClick = onToggleGist,
+                    label = { Text(if (gistExpanded) "收起要点" else "要点") },
+                    colors = chipColors,
+                    border = chipBorder,
+                )
             }
             // v7 正文听书：有可读段才显示；朗读中变「停止朗读」
             if (ttsAvailable) {
                 AssistChip(
                     onClick = onToggleTts,
                     label = { Text(if (ttsActive) "停止朗读" else "朗读") },
+                    colors = chipColors,
+                    border = chipBorder,
                 )
             }
         }
@@ -361,7 +388,9 @@ private fun TaskProgressRow(label: String, progress: Float, onStop: () -> Unit) 
 
 /** 阅读字号/行距弹层（功能补齐轮）：无级 Slider 即拖即预览（onChange 由调用方改内存态），
  *  关弹层时由调用方统一存库；「恢复默认」= 18sp / 1.7 倍。
- *  体验优化轮：+翻页模式开关（点屏幕两侧/左右滑翻页，即时存库即时生效） */
+ *  体验优化轮：+翻页模式开关（点屏幕两侧/左右滑翻页，即时存库即时生效）。
+ *  第六波：+阅读背景色卡（跟随书房/纸白/羊皮纸/护眼绿/墨玉/纯黑，即点即存即时生效）
+ *  与音量键翻页开关（单手翻条文，借鉴 legado） */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FontSizeSheet(
@@ -369,6 +398,10 @@ internal fun FontSizeSheet(
     lineHeightMult: Float,
     pageMode: Boolean,
     onPageModeChange: (Boolean) -> Unit,
+    themeId: String,
+    onThemeChange: (String) -> Unit,
+    volumeKey: Boolean,
+    onVolumeKeyChange: (Boolean) -> Unit,
     onChange: (Int, Float) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -442,7 +475,84 @@ internal fun FontSizeSheet(
                 }
                 Switch(checked = pageMode, onCheckedChange = onPageModeChange)
             }
+
+            Spacer(Modifier.height(12.dp))
+            // 阅读背景（第六波）：色卡行即点即存——圆底色块 + 选中描边，首项是「跟随书房」
+            Text("阅读背景", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                // 「跟随书房」色卡：画一个 4 象限示意（浅暖纸 + 深暖墨各半）
+                ThemeSwatch(
+                    selected = themeId == SettingsRepository.KEY_READ_THEME_DEFAULT,
+                    label = "跟随",
+                    follow = true,
+                    onClick = { onThemeChange(SettingsRepository.KEY_READ_THEME_DEFAULT) },
+                )
+                ReadingTheme.ALL.forEach { t ->
+                    ThemeSwatch(selected = themeId == t.id, label = t.label, bg = t.bg, onClick = { onThemeChange(t.id) })
+                }
+            }
+            Text(
+                "护眼绿/纯黑适合长时间夜读；纯黑省电最明显（OLED）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+
+            Spacer(Modifier.height(12.dp))
+            // 音量键翻页（第六波，借鉴 legado）：开=音量加/减翻上/下一页，单手翻条文不摸屏幕
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("音量键翻页", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "音量加=上一页、音量减=下一页",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = volumeKey, onCheckedChange = onVolumeKeyChange)
+            }
         }
+    }
+}
+
+/** Aa 弹层阅读背景色卡（第六波）：40dp 圆形色块，选中=主色描边 + 底部小字。
+ *  follow=true 时画 4 象限示意（浅暖纸+深暖墨），表达「跟随全局主题」的语义 */
+@Composable
+private fun ThemeSwatch(
+    selected: Boolean,
+    label: String,
+    follow: Boolean = false,
+    bg: Color = Color.Transparent,
+    onClick: () -> Unit,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Surface(
+            shape = CircleShape,
+            color = bg,
+            border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onClick),
+        ) {
+            if (follow) {
+                Row(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(1f).fillMaxSize().background(Color(0xFFFAF4E2)))
+                    Box(Modifier.weight(1f).fillMaxSize().background(Color(0xFF2B2926)))
+                }
+            }
+        }
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
     }
 }
 

@@ -1,5 +1,6 @@
 package com.studyfriend.app.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
@@ -277,16 +279,33 @@ private fun ChapterRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(
-                "${index + 1}. $title",
-                style = MaterialTheme.typography.bodyLarge,
-                textDecoration = if (deleted) TextDecoration.LineThrough else null,
-                color = if (deleted) {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                } else {
-                    MaterialTheme.colorScheme.onSurface
-                },
-            )
+            // 前置/后置件徽标（第六波）：确认目录页同样区分——开篇/目录一眼看出是可删的前置件
+            val kindBadge = ChapterKinds.badgeOf(title)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "${index + 1}. $title",
+                    style = MaterialTheme.typography.bodyLarge,
+                    textDecoration = if (deleted) TextDecoration.LineThrough else null,
+                    color = if (deleted || kindBadge != null) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                )
+                if (kindBadge != null && !deleted) {
+                    Text(
+                        kindBadge,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .background(
+                                MaterialTheme.colorScheme.surfaceVariant,
+                                RoundedCornerShape(4.dp),
+                            )
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
             if (deleted) {
                 Text(
                     "已删除 · 点击恢复",

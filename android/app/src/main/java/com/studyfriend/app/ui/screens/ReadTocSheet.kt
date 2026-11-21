@@ -3,6 +3,7 @@ package com.studyfriend.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -92,14 +93,35 @@ internal fun ReadTocSheet(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            "${ch.idx}",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
+                        // 前置/后置件徽标（第六波）：阅读抽屉里开篇/目录/附录同样弱化一档
+                        val kindBadge = ChapterKinds.badgeOf(ch.title)
+                        if (kindBadge != null) {
+                            Text(
+                                kindBadge,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .background(
+                                        MaterialTheme.colorScheme.surfaceVariant,
+                                        RoundedCornerShape(4.dp),
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        } else {
+                            Text(
+                                "${ch.idx}",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                         Text(
                             ch.title,
                             style = MaterialTheme.typography.bodyMedium,
+                            color = if (kindBadge != null && !current) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                Color.Unspecified
+                            },
                             fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,

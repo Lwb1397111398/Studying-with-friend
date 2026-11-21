@@ -35,6 +35,13 @@ class StudyApp : Application() {
      */
     @Volatile var readingPendingMs: Long = 0L
 
+    /**
+     * 音量键翻页 hook（实景体验轮第六波，借鉴 legado）：阅读页在前台且开关打开时注册，
+     * MainActivity.dispatchKeyEvent 命中音量键转交这里——返回 true 表示已消费（拦住系统
+     * 音量弹条）。参数 +1=下一页 / -1=上一页。非阅读页恒为 null，音量键走系统默认。
+     */
+    @Volatile var volumeKeyTurnHook: ((dir: Int) -> Boolean)? = null
+
     /** 应用级密钥仓单例（OPT-A）：keystore 优先、软件密钥兜底；设置页与双 Runner 共享 */
     val secretStore: SecretStore by lazy { ResilientSecretStore(applicationContext) }
 

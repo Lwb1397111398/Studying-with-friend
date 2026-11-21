@@ -433,6 +433,13 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                     bookTitle.isBlank() -> KitBookParser.preferredTitle(null, name)
                     else -> bookTitle
                 }
+                // 作者尾巴拆分（第六波）：《条文选注第3册》实录书名剥站源后仍带「_(朱庆育)」——
+                // 尾部作者组拆到作者栏（作者框为空时才填，用户手填优先）；书名部件括号不误伤
+                run {
+                    val (t, a) = KitBookParser.splitAuthorTail(bookTitle)
+                    if (t.isNotBlank()) bookTitle = t
+                    if (a != null && author.isBlank()) author = a
+                }
                 parse()
                 // 批B：大书 OCR/提取期间用户可离开导入页（识别在 viewModelScope 后台继续）；
                 // 完成时人不在导入页 → 通知召回（通知权限被拒时静默，回来照常看到结果）

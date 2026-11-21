@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 应用自更新（M7）：FileProvider 只开放下载更新包的缓存子目录 -->
+<!-- 实景体验轮第六波：+exports/ 读书笔记 Markdown 导出分享 -->
 <paths>
     <cache-path
         name="updates"
         path="updates/" />
+    <cache-path
+        name="exports"
+        path="exports/" />
 </paths>

@@ -186,3 +186,34 @@ EPUB 3 Media Overlays「朗读同步逐句高亮」，本地 EPUB 配 MP3/M4B �
 ### 4. 划词浮条底板（实景痛点：浮条文字直接叠在正文上）
 
 - 根因不是没底板（Surface 一直在），而是暗色主题下 `surface` 与页面背景同色系 + 阴影不可见，视觉上「无底板」。借鉴各类浮层设计惯例：底板提亮一档（`surfaceContainerHighest`）+ 0.5dp `outlineVariant` 描边，深浅两主题都浮得起来。零调研库依赖，纯 M3 设计语言修正。
+
+## 九、定向补充调研（2026-11-21 实景体验轮第六波）
+
+> 主测《中国民法典评注·条文选注（第3册）》装机实录 + 子代理第二轮开源调研（17 个新候选点，star/许可证经 gh api 实测；本轮避开一至八节已覆盖项）。本轮落地 6 件，其余候选存档按优先级排。
+
+### 本轮落地（6 件，出处与许可证）
+
+| 落地件 | 出处 | 许可证约束 | 落点 |
+| --- | --- | --- | --- |
+| 阅读背景主题包五套（纸白/羊皮纸/护眼绿/墨玉/纯黑） | legado（47.3k★，GPL，学思路）、Ominididact（Apache-2.0，「墨玉羊皮」研学主题）、华为/微信读书通行配色惯例 | 色值为公开通行方案，无风险 | ReadingTheme.kt + read_theme 键 + Aa 色卡行 |
+| 音量键翻页 | legado `volumeKeyPage`（GPL，学思路——通用 Android 技巧） | 自写实现，无风险 | MainActivity.dispatchKeyEvent + StudyApp hook + read_volume_key 键 |
+| 读书笔记导出 Markdown | readest（26.5k★，AGPL，只学模板字段思路）、anx-reader 笔记页结构（MIT） | 自写拼接，无风险 | NotesExporter.kt + 书架长按「导出笔记」+ FileProvider exports/ |
+| 书名作者尾巴拆分 | 自家 wave-4 cleanSiteTail 增强（《条文选注第3册》`_(朱庆育)` 实录） | 无 | KitBookParser.splitAuthorTail |
+| 前置/后置章徽标 | deepread（Zotero AI 精读插件，无明确许可证——只学交互思路）+ BookAnalysisScope 词族同源 | 无 | ChapterKinds.kt + 三处章行渲染 |
+| 简目页码尾巴不判级 | 自家 ParaHeadings 误杀兜底补规则 | 无 | PAGE_TAIL 正则 |
+
+### 存档候选（未排期，按性价比排序）
+
+1. **霞鹜文楷字体**（lxgw/LxgwWenKai 27.1k★，OFL-1.1 可打包）：正文可选开源字体，APK +10~20MB 是唯一代价——DESIGN.md 现有「不引外部字体」决策需老板点头再动。
+2. **选中段落长图分享卡**（legado 思路 + Compose GraphicsLayer / Capturable Apache-2.0）：原文+出处渲染成暖纸长图发微信，成本 M。
+3. **章节伴读页**（ChampionGPT/readpilot 11★，MIT）：章末总结升级「概念/论证链/关键问题/复习提示」四要素可回访页面，结构化输出链路现成，成本 M。
+4. **待弄懂清单**（deepread 思路）：划词「存疑」不烧 AI，攒一批课后集中问——与「记一笔」互补，成本 S~M。
+5. **模板化封面生成器**（generator-cover/tenprintcover 均 MIT）：书架默认封面从首字色块升级渐变纸纹+噪点，成本 S~M。
+6. **随手问对话树**（pi-tree AGPL 只学思路）：按段落锚点组织的可回访问答树，成本 M~L。
+7. **导出离线 HTML 复习页**（Ominididact Apache-2.0）：全书 AI 产出单文件 HTML，与 Markdown 导出互补，成本 M~L。
+8. **阅读页左侧亮度滑条**（legado 思路）：竖拖调软件亮度，与主题包组合成「阅读环境调节」，成本 S。
+9. **桌面续读 Widget**（androidx.glance 官方库）：4x2 书名+进度+点击续读，成本 M。
+
+### 明确不做（本轮调研复核）
+
+双语对照（场景不成立+GPL）、AI 音色克隆（算力不匹配）、跨书知识图谱（与导图重叠+成本 L）、本地向量 RAG（平板内存代价+已有轻量方案）、自定义书源（与导入制定位冲突）、WeRead 笔记同步（协议逆向合规风险）。

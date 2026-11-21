@@ -478,3 +478,39 @@ class KitBookParserTest {
         )
     }
 }
+
+// ---------- 书名尾部作者组拆分（实景体验轮第六波：《条文选注第3册》实录） ----------
+
+class KitBookParserSplitAuthorTailTest {
+
+    @Test
+    fun splitsAuthorTail() {
+        // 实录原文：站源尾巴剥掉后剩「_(朱庆育)」——拆出书名+作者
+        assertEquals(
+            "中国民法典评注·条文选注（第3册）" to "朱庆育",
+            KitBookParser.splitAuthorTail("中国民法典评注·条文选注（第3册）_(朱庆育)"),
+        )
+        // 双层作者：`_(杨立新_[杨立新])` 取 `_` 前一段、去方括号
+        assertEquals(
+            "中国民法典释义与案例评注：合同编（上）" to "杨立新",
+            KitBookParser.splitAuthorTail("中国民法典释义与案例评注：合同编（上）_(杨立新_[杨立新])"),
+        )
+        // 头衔尾巴：`_(朱庆育_主编)` 取第一段
+        assertEquals("民法总论" to "朱庆育", KitBookParser.splitAuthorTail("民法总论_(朱庆育_主编)"))
+    }
+
+    @Test
+    fun keepsTitleParts() {
+        // 书名部件括号不误伤：括号内含版本词/数字则不剥
+        assertEquals("民法典_(第3册)" to null, KitBookParser.splitAuthorTail("民法典_(第3册)"))
+        assertEquals("债法原理_(修订本)" to null, KitBookParser.splitAuthorTail("债法原理_(修订本)"))
+        assertEquals("债法原理_(上)" to null, KitBookParser.splitAuthorTail("债法原理_(上)"))
+        // 无尾巴原样返回
+        assertEquals("民法思维-王泽鉴2022" to null, KitBookParser.splitAuthorTail("民法思维-王泽鉴2022"))
+        // 《袖珍民法典评注》真实书名：部件括号在前、作者尾巴在后——只剥作者组
+        assertEquals(
+            "袖珍民法典评注(第二版)" to "杨代雄",
+            KitBookParser.splitAuthorTail("袖珍民法典评注(第二版)_(杨代雄)"),
+        )
+    }
+}

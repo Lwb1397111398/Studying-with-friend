@@ -188,6 +188,28 @@ fun ShelfScreen(
                         renameInput = book.title
                         menuFor = null
                     }) { Text("重命名") }
+                    // 导出笔记（第六波）：讲解+批注拼 Markdown 经系统分享——法学生笔记进
+                    // Obsidian/微信的出口；无内容 Toast 提示不生成空文件
+                    TextButton(onClick = {
+                        menuFor = null
+                        scope.launch {
+                            val r = com.studyfriend.app.data.export.NotesExporter.build(app.database, book, ctx.cacheDir)
+                            if (!r.hasContent || r.file == null) {
+                                android.widget.Toast.makeText(ctx, r.summary, android.widget.Toast.LENGTH_SHORT).show()
+                            } else {
+                                val uri = androidx.core.content.FileProvider.getUriForFile(
+                                    ctx, "${ctx.packageName}.update", r.file,
+                                )
+                                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "text/markdown"
+                                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                    putExtra(android.content.Intent.EXTRA_SUBJECT, "《${book.title}》读书笔记")
+                                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                ctx.startActivity(android.content.Intent.createChooser(send, "导出读书笔记"))
+                            }
+                        }
+                    }) { Text("导出笔记") }
                     if (failedPages > 0) {
                         Text(
                             "视觉增强 ${vstat!!.done}/${vstat.total}，${failedPages} 页失败",

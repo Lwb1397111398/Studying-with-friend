@@ -326,6 +326,28 @@ class SettingsRepository(
         db.settingDao().upsert(SettingEntity(KEY_READ_PAGE_MODE, if (on) "true" else "false"))
     }
 
+    // ---- 阅读背景主题包（实景体验轮第六波）："follow"=跟随书房主题（默认），
+    // ---- 其余值 = ReadingTheme.ALL 里的固定纸色；watch 供阅读页即时切换 ----
+
+    fun readThemeFlow(): Flow<String> =
+        db.settingDao().watch(KEY_READ_THEME).map { it?.takeIf { v -> v.isNotBlank() } ?: KEY_READ_THEME_DEFAULT }
+
+    suspend fun readTheme(): String =
+        db.settingDao().get(KEY_READ_THEME)?.value?.takeIf { it.isNotBlank() } ?: KEY_READ_THEME_DEFAULT
+
+    suspend fun saveReadTheme(id: String) {
+        db.settingDao().upsert(SettingEntity(KEY_READ_THEME, id))
+    }
+
+    // ---- 音量键翻页（实景体验轮第六波，借鉴 legado）：开=阅读页音量加/减翻上/下一页 ----
+
+    fun readVolumeKeyFlow(): Flow<Boolean> =
+        db.settingDao().watch(KEY_READ_VOLUME_KEY).map { it == "true" }
+
+    suspend fun saveReadVolumeKey(on: Boolean) {
+        db.settingDao().upsert(SettingEntity(KEY_READ_VOLUME_KEY, if (on) "true" else "false"))
+    }
+
     // ---- 每日阅读目标分钟（P1-⑤）：进度环/热力图色阶基准；坏值回退默认 ----
 
     suspend fun readDailyGoalMinutes(): Int =
@@ -542,6 +564,9 @@ class SettingsRepository(
         const val DEFAULT_READ_LINE_HEIGHT = 1.7f
         // 翻页模式（体验优化轮）：点屏幕两侧/左右滑翻页
         const val KEY_READ_PAGE_MODE = "read_page_mode"
+        const val KEY_READ_THEME = "read_theme"
+        const val KEY_READ_THEME_DEFAULT = "follow"
+        const val KEY_READ_VOLUME_KEY = "read_volume_key"
         // 外观主题三态（system=跟随系统）
         const val KEY_THEME = "theme_mode"
         const val THEME_SYSTEM = "system"

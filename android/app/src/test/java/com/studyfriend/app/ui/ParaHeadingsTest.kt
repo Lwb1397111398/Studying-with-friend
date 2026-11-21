@@ -105,4 +105,29 @@ class ParaHeadingsTest {
         assertTrue(ParaHeadings.isHeading("第一节 物权变动"))
         assertFalse(ParaHeadings.isHeading("物权的变动，是指物权的设立、变更、转让和消灭。"))
     }
+
+    // ---------- 页码尾巴（实景体验轮第六波：《条文选注》简目行误判修复） ----------
+
+    @Test
+    fun pageTail_isBody() {
+        // 书前简目行：编号 + 点串 + 页码区间 → 目录行不是标题（此前整页黑压压假标题）
+        assertEquals(0, ParaHeadings.level("一、规范目的与内容沿革......1-5"))
+        assertEquals(0, ParaHeadings.level("（一）规范目的......1-3"))
+        assertEquals(0, ParaHeadings.level("二、规范性质与射程……6-20"))
+        assertEquals(0, ParaHeadings.level("1. 民事自然人借款的适用.....10-14"))
+        // 全角省略号 + 单页码
+        assertEquals(0, ParaHeadings.level("（二）内容沿革……23"))
+        // 中文数字页码（「至」连写）
+        assertEquals(0, ParaHeadings.level("第三节 附论……五至八"))
+    }
+
+    @Test
+    fun realHeadingWithoutTail_stillHeading() {
+        // 防误伤：真节标题没有点串尾巴，判级不受影响
+        assertEquals(1, ParaHeadings.level("第一节 债之意义"))
+        assertEquals(2, ParaHeadings.level("一、规范目的"))
+        assertEquals(3, ParaHeadings.level("（一）规范目的"))
+        // 正文里普通的省略号（后接汉字/句读）不受页码规则影响——句读已由 BODY_PUNCT 拦
+        assertEquals(0, ParaHeadings.level("他要说的意思是……"))
+    }
 }

@@ -108,7 +108,8 @@ internal fun ParaRow(
         SelectableText(
             text = p.text,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // 阅读主题包（第六波）：固定纸色时次级文字用主题次级色（护眼绿上 onSurfaceVariant 灰字发闷）
+            color = LocalReadingTheme.current?.secondary ?: MaterialTheme.colorScheme.onSurfaceVariant,
             highlightRange = selectedRange,
             onLongPress = onLongPress,
             onSelectionChange = onSelectionChange,
@@ -407,7 +408,8 @@ private fun SelectionHandle(
 @Composable
 internal fun NextChapterCard(title: String, onClick: () -> Unit) {
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainer,
+        // 阅读主题包（第六波）：固定纸色时卡片走主题卡底色（墨玉/纯黑下 surfaceContainer 灰块突兀）
+        color = LocalReadingTheme.current?.cardBg ?: MaterialTheme.colorScheme.surfaceContainer,
         shape = RoundedCornerShape(14.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -436,7 +438,7 @@ internal fun NextChapterCard(title: String, onClick: () -> Unit) {
 @Composable
 internal fun GistCard(gist: String, keyTermsJson: String?) {
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = LocalReadingTheme.current?.cardBg ?: MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -481,7 +483,7 @@ internal fun NoteCard(
 ) {
     when {
         note != null -> Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
+            color = LocalReadingTheme.current?.cardBg ?: MaterialTheme.colorScheme.surfaceVariant,
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier
                 .fillMaxWidth()

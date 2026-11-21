@@ -66,7 +66,10 @@ private const val TAG_FIG = "FigureRow"
  */
 @Composable
 internal fun figureToneFilter(): ColorFilter? {
-    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    // 阅读主题包（第六波）：墨玉/纯黑纸色下同样刺眼——暗色判据取「阅读页实际底色」
+    // （固定主题优先，其次全局主题 surface）
+    val rt = LocalReadingTheme.current
+    val dark = (rt?.bg ?: MaterialTheme.colorScheme.surface).luminance() < 0.5f
     if (!dark) return null
     // Compose ColorMatrix 是 identity 数组，直接改 RGB 对角系数（0/5/10 位）压亮度
     val m = ColorMatrix()

@@ -5,6 +5,7 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -30,7 +31,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -45,7 +48,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
@@ -130,6 +135,11 @@ fun ReadScreen(
     var showFontSheet by remember { mutableStateOf(false) }
     // 翻页模式（体验优化轮）：true=点屏幕两侧/左右滑翻一屏；watch 设置键，Aa 弹层切换即时生效
     val pageMode by app.settingsRepo.readPageModeFlow().collectAsStateWithLifecycle(initialValue = false)
+    // 阅读背景主题包（第六波）：watch 即时切换；follow=null 走 MaterialTheme 现状
+    val readThemeId by app.settingsRepo.readThemeFlow().collectAsStateWithLifecycle(initialValue = SettingsRepository.KEY_READ_THEME_DEFAULT)
+    val readingTheme = remember(readThemeId) { ReadingTheme.byId(readThemeId) }
+    // 音量键翻页（第六波，借鉴 legado）：开=音量加/减翻上/下一页
+    val volumeKey by app.settingsRepo.readVolumeKeyFlow().collectAsStateWithLifecycle(initialValue = false)
     LaunchedEffect(Unit) {
         readFontSize = app.settingsRepo.readFontSize()
         readLineHeight = app.settingsRepo.readLineHeight()
@@ -264,12 +274,17 @@ fun ReadScreen(
     // 浮条 offset 相对根 Box；Text 上报的是 window 坐标，根 Box 原点也要记一份换算
     var rootOrigin by remember { mutableStateOf(IntOffset.Zero) }
 
+    // 阅读主题包（第六波）：固定纸色时整页染主题底色；正文默认色走 LocalContentColor
+    // （Text 无显式 color 时自动取它）；follow=null 全走现状。弹层保持主题 chrome 不染纸色
+    CompositionLocalProvider(LocalReadingTheme provides readingTheme) {
     Box(
         Modifier
             .fillMaxSize()
+            .background(readingTheme?.bg ?: Color.Transparent)
             .onGloballyPositioned { rootOrigin = it.boundsInWindow().topLeft.round() },
     ) {
-        Column(Modifier.fillMaxSize()) {
+    CompositionLocalProvider(LocalContentColor provides (readingTheme?.text ?: LocalContentColor.current)) {
+    Column(Modifier.fillMaxSize()) {
             // 上/下章切换（M4a §3.4）：按同书章序跳转，边界章禁用
             val bookId = chapter?.bookId
             // lint 误报：lambda 内有显式 value 赋值，但规则对带 keys 重载的顶层赋值不识别（嵌套 collect 形态才识别）
@@ -310,7 +325,16 @@ fun ReadScreen(
 
             // v7 沉浸模式：顶栏随单击正文收起/展开
             AnimatedVisibility(visible = chromeVisible) {
+            // 阅读主题包（第六波）：固定纸色时顶栏同染纸底，标题/图标走主题文字色，
+            // 副行走主题次级色——否则墨玉/纯黑下顶栏还是浅底深字，正文区一页两色
+            val topBarText = readingTheme?.text ?: LocalContentColor.current
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = readingTheme?.bg ?: MaterialTheme.colorScheme.surface,
+                    titleContentColor = topBarText,
+                    navigationIconContentColor = topBarText,
+                    actionIconContentColor = topBarText,
+                ),
                 title = {
                     Column {
                         // 2026-11-15 UI 打磨轮：章名两行显示不再截断（「第一章 总 …」这种半截标题就是毛坯感）
@@ -329,7 +353,7 @@ fun ReadScreen(
                             Text(
                                 "粗读 ${bp.readChapters}/${bp.totalChapters} 章 · $bookTitle",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = readingTheme?.secondary ?: MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -513,6 +537,17 @@ fun ReadScreen(
                         textW = textW,
                     )
                     listState.animateScrollToItem((targetRows + extraHeadItems).coerceAtLeast(0))
+                }
+            }
+            // 音量键翻页（第六波，借鉴 legado）：开关打开时在 App 级注册 hook，MainActivity
+            // 把音量加/减转成 turnPage(-1/+1)；离开页面注销（hook 引用比对防误删后注册的）
+            DisposableEffect(volumeKey, chapterId) {
+                val hook: (Int) -> Boolean = { dir -> turnPage(dir); true }
+                if (volumeKey) {
+                    app.volumeKeyTurnHook = hook
+                }
+                onDispose {
+                    if (app.volumeKeyTurnHook === hook) app.volumeKeyTurnHook = null
                 }
             }
             fun handleBodyTap(pos: Offset) {
@@ -805,6 +840,7 @@ fun ReadScreen(
                 )
             }
         }
+    }
 
         // 划词浮条：选中段仍存在且区间合法才显示（段落 Flow 刷新后失效自动消失）；
         // 拖把手期间隐藏（拖完随新锚点重现）
@@ -848,6 +884,7 @@ fun ReadScreen(
             }
         }
     }
+    }
 
     if (showFontSheet) {
         FontSizeSheet(
@@ -858,6 +895,10 @@ fun ReadScreen(
                 // 开关即存（Flow watch 即时生效，阅读方式切换不用等关弹层）
                 scope.launch { app.settingsRepo.saveReadPageMode(on) }
             },
+            themeId = readThemeId,
+            onThemeChange = { id -> scope.launch { app.settingsRepo.saveReadTheme(id) } },
+            volumeKey = volumeKey,
+            onVolumeKeyChange = { on -> scope.launch { app.settingsRepo.saveReadVolumeKey(on) } },
             onChange = { size, line -> readFontSize = size; readLineHeight = line },
             onDismiss = {
                 showFontSheet = false

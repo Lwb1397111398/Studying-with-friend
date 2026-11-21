@@ -81,6 +81,8 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
 
 ## 最后更新
 
+- 2026-11-21 **实景体验轮第六波（本轮）设置层两键**：①`read_theme`——阅读背景主题包 id（"follow"=跟随书房默认 / ReadingTheme.ALL 五套固定纸色），`readThemeFlow()` watch 供阅读页即时切换（详见 M4a）；②`read_volume_key`——音量键翻页开关（默认关），开时阅读页向 `StudyApp.volumeKeyTurnHook` 注册回调、MainActivity.dispatchKeyEvent 拦音量加/减转翻页并消费（防系统音量条弹出），离页注销。零 schema 变更（settings KV），Aa 弹层即开即存（借鉴 legado，详见 docs/调研/第九节）。
+
 - 2026-11-21 **实景体验轮第四波（本轮，主测《袖珍民法典评注》条文评注体装机）AI 侧一件**：**推理模型 `<think>` 思考段抑制**——MiniMax-M2.5 等推理模型把思考过程以 `<think>…</think>` 内联在正文增量里流出，随手问装机实录整段英文思考草稿原文上屏。新 `ThinkSuppressor`（ThinkFilter.kt）：流式状态机收口在 `AiClient.chat` 增量链路——标签跨 SSE 分片不漏不提前上屏（半截开/闭标签扣住）、未闭合 think 不吃正文、正文以半截标签收尾时 finish 放行；onDelta 与返回值全部消费者一次过滤受益（随手问/换个讲法/讲解/总结/粗读/判卷/视觉），落库内容不再混思考段。AiClientTest +2（分片抑制/未闭合返回空）+ 新 ThinkSuppressorTest 7 例。装机复测：随手问回答只剩中文正文（截图 bookocr-kit/.e2e/user_exp4/03_qa_no_think.png）。
 
 - 2026-11-21 **实景体验轮第三波（本轮，主测《债法原理-王泽鉴2022》装机）两件**：①**连接层错误人话化**——`AiClient.friendlyIo(e)` 新增：按 IOException 类型给人话建议（UnknownHost→域名解析失败/ConnectException→连不上服务器/SocketTimeout→连接超时或响应超时（按 message 含 connect 区分）/SSLException→HTTPS 握手失败/其余→网络连接失败），技术细节截 120 字附「（详情：…）」；chat 与 listModels 两处 `catch (IOException)` 从「网络异常：${e.message}」改走 friendlyIo——装机实录随手问把 OkHttp 连接超时 Java 原文（`failed to connect to vsllm.com/2a03:2880:… after 15000ms`）整段亮给用户。AiClientTest +1 例（4 类型断言+长度上限）。②**编辑档案弹层换 ModalBottomSheet**——原 AlertDialog 在键盘弹出时保存按钮被键盘盖住（compose ui 1.7 DialogProperties 无 softInputMode 参数、窗默认 ADJUST_PAN，decorFitsSystemWindows=false+imePadding+DialogWindowProvider 改 RESIZE 三招都救不动 M3 AlertDialog 不收缩的 text 区，dumpsys 实测三次复现）；换项目内久经键盘考验的 ModalBottomSheet（随手问/Aa 弹层同款），表单字段原样、取消/保存内嵌 sheet 底部，键盘弹出内容收缩按钮全程可达。装机复测：抽屉形态全字段+保存按钮可见（截图 bookocr-kit/.e2e/user_exp3/09_fix_save_reachable.png）。

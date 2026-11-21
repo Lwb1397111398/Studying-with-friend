@@ -107,8 +107,34 @@ object KitBookParser {
     /** 网购电子书文件名惯带的站源尾巴：`_（z-library.sk,_1lib.sk,_z-lib.sk）` 形态（连前面的下划线一起吃） */
     private val RE_SITE_TAIL = Regex("""_*[（(](?:z-library|1lib|z-lib)\.sk[^)）]*[)）]\s*$""")
 
+    /**
+     * 书名尾部作者组：`书名_(朱庆育)` / `书名_(杨立新_[杨立新])` 形态（z-library 站源
+     * 下载文件名惯例，站源尾巴剥掉后剩下作者组——《条文选注第3册》装机实录书名框
+     * 恒带「_(朱庆…」尾巴）。只剥「最后一个」`_(…)` 组且括号内不含书名部件词
+     * （版/册/卷/修订/上下……）与数字，防误伤《袖珍民法典评注(第二版)》这类真部件。
+     */
+    private val RE_AUTHOR_TAIL = Regex("""_\(([^()（）]{1,30})\)\s*$""")
+
+    /** 书名部件词与数字：括号内含任一则不是作者组（是「第3册」这类版本信息） */
+    private val TITLE_PART_HINT = Regex("""[0-9０-９一二三四五六七八九十]|版|册|卷|部|修订|增订|注释|评注|合订|上|中|下""")
+
     /** 书名卫生：剥网购站源尾巴（导入页 kit title 预填与文件名兜底共用） */
     internal fun cleanSiteTail(s: String): String = s.replace(RE_SITE_TAIL, "").trim()
+
+    /**
+     * 拆书名尾部作者组（实景体验轮第六波）：返回 (书名, 作者?)。作者提取规则——
+     * 剥出内容去方括号后取 `_` 前第一段（`杨立新_[杨立新]`→`杨立新`、`朱庆育_主编`→`朱庆育`，
+     * 「主编」这类头衔留给作者栏原样拼不进）。无尾巴返回原书名 + null。
+     */
+    fun splitAuthorTail(title: String): Pair<String, String?> {
+        val m = RE_AUTHOR_TAIL.find(title) ?: return title to null
+        val inner = m.groupValues[1]
+        if (TITLE_PART_HINT.containsMatchIn(inner)) return title to null
+        val name = title.substring(0, m.range.first).trimEnd('_', ' ', '（', '(').trim()
+        val author = inner.replace("[", "").replace("]", "").split('_').first().trim()
+        if (name.isBlank() || author.isBlank()) return title to null
+        return name to author
+    }
 
     /** 按章表切章。[body] 须已剥元数据块。锚定规则：anchor（标题行前 8 字）为主判据、
      * 起始页号过闸（blockPage >= p，同源页号恰相等，闸的作用是拦住目录页同文条目误锚），

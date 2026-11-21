@@ -31,13 +31,19 @@ internal object ParaHeadings {
      *  一刀切掉「（2020）最高法民终1号判决认为，……」这类以文书号开头的正文段误判 */
     private val BODY_PUNCT = Regex("[。！？；，,]")
 
+    /** 页码尾巴（实景体验轮第六波，主测《条文选注》实录）：书前「简目」行带
+     *  「一、规范目的与内容沿革......1-5」式页码引导——是目录行不是节标题，此前被
+     *  判级成标题后整页黑压压全是假标题。省略号/点串 + 数字区间收尾的一律按正文。 */
+    private val PAGE_TAIL = Regex("""[.·•…]{2,}\s*[\d〇零一二三四五六七八九十百千][\d〇零一二三四五六七八九十百千\-－—–~～至到]{0,12}$""")
+
     /**
      * 判级：0 = 不是标题；1 = 第X节级；2 = 「一、/第X款」级；3 = 「（一）/1.」级。
-     * 空串、超长、含正文标点一律返回 0。
+     * 空串、超长、含正文标点、带页码尾巴一律返回 0。
      */
     fun level(text: String): Int {
         val t = text.trim()
         if (t.isEmpty() || t.length > MAX_LEN || BODY_PUNCT.containsMatchIn(t)) return 0
+        if (PAGE_TAIL.containsMatchIn(t)) return 0
         // 编号行必须还带点内容（纯「一、」孤编号不算标题）
         if (L1.containsMatchIn(t)) return 1
         if (L2.containsMatchIn(t) && t.length > 3) return 2

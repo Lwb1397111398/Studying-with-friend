@@ -45,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -535,12 +536,36 @@ private fun ChapterRow(
     ) {
         Column(Modifier.weight(1f)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                // 前置/后置件徽标（第六波）：开篇/目录/附录不再是裸序号——14 万字的「目录」
+                // 章夹在正文中间毫无提示的实录痛点；真章照旧显示数字序号
+                val kindBadge = ChapterKinds.badgeOf(row.title)
+                if (kindBadge != null) {
+                    Text(
+                        kindBadge,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .background(
+                                MaterialTheme.colorScheme.surfaceVariant,
+                                RoundedCornerShape(4.dp),
+                            )
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                } else {
+                    Text(
+                        "${row.idx}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 Text(
-                    "${row.idx}",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
+                    row.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    // 前置/后置件标题弱化一档（还是可点可读，只是视觉上让位于真章）
+                    color = if (kindBadge != null) MaterialTheme.colorScheme.onSurfaceVariant else Color.Unspecified,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Text(row.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             val subtitle = row.gist?.take(50)
             if (!subtitle.isNullOrBlank()) {
