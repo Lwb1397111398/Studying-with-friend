@@ -1,5 +1,6 @@
 package com.studyfriend.app.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -482,7 +483,11 @@ internal fun SelectionFloatBar(
         Surface(
             shape = RoundedCornerShape(24.dp),
             shadowElevation = 8.dp,
-            color = MaterialTheme.colorScheme.surface,
+            // 暗色主题下 surface 与页面背景同色系、阴影几乎不可见，浮条「文字叠文字」
+            // 没有浮起感（《侵权行为》装机实录）——换 surfaceContainerHighest 提亮一层 +
+            // outlineVariant 细描边，深浅两主题都浮得起来
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
             Row(
                 Modifier.padding(horizontal = 2.dp),

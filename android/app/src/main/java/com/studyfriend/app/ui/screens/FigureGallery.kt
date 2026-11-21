@@ -35,7 +35,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -54,6 +57,24 @@ import kotlinx.coroutines.withContext
 // ==================== P4 示意图（§E） ====================
 
 private const val TAG_FIG = "FigureRow"
+
+/**
+ * 暗色主题插图柔化（2026-11-21 实景体验轮第五波）：《侵权行为》装机实录——扫描书插图
+ * 几乎全是白底黑字线图，暗色主题下纯白大块嵌在深棕背景里非常刺眼（行内与全屏预览都炸）。
+ * 处理：暗色下 RGB 各通道 ×0.76（白底→约 194 灰底，黑白对比仍在；彩色插图整体变暗不失真，
+ * 不做黑白反转——反转会让彩色图变补色怪图）。亮色主题返回 null 不动。
+ */
+@Composable
+internal fun figureToneFilter(): ColorFilter? {
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    if (!dark) return null
+    // Compose ColorMatrix 是 identity 数组，直接改 RGB 对角系数（0/5/10 位）压亮度
+    val m = ColorMatrix()
+    m.values[0] = 0.76f
+    m.values[5] = 0.76f
+    m.values[10] = 0.76f
+    return ColorFilter.colorMatrix(m)
+}
 
 /** 混排行：段行 / 图行 */
 internal sealed class ReadRow {
@@ -222,6 +243,7 @@ internal fun FigureRow(
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = "示意图，第${f.pageNo}页", // TODO(P6): caption
                 contentScale = ContentScale.FillWidth,
+                colorFilter = figureToneFilter(),
                 modifier = Modifier.fillMaxSize(),
             )
             lost -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -315,6 +337,7 @@ internal fun FigurePreviewDialog(f: FigureEntity, filesRoot: File, onDismiss: ()
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "示意图全屏预览，第${f.pageNo}页",
                     contentScale = ContentScale.Fit,
+                    colorFilter = figureToneFilter(),
                     modifier = Modifier.fillMaxSize(),
                 )
                 corrupt -> Text("图片已损坏", color = MaterialTheme.colorScheme.error)

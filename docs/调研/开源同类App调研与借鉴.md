@@ -162,3 +162,27 @@ EPUB 3 Media Overlays「朗读同步逐句高亮」，本地 EPUB 配 MP3/M4B �
 - **P0-① FSRS 复习排期**：✅ 2026-11-15 落地（java-fsrs 1.0.0，MIT）。四档映射+空学习步+关 fuzz+旧档迁移回填+review_log+备份 DTO。见 M1/M6 总览同日条。
 - **P0-② 降档梯子**：✅ 2026-11-15 落地（范式移植 bilingual_book_maker structured.py，MIT；未引库，Kotlin 重写）。JSON mode→纯 prompt→校验重试，QuizJudge 首个接入方。见 M3/M5 总览同日条。**校验收窄说明**：评审建议的「来源章节号必须真实存在」逐字校验不适用于判卷（prompt 明确转述合法，逐字比对误杀）——该防幻觉校验归属 P1 引用溯源。
 - P1（引用溯源/prompt 改写+基准集/激励统计）、P2（导图 mind-elixir spike/低成本分页验证）：未开工。
+
+## 八、定向补充调研（2026-11-21 实景体验轮第五波）
+
+> 老板点名「看 GitHub 优秀项目学习经验、做美化与新功能」。围绕实景抓到的三个体验问题做定向调研，当天落地（零引库，全部思路借鉴或自研）。
+
+### 1. 暗色模式下的白底插图（实景痛点：《侵权行为》装机，大面积白图嵌深棕背景炸眼）
+
+- **业界现状**：Kindle/Kobo 的暗色模式是**全屏反转**（连图片一起反）——白底黑字图反成黑底白字，扫描书线图效果最好，但彩色图会变补色怪图；LCD 阅读器普遍反馈反转后白图刺眼问题反而更糟（[Kobo Dark mode](https://help.kobo.com/hc/en-us/articles/360062231213-About-Dark-mode)、[How-To Geek Kindle dark mode](https://www.howtogeek.com/)）。EPUB 生态没有 per-image 的暗色适配通道（epubcheck 不允许 `<picture>`，[r/selfpublish 讨论](https://www.reddit.com/r/selfpublish/comments/11s41ez/how_to_make_graphics_in_ebooks_look_good_in_light)）。
+- **我们的选择**：**不做反转，做亮度缩放**——暗色主题下 RGB 三通道 ×0.76（白底→194 灰底，黑白对比仍在；彩色插图整体变暗不失真；对原书青色印刷页等高饱和彩图只压亮度不改色相）。实现 `figureToneFilter()`（FigureGallery.kt），行内 FigureRow 与全屏预览 FigurePreviewDialog 双接入，`colorScheme.surface.luminance()` 判暗色（与主题三态解耦）。
+- **验证**：装机实测白底/青底图均柔化不炸眼；彩色印刷图（p66-71 青底）色彩保真。
+
+### 2. 翻页手感与落点（spike 拍板的 B 形态正式落地）
+
+- **借鉴源**：自家 `spike/pager-demo`（第 5 期拍板：视口估算+锚段首，p50 帧 33ms→16ms、页首恒完整段）；落点估算模型同 demo（`PageTurn.kt` 纯函数 + PageTurnTest 9 例回归锁定）。Google Play Books / legado 的真分页维持否决（工程量失控，B 形态已消解半截段痛点）。
+- **实测坑**：估算必须随字号/行距设置联动（demo 固定 18sp 不够）；gist 卡展开时 rows 下标 ↔ LazyColumn item 下标要平移（extraHeadItems）。
+
+### 3. 阅读进度指示（实景痛点：长章不知读到哪）
+
+- **业界惯例**：主流阅读器（Kindle/微信读书/legado）都是页脚百分比或页码；我们选**底部 2dp 细进度线**（primary 色 55% 进度段 + 14% 轨道段，沉浸模式随顶栏隐藏）——不动布局、不打断阅读心流。
+- **实现坑（装机实录）**：`LinearProgressIndicator(progress={...})` 的 lambda 在 draw 阶段才执行，frac 若在 AnimatedVisibility content 里按普通 val 计算，首帧合成后**冻结在 0**——必须 `derivedStateOf`（依赖压到跨 item 才变）+ progress lambda 内读 derived state，draw 时取实时值。实测 12 次快速滚动进度线连续增长。
+
+### 4. 划词浮条底板（实景痛点：浮条文字直接叠在正文上）
+
+- 根因不是没底板（Surface 一直在），而是暗色主题下 `surface` 与页面背景同色系 + 阴影不可见，视觉上「无底板」。借鉴各类浮层设计惯例：底板提亮一档（`surfaceContainerHighest`）+ 0.5dp `outlineVariant` 描边，深浅两主题都浮得起来。零调研库依赖，纯 M3 设计语言修正。

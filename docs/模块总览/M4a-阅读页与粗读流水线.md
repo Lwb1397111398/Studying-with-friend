@@ -43,6 +43,7 @@ ui/screens/ReadTocSheet.kt      目录+书签抽屉
 ui/screens/SearchScreen.kt      全书搜索页
 ui/screens/QuickQaSheet.kt      随手问流式问答弹层
 ui/screens/FigureGallery.kt     插图混排与全屏预览
+ui/screens/PageTurn.kt          B 形态翻页落点估算纯函数（估算+锚行首）
 ui/nav/AppNav.kt                BOOK/READ/SEARCH 路由（与 M0 共享）
 data/study/RoughReadPlanner.kt  粗读流水线 run() 入口
 data/study/RoughReadRunner.kt   粗读全局单例状态机
@@ -73,11 +74,12 @@ assets/prompts/rough_read_merge.txt  归并 prompt
 ui/screens/ChapterListScreen.kt 章目录页（P5 章节树：buildChapterTree 挂接+flattenTree 拍平+校准徽标+SectionRow 目录锚；行尾操作按数据推导）
 ui/screens/ChapterTree.kt       P5 树纯函数：ChapterNode/TreeItem、buildChapterTree（onFallback 注入日志）、flattenTree、normalizeHighlight、findHighlightIndex
 ui/screens/ReadStyles.kt        P5-F 次级角色判定 isSecondaryRole（TOC/FOOTNOTE/FRONT/BACK）
-ui/screens/ReadScreen.kt        阅读页主屏：章三件套 TopAppBar（+目录按钮/进度小字/沉浸 AnimatedVisibility）+ 段落流 LazyColumn（混排 rows+单击切沉浸）+ 划词/问答/字号/预览/目录书签抽屉状态中枢 + 位置记忆/听书跟随 + force 确认弹窗 + highlight/scrollParaId 滚动定位；TextSelection/QaTarget 数据类、buildQaTarget
-ui/screens/ReadTools.kt         ChapterToolsRow（粗读/讲解/总结/要点/朗读 chips 行 + 展开状态行）、ToolStatusRow、TaskProgressRow、FontSizeSheet（字号+行距双 Slider 无级）、SelectionFloatBar（划词五按钮浮条：问含义/扩句/扩段/复制/✕，dismissOnClickOutside 显式关）
+ui/screens/ReadScreen.kt        阅读页主屏：章三件套 TopAppBar（+目录按钮/进度小字/沉浸 AnimatedVisibility）+ 段落流 LazyColumn（混排 rows+单击切沉浸）+ 划词/问答/字号/预览/目录书签抽屉状态中枢 + 位置记忆/听书跟随 + force 确认弹窗 + highlight/scrollParaId 滚动定位；TextSelection/QaTarget 数据类、buildQaTarget；第五波：turnPage 走 PageTurn.target 估算锚行首（点两侧/左右滑共用）、底部 2dp 阅读进度线（derivedStateOf+draw 阶段实时读）
+ui/screens/ReadTools.kt         ChapterToolsRow（粗读/讲解/总结/要点/朗读 chips 行 + 展开状态行）、ToolStatusRow、TaskProgressRow、FontSizeSheet（字号+行距双 Slider 无级）、SelectionFloatBar（划词五按钮浮条：问含义/扩句/扩段/复制/✕，dismissOnClickOutside 显式关；第五波底板换 surfaceContainerHighest+0.5dp outlineVariant 描边，暗色下浮起感恢复）
 ui/screens/ReadCards.kt         ParaRow（段落行：SelectableText 长按整句+高亮+图锚+听书当前段淡染）、SelectableText（含外层拖拽事件泵）、SelectionHandle（纯视觉把手）、ParaTag、GistCard（要点卡）、NoteCard（讲解卡）
+ui/screens/PageTurn.kt          第五波：B 形态翻页落点估算（estimateRowHeightPx 段行/图行高度模型 + target 累计 ≥0.88 视口选落点行；第 5 期 spike 拍板正式落地）
 ui/screens/QuickQaSheet.kt      随手问流式问答弹层：会话卡 + 输入行 + 100ms 节流流式渲染（不走全局互斥）+ v7 历史落库（qa_history）与历史二级弹层
-ui/screens/FigureGallery.kt     P4-D 插图混排：buildReadRows（sealed ReadRow 三态混排）、FigureRow（aspectRatio 占位/IO 解码/LRU/失败双态/角标/vision Log.w）、FigurePreviewDialog 全屏预览、FigureBitmapCache（decodeDispatcher limitedParallelism(2)+按字节 LRU）、calcInSampleSize 官方采样
+ui/screens/FigureGallery.kt     P4-D 插图混排：buildReadRows（sealed ReadRow 三态混排）、FigureRow（aspectRatio 占位/IO 解码/LRU/失败双态/角标/vision Log.w）、FigurePreviewDialog 全屏预览、FigureBitmapCache（decodeDispatcher limitedParallelism(2)+按字节 LRU）、calcInSampleSize 官方采样；第五波：figureToneFilter() 暗色主题插图降亮度（RGB×0.76，行内+预览双接入）
 ui/screens/ReadTocSheet.kt      v7 目录+书签抽屉：全书章列表（当前章高亮）+ 加书签/书签列表/删除/跳段
 ui/screens/SearchScreen.kt      v7 全书搜索页：防抖 300ms LIKE 查询 + 命中片段染色 + 点结果跳段（snippet 纯函数）
 ui/screens/SelectionBounds.kt   P7 划词纯函数：wordAt（ASCII 连续词/汉字标点单字+越界 coerce）、phraseAt（扩选轮：连续汉字成词组）、expandToSentence（句末标点+右引号吸收+SKIP_AT_SENTENCE_HEAD）、EMPTY
@@ -153,6 +155,8 @@ test/.../QuickQaMessagesTest.kt    4 例（P7：首轮全上下文/追问仅正�
 - **Runner/Planner 模式复用**：ChatJsonFn 构造注入 + StudyApp 单例 + StateFlow 五态 + 全局互斥——M4b 批量讲解队列沿用同一互斥纪律（讲解与粗读互斥或排队由 M4b 计划定）
 
 ## 最后更新
+
+- 2026-11-21 **实景体验轮第五波（本轮，主测《侵权行为-王泽鉴第3版》装机，主题=借鉴开源做增强）阅读页四件**：①**B 形态翻页落地**（第 5 期 spike 拍板转正）——turnPage 从 `animateScrollBy(±0.88 视口)` 改为「PageTurn.target 估算累计 ≥0.88 视口选落点行 + animateScrollToItem 锚行首」：页首恒为完整段开头（旧落点常在段中截断），LazyColumn 只合成落点页内容（spike 实测 p50 帧 33ms→16ms）；估算模型随字号/行距设置联动（estFontPx/estLineHpx/estGapPx），gist 卡展开时 rows 下标 ↔ item 下标按 extraHeadItems 平移；落点逻辑抽 `PageTurn.kt` 纯函数 + PageTurnTest 9 例回归锁定（ReadScreen.kt）。②**暗色主题插图降亮度**——figureToneFilter()：暗色下 RGB 三通道 ×0.76（白底→194 灰底不再炸眼；彩色插图整体变暗不失真，不做黑白反转防彩色变补色），FigureRow 行内与 FigurePreviewDialog 全屏预览双接入；亮色主题返回 null 不动（FigureGallery.kt；《侵权行为》装机实录暗色下白底大图炸眼）。③**划词浮条底板浮起感**——SelectionFloatBar Surface 底板 surface→surfaceContainerHighest + 0.5dp outlineVariant 描边：暗色主题下原底板与页面背景同色系、阴影不可见，浮条文字直接叠在正文上「文字叠文字」（ReadTools.kt；装机复测底板清晰分层）。④**底部阅读进度细线**——2dp LinearProgressIndicator（primary 55% 进度段+14% 轨道段，沉浸模式随顶栏隐藏）：长章读到哪里没有感知；**实现坑**：progress lambda 在 draw 阶段才执行，frac 在 AnimatedVisibility content 里按普通 val 计算会冻结在首帧值（装机实录进度恒 0），改 derivedStateOf（依赖压到跨 item 才变）+ progress lambda 内读 derived state 实时取值（ReadScreen.kt）。验证：PageTurnTest 9 例+TreeTextTest 6 例+ReadScreenRowsTest+M4aUiSmokeTest 快速层绿；全量结果见本轮 commit message；装机复测 B 形态正反双向落点锚段首、进度线随滚动增长、暗色白图/青图均柔化（青色印刷页为原书双色印刷非滤镜产物）、浮条底板分层清晰（截图 bookocr-kit/.e2e/user_exp5/）。**存档未做**：插图区域占点击翻页热区（点图=全屏预览，图占位大时翻页失灵感，交互重构单独期）；章目录页前置章（0 开篇/1 序言）与真章序号无视觉区分。
 
 - 2026-11-21 **实景体验轮第四波阅读顶栏一件**：顶栏进度小字「已读 x/y 章 · 书名」→「粗读 x/y 章 · 书名」——与书架继续读横幅（M0 同日条）同口径修正：计数是粗读完成章数（readState=DONE），写「已读」名不副实（ReadScreen.kt）。
 

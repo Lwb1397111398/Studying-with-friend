@@ -48,4 +48,20 @@ class TreeTextTest {
         assertEquals(true, multi.second)
         org.junit.Assert.assertTrue("多根包虚拟根：${multi.first}", multi.first.contains("书名"))
     }
+
+    @Test
+    fun toMapData_collapseDeep_foldsDepthTwoAndBelow() {
+        val forest = TreeText.parse("书名\n\t第一章\n\t\t第一节\n\t\t\t正文要点\n\t第二章\n\t\t第一节\n\t\t\t要点二")
+        // 默认不折叠：不带 expanded（章末导图维持全展开可编辑）
+        val plain = TreeText.toMapData(forest, "书名").first
+        org.junit.Assert.assertTrue("默认不折叠：$plain", !plain.contains("expanded"))
+
+        // 总导图折叠：depth≥2 且有子节点（第一章/第二章各自的第一节）带 expanded:false，
+        // 章级 depth1 不带；叶子无子节点不需要 expanded
+        val collapsed = TreeText.toMapData(forest, "书名", collapseDeep = true).first
+        val count = Regex("\"expanded\": ?false").findAll(collapsed).count()
+        assertEquals("depth2 有子节点的两处折叠：$collapsed", 2, count)
+        org.junit.Assert.assertTrue("章级仍可见：$collapsed", collapsed.contains("第一章") && collapsed.contains("第二章"))
+        org.junit.Assert.assertTrue("孙级仍在数据里（只是收起）：$collapsed", collapsed.contains("正文要点"))
+    }
 }

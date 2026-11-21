@@ -5,9 +5,6 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -15,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -34,6 +33,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -53,12 +53,14 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.round
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyfriend.app.StudyApp
@@ -478,14 +480,39 @@ fun ReadScreen(
 
             // 翻页模式（体验优化轮）：正文可视宽度 + 翻一屏 + 点按分区。
             // 左 1/3=上一屏、右 1/3=下一屏、中间=切沉浸（滚动模式整屏单击都是切沉浸）；
-            // 左右滑超 1/6 屏宽翻页。翻页=按视口高度 88% 平滑滚动（留一点重叠方便接读），
-            // 滚停后既有位置记忆逻辑照常把可视首段写库
+            // 左右滑超 1/6 屏宽翻页。
+            // 翻页落点（第五波实景轮，spike/pager-demo B 形态落地）：按行高估算从当前
+            // 行首累计 ≥0.88 视口选出落点行，animateScrollToItem 锚行首——页首恒为完整
+            // 段落开头（旧 0.88 视口平滑滚动落点常在段中），LazyColumn 只合成落点页内容
+            // （spike 实测 p50 帧 33ms→16ms）。估算误差只影响每页行数，不影响锚行首。
             var contentWidthPx by remember { mutableIntStateOf(0) }
+            val density = LocalDensity.current
+            // 行高估算模型随字号/行距设置联动：段行=行数×行高+段距（正文段距 16dp），
+            // 图行=显示宽/ratio+上下边距（FigureRow horizontal 16dp + vertical 8dp 口径）
+            val estFontPx = with(density) { readFontSize.sp.toPx() }
+            val estLineHpx = estFontPx * readLineHeight
+            val estGapPx = with(density) { 16.dp.toPx() }
+            val estHpadPx = with(density) { 16.dp.toPx() }
+            // gist 卡展开时是 LazyColumn 第 0 个 item（rows 之外），rows 下标 ↔ item 下标要平移
+            val extraHeadItems = if (gistExpanded && !chapter?.gist.isNullOrBlank()) 1 else 0
             fun turnPage(dir: Int) {
                 val vh = listState.layoutInfo.viewportSize.height.toFloat()
-                if (vh <= 0f) return
+                if (vh <= 0f || rows.isEmpty()) return
                 scope.launch {
-                    listState.animateScrollBy(dir * vh * 0.88f, tween(340, easing = FastOutSlowInEasing))
+                    val textW = (contentWidthPx.toFloat() - estHpadPx * 2).coerceAtLeast(estFontPx)
+                    val charsPerLine = (textW / estFontPx).coerceAtLeast(1f)
+                    val fromRows = (listState.firstVisibleItemIndex - extraHeadItems).coerceIn(0, rows.size - 1)
+                    val targetRows = PageTurn.target(
+                        rows = rows,
+                        fromRows = fromRows,
+                        dir = dir,
+                        budgetPx = vh * 0.88f,
+                        charsPerLine = charsPerLine,
+                        lineHpx = estLineHpx,
+                        gapPx = estGapPx,
+                        textW = textW,
+                    )
+                    listState.animateScrollToItem((targetRows + extraHeadItems).coerceAtLeast(0))
                 }
             }
             fun handleBodyTap(pos: Offset) {
@@ -645,7 +672,8 @@ fun ReadScreen(
             LazyColumn(
                 state = listState,
                 modifier = Modifier
-                    .fillMaxSize()
+                    .fillMaxWidth()
+                    .weight(1f)
                     .onSizeChanged { contentWidthPx = it.width }
                     // 翻页模式：左右滑翻页（水平拖动累积，松手超 1/6 屏宽翻一屏）；
                     // 竖向滚动归 LazyColumn 自身，互不抢占
@@ -749,6 +777,32 @@ fun ReadScreen(
                     }
                 }
                 item { Spacer(Modifier.height(32.dp)) }
+            }
+
+            // 底部阅读进度细线（第五波实景：长章读到哪里没有感知）——可视首行占全部
+            // item 的比例，滚到底约 1；沉浸模式随顶栏一起藏，不占正文空间。
+            // derivedStateOf 把失效范围压到「跨 item 才变」，progress lambda 在 draw 阶段
+            // 实时读取（不依赖 content 重组，避免 AnimatedVisibility 内首值冻结）
+            val readFrac by remember {
+                derivedStateOf {
+                    val n = listState.layoutInfo.totalItemsCount
+                    if (n > 1) {
+                        (listState.firstVisibleItemIndex / (n - 1f)).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    }
+                }
+            }
+            AnimatedVisibility(visible = chromeVisible) {
+                LinearProgressIndicator(
+                    progress = { readFrac },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
+                    // 轨道留极淡主色：整条线可见，进度段更亮（全透明轨道的「进度感」弱）
+                    trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                )
             }
         }
 

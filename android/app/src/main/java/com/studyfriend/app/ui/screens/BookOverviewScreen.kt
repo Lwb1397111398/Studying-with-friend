@@ -289,7 +289,10 @@ private fun OverviewMindmapPane(
     }
 
     val mapJson = remember(treeText, bookTitle) {
-        runCatching { TreeText.toMapData(TreeText.parse(treeText), bookTitle.ifBlank { "思维导图" }).first }
+        // 总导图默认折叠（第 6 期拍板）：千章书 depth≥2 收起防卡，点章节点再展开
+        runCatching {
+            TreeText.toMapData(TreeText.parse(treeText), bookTitle.ifBlank { "思维导图" }, collapseDeep = true).first
+        }
             .onFailure { Log.w("OverviewMindmapPane", "导图树解析失败", it) }
             .getOrNull()
     }

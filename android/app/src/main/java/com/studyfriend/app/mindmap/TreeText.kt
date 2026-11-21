@@ -80,7 +80,19 @@ object TreeText {
      * 单个顶层主题直接作为根；多个顶层主题包一层虚拟根（title 传入笔记标题）。
      * @return Pair(mapJson, virtualRoot)
      */
-    fun toMapData(forest: List<TreeNote>, virtualRootTitle: String): Pair<String, Boolean> {
+    /**
+     * 缩进文本 → mind-elixir 数据 JSON。
+     * 单个顶层主题直接作为根；多个顶层主题包一层虚拟根（title 传入笔记标题）。
+     * @param collapseDeep 默认折叠（第 6 期拍板：总导图千章书防卡，spike 实测折叠态
+     * init 30~79ms）——depth≥2（章下级）节点带 expanded:false 收起，保留章级枝干可见；
+     * 章末导图（可编辑、节点少）不折叠，维持全展开。
+     * @return Pair(mapJson, virtualRoot)
+     */
+    fun toMapData(
+        forest: List<TreeNote>,
+        virtualRootTitle: String,
+        collapseDeep: Boolean = false,
+    ): Pair<String, Boolean> {
         require(forest.isNotEmpty()) { "空导图" }
         val virtualRoot = forest.size > 1
         val root = if (virtualRoot) {
@@ -89,7 +101,7 @@ object TreeText {
             forest.first()
         }
         val data = buildJsonObject {
-            put("nodeData", nodeToJson(root, isRoot = true))
+            put("nodeData", nodeToJson(root, isRoot = true, depth = 0, collapseDeep = collapseDeep))
             put("direction", JsonPrimitive(2)) // SIDE
             put("arrows", JsonArray(emptyList()))
             put("summaries", JsonArray(emptyList()))
@@ -122,13 +134,18 @@ object TreeText {
         return "n${System.nanoTime()}-$idCounter"
     }
 
-    private fun nodeToJson(node: TreeNote, isRoot: Boolean): JsonObject = buildJsonObject {
-        put("id", JsonPrimitive(if (isRoot) "me-root" else newId()))
-        put("topic", JsonPrimitive(node.topic))
-        if (node.children.isNotEmpty()) {
-            put("children", JsonArray(node.children.map { nodeToJson(it, false) }))
+    private fun nodeToJson(node: TreeNote, isRoot: Boolean, depth: Int, collapseDeep: Boolean): JsonObject =
+        buildJsonObject {
+            put("id", JsonPrimitive(if (isRoot) "me-root" else newId()))
+            put("topic", JsonPrimitive(node.topic))
+            if (node.children.isNotEmpty()) {
+                // collapseDeep：depth≥2 的子树默认收起（mind-elixir expanded=false，spike 探针同款）
+                if (collapseDeep && depth >= 2) {
+                    put("expanded", JsonPrimitive(false))
+                }
+                put("children", JsonArray(node.children.map { nodeToJson(it, false, depth + 1, collapseDeep) }))
+            }
         }
-    }
 
     private fun nodeFromJson(obj: JsonObject): TreeNote {
         val topic = obj["topic"]?.jsonPrimitive?.content ?: ""
