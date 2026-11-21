@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import shlex
 import sys
+import tempfile
 from pathlib import Path
 
 from kitpaths import INBOX, JOBS, DONE, KIT
@@ -461,6 +462,78 @@ def main() -> None:
     check("第五章 误切" not in titles, "DROP 裁决删掉误切章")
     check(m4.get("chapter_review_pending") is False, "IGNORE 后疑点清零、可 pack")
     check(m4["chapter_rulings"].get("p9:第四章 缺章") == "ADD|第四章 缺章", "裁决持久入台账（重跑不丢）")
+
+    print("== 第7期回归：引述目录块防护 + 后置词族空白归一 + RENAME 裁决 ==")
+    run(f'init _selftest_ch3 --src "{src}" --batch 12')
+    JOB5 = JOBS / "_selftest_ch3"
+    run("prep _selftest_ch3")
+    run("next _selftest_ch3")
+    # 《不当得利-王泽鉴2023》实录还原：比较法章节引用《民法典》编章目录行被误切成怪物章
+    parts = ["〔页1〕", "目录", "",
+             "第一章 起点 ……2", "第二章 终点 ……5", "",
+             "〔页2〕", "第一章 起点", filler(2, 1), "",
+             "〔页3〕", filler(3, 1),
+             "第一编总则", "第五章民事权利", "第三编合同", "",  # 引述目录块：同页 3 个章级候选 → 整页剔除
+             "〔页4〕", filler(4, 1), "",
+             "〔页5〕", "第二章 终点", filler(5, 1), "",
+             "〔页6〕", filler(6, 1), "", "〔页7〕", filler(7, 1), "",
+             "〔页8〕", filler(8, 1), "", "〔页9〕", filler(9, 1), "",
+             "〔页10〕", "主要参考书目", filler(10, 1), "",
+             "〔页11〕", "索 引", filler(11, 1), "",            # 字间空格形态（原判据漏识别，末章吞索引）
+             "〔页12〕", "第四章 误名", filler(12, 1), ""]
+    (JOB5 / "batches" / "b001.txt").write_text("\n".join(parts), encoding="utf-8")
+    (JOB5 / "batches" / "b001_notes.txt").write_text("", encoding="utf-8")
+    (JOB5 / "batches" / "b001_figures.json").write_text("[]", encoding="utf-8")
+    run("check _selftest_ch3 b001 --force")
+    run("chapters _selftest_ch3")
+    m5 = json.loads((JOB5 / "manifest.json").read_text(encoding="utf-8"))
+    t5 = [c["t"] for c in m5["chapters"]]
+    check("第五章民事权利" not in t5 and "第一编总则" not in t5 and "第三编合同" not in t5,
+          "引述目录块防护：同页多章级候选整页剔除（民法典引述不再成怪物章）")
+    check("第一章 起点" in t5 and "第二章 终点" in t5, "引述块防护不误杀真章头（真章单候选同页）")
+    check("主要参考书目" in t5 and "索 引" in t5,
+          "后置词族空白归一：「主要参考书目」「索 引」识别为章（末段不再被末章吞）")
+    review3 = JOB5 / "chapters_review.txt"
+    review3.write_text("p12 | RENAME | 12 | 第四章 误名 | 第四章 正名：多人关系\n", encoding="utf-8")
+    run(f'chapters _selftest_ch3 --apply "{review3}"')
+    m5 = json.loads((JOB5 / "manifest.json").read_text(encoding="utf-8"))
+    t5 = [c["t"] for c in m5["chapters"]]
+    ch12 = next(c for c in m5["chapters"] if c["p"] == 12)
+    check(any("第四章 正名" in t for t in t5) and not any("第四章 误名" in t for t in t5),
+          "RENAME 裁决改烂尾章名")
+    check(ch12["a"] == "第四章 正名：多", "RENAME 后锚=新章名前8字（App 端锚定同步）")
+
+    print("== 第7期回归补：编扉页保编头剔简目 + 条文索引词族 ==")
+    import bookocr as boc
+    fake = {30: ["第一编 基础理论", "第一章 民法基础", "第二章 民法规范理论"],  # 纯标题页
+            32: ["第一章 民法基础", filler(32, 1)]}
+    chs, _ = boc._scan_chapters(fake, {})
+    ts = [c["t"] for c in chs]
+    check("第一编 基础理论" in ts, "编扉页保编头（纯标题页「第X编」不剔）")
+    check(ts.count("第一章 民法基础") == 1 and "第二章 民法规范理论" not in ts,
+          "编扉页章级简目剔、真章头幸存")
+    fake2 = {36: ["六、中国大陆", "第一编总则", "第五章民事权利", "第三编合同",
+                  "这是一句超过四十个字的正文长行，用来触发引述块防护判据的两档判定逻辑，"
+                  "确保有正文的引述页与纯标题页各走各档。"],
+             40: ["第一章 起点", filler(40, 1)]}
+    chs2, _ = boc._scan_chapters(fake2, {})
+    ts2 = [c["t"] for c in chs2]
+    check("第五章民事权利" not in ts2 and "第一编总则" not in ts2,
+          "正文引述块整页剔（页内含 ≥40 字长行）")
+    fake3 = {58: ["第十五章 尾章", filler(58, 1)], 60: ["条文索引", "第1条 12"]}
+    chs3, _ = boc._scan_chapters(fake3, {})
+    check(any(c["t"] == "条文索引" and c["r"] == "BACK" for c in chs3),
+          "「条文索引」识别为后置章（末章不再吞条文索引）")
+
+    print("== 第7期回归补：裁决 id 含裸竖线的 IGNORE 解析 ==")
+    from bookocr import _parse_review
+    dbg = Path(tempfile.mkdtemp(prefix="selftest_review_"))
+    rf2 = dbg / "r.txt"
+    rf2.write_text("thin:30:第一编|基础理论 | IGNORE\nthin:524:第四编权利理论 | IGNORE\n",
+                   encoding="utf-8")
+    r2, i2 = _parse_review(rf2)
+    check(i2 == ["thin:30:第一编|基础理论", "thin:524:第四编权利理论"],
+          "id 含裸竖线的 IGNORE 行完整解析（分隔符=带空格竖线）")
 
     print("== proofread 规则层 + AI Stub ==")
     run(f'init _selftest_pf --src "{src}" --batch 4')

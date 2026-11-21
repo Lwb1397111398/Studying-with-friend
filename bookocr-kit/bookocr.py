@@ -1587,6 +1587,11 @@ def cmd_pull(a: argparse.Namespace) -> None:
     all_pages = {n: _pull_page(doc[n - 1], fitz, body_size=gbody, lines=all_lines[n],
                                furniture=furniture)
                  for n in range(1, npages + 1)}
+    # PDF 附加元数据页（z-library 等来源的 [General Information] 书名/页数页）不是书内容，
+    # 整页改空白占位——留着的尾巴会挂进末章混进正文（民法总论 p616 实录）
+    for n, pd in all_pages.items():
+        if pd["paras"] and pd["paras"][0].lstrip().startswith("[General Information]"):
+            pd["paras"] = ["〔空白页〕"]
     doc.close()
 
     # 跨页缝合：中文书每段首行缩进约两字、续行顶格——下页首行顶格且非标题、
@@ -2048,12 +2053,15 @@ CH_WORD_FRONT = ("前言", "序言", "自序", "再版序", "初版序", "重排
                  "总序", "译序", "代序", "导读", "引言", "导论", "导言", "写在前面", "绪论",
                  "开场白", "凡例", "作者简介", "出版说明", "编译说明")
 CH_WORD_BACK = ("结语", "结论", "结束语", "后记", "再版后记", "译后记", "附录", "参考文献",
-                "参考书目", "致谢", "谢辞", "索引", "大事记", "年表")
+                "参考书目", "主要参考书目", "条文索引", "法规索引", "致谢", "谢辞",
+                "索引", "大事记", "年表")
 TOC_TITLE_RE = re.compile(r"^(目\s*录|目\s*次|简\s*目|要\s*目|总\s*目|contents)\s*$", re.I)
 # 目录条目行：标题 + 可选点线 + 行尾页码——裸数字或全/半角括号包裹（如「（10）」，王泽鉴民法研究系列简目样式）
 # 行尾带数字/（数字）的行一律视为目录形态，不当标题
 TOC_ENTRY_RE = re.compile(r"^(.{2,60}?)[\s.·•…\-—]*?[(（]?(\d{1,4})[)）]?\s*$")
 SEC_NUM_RE = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十百千]+\s*[节讲]")
+# 编级标题（编扉页判据用：纯标题页里「第X编」是真编头，章级简目才是假章）
+RE_FEN_NUM = re.compile(r"^第\s*[0-9〇零一二三四五六七八九十百千]+\s*编")
 _ZH_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
               "七": 7, "八": 8, "九": 9, "两": 2}
 
@@ -2093,15 +2101,19 @@ def _title_kind(s: str):
         return None
     if s[-1:] in "。！？；，,;?!" or any(c in s for c in "，,；;"):
         return None
+    # 前置/后置词族按空白归一后匹配：索引/参考书目标题常带字间空格（「索 引」「总 序」，
+    # 《不当得利》p512「索 引」p506「主要参考书目」实录——原判据带空格漏识别，后置内容
+    # 全被末章吞掉）
+    s_nosp = re.sub(r"[\s\u3000]+", "", s)
     if RE_EDITION_PRE.match(s):
         return ("front",)
     for w in CH_WORD_FRONT:
-        if s == w or (s.startswith(w) and len(s) > len(w) and s[len(w)] in "：:．.、(（"):
+        if s_nosp == w or (s_nosp.startswith(w) and len(s_nosp) > len(w) and s_nosp[len(w)] in "：:．.、(（"):
             return ("front",)
-    if s == "序" or s.startswith("序：") or s.startswith("序:"):
+    if s_nosp == "序" or s.startswith("序：") or s.startswith("序:"):
         return ("front",)
     for w in CH_WORD_BACK:
-        if s == w or s.startswith(w):
+        if s_nosp == w or s_nosp.startswith(w):
             return ("back",)
     if s == "跋" or s.startswith("跋：") or s.startswith("跋:"):
         return ("back",)
@@ -2166,15 +2178,46 @@ def _scan_chapters(book: dict[int, list[str]], rulings: dict) -> tuple[list[dict
             if k and (p, ln) not in seen:
                 seen.add((p, ln))
                 cands.append({"p": p, "t": ln, "k": k})
-    # 应用持久裁决：DROP 剔除误切章；ADD 补漏切章（按正文 1 级处理）
+    # 引述目录块防护（2026-11-21 第7期）：正文引述法典/丛书编章结构会被 CH_NUM_RE 误判
+    # 成章头——《不当得利》p36-37 实录：比较法章节引用大陆《民法典》编章目录行
+    # （「第一编总则」「第五章民事权利」「第三编合同」「第二十九章不当得利」连续独立行），
+    # 切出「第二十九章不当得利」怪物章（18.8 万字占全书 56%，第二章第三章正文全挂它下）。
+    # 判据按页内是否有正文长行（≥40 字）分两档：
+    # ① 有长行 → 正文引述块，整页章级候选全剔（真章头同页不可能出现两个）；
+    # ② 无长行 → 编扉页形态（编名+该编简目，民法总论 p30/p102/p404/p524 实录：
+    #   页面只有标题行）——剔章级简目候选、保留「第X编」真编头（编头是书结构，不剔）。
+    _num_pages: dict[int, int] = {}
+    for c in cands:
+        if c["k"][0] == "num":
+            _num_pages[c["p"]] = _num_pages.get(c["p"], 0) + 1
+    quote_pages, title_pages = set(), set()
+    for p, n in _num_pages.items():
+        if n < 2:
+            continue
+        if any(len(re.sub(r"\s", "", ln)) >= 40 for ln in book.get(p, [])):
+            quote_pages.add(p)
+        else:
+            title_pages.add(p)
+    if quote_pages:
+        cands = [c for c in cands if not (c["k"][0] == "num" and c["p"] in quote_pages)]
+    if title_pages:
+        cands = [c for c in cands if not (
+            c["k"][0] == "num" and c["p"] in title_pages and not RE_FEN_NUM.match(c["t"]))]
+    # 应用持久裁决：DROP 剔除误切章；RENAME 修正烂尾章名；ADD 补漏切章（按正文 1 级处理）
     cands = [c for c in cands if rulings.get(f"p{c['p']}:{c['t'][:12]}") != "DROP"]
+    for c in cands:
+        rv = rulings.get(f"p{c['p']}:{c['t'][:12]}")
+        if isinstance(rv, str) and rv.startswith("RENAME|"):
+            c["t"] = rv[7:]
     have = {f"p{c['p']}:{c['t'][:12]}" for c in cands}
     for key, val in rulings.items():
         if isinstance(val, str) and val.startswith("ADD|"):
             page = key.split(":", 1)[0][1:]
             if page.isdigit() and key not in have:
                 cands.append({"p": int(page), "t": val[4:], "k": ("num", None)})
-    cands.sort(key=lambda c: c["p"])
+    # 同页排序：章（lv1）先于节（lv2）——章首页常「第X章 + 第一节」同页，ADD 注入的章
+    # 靠后追加，稳定排序须给 lv1 优先键，否则章表顺序倒挂
+    cands.sort(key=lambda c: (c["p"], 0 if c["k"][0] != "sec" else 1))
 
     first_body_p = min((c["p"] for c in cands if c["k"][0] == "num"), default=None)
     chapters: list[dict] = []
@@ -2270,13 +2313,15 @@ def _reconcile(book: dict[int, list[str]], chapters: list[dict], toc: dict) -> t
 
 
 def _parse_review(fp: Path) -> tuple[dict, list[str]]:
-    """解析裁决文件 → (rulings, ignored_ids)。行格式：id | 动作 [| 页 | 标题]，# 开头为注释。"""
+    """解析裁决文件 → (rulings, ignored_ids)。行格式：id | 动作 [| 页 | 标题]，# 开头为注释。
+    分隔符=两侧带空格的竖线：疑点 id 本身可含裸竖线（如「第一编|基础理论」章名去标点后的
+    thin id，2026-11-21 实录——旧 split('|') 把含竖线 id 的 IGNORE 行切坏整条丢弃）。"""
     rulings, ignored = {}, []
     for ln in read_text(fp).splitlines():
         ln = ln.strip()
         if not ln or ln.startswith("#"):
             continue
-        parts = [x.strip() for x in ln.split("|")]
+        parts = [x.strip() for x in re.split(r" +\| +", ln)]
         if len(parts) < 2 or not parts[0] or not parts[1]:
             continue
         wid, act = parts[0], parts[1].upper()
@@ -2284,6 +2329,9 @@ def _parse_review(fp: Path) -> tuple[dict, list[str]]:
             ignored.append(wid)
         elif act == "DROP" and len(parts) >= 4 and parts[2].isdigit() and parts[3]:
             rulings[f"p{parts[2]}:{parts[3][:12]}"] = "DROP"
+        elif act == "RENAME" and len(parts) >= 5 and parts[2].isdigit() and parts[3] and parts[4]:
+            # 五段：id | RENAME | 页 | 旧标题（组 key，与扫描行前缀一致） | 新标题（完整章名）
+            rulings[f"p{parts[2]}:{parts[3][:12]}"] = f"RENAME|{parts[4]}"
         elif act == "ADD" and len(parts) >= 4 and parts[2].isdigit() and parts[3]:
             rulings[f"p{parts[2]}:{parts[3][:12]}"] = f"ADD|{parts[3]}"
     return rulings, ignored
@@ -2412,6 +2460,8 @@ def _proofread_coverage(job: Path, m: dict) -> tuple[bool, int]:
 def cmd_pack(a: argparse.Namespace) -> None:
     job = resolve_job(a.job)
     m = load_manifest(job)
+    # 归档工程的 output/ 在 done 拍平后可能不存在（重跑 pack 重打包场景），自建防炸
+    (job / "output").mkdir(exist_ok=True)
     undone = [k for k, v in m["batches"].items() if v["status"] != "done"]
     if undone and not a.force:
         die(f"还有 {len(undone)} 批没完成（{undone[:5]}…），补完再 pack；确要出半本书加 --force")
