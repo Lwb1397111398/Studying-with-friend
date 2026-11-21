@@ -375,7 +375,9 @@ private fun BookShelf(
                             if (cprog != null && cprog.totalChapters > 0) {
                                 Spacer(Modifier.height(4.dp))
                                 Text(
-                                    "已读 ${cprog.readChapters}/${cprog.totalChapters} 章",
+                                    // 「粗读」不说「已读」：口径是粗读完成章数（readState=DONE），
+                                    // 用户读到一半没跑粗读也显示 0，写「已读」像坏了（wave-1 实录）
+                                    "粗读 ${cprog.readChapters}/${cprog.totalChapters} 章",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

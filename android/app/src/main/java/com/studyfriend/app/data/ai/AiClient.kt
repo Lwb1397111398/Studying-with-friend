@@ -52,6 +52,7 @@ data class ChatRequest(
 /**
  * OpenAI 兼容 /chat/completions 流式客户端（计划 M3 §3）。
  * HttpURLConnection 零依赖；onDelta 在 IO 线程回调，Compose mutableStateOf 写入线程安全。
+ * 回调与返回值均已滤掉推理模型内联的 `<think>` 思考段（ThinkSuppressor，2026-11-21）。
  */
 object AiClient {
 
@@ -167,6 +168,9 @@ object AiClient {
                     throw AiException(friendlyHttp(code, readErrorHead(conn)), httpCode = code)
                 }
 
+                // think 标签抑制（实景体验轮 2026-11-21）：推理模型（MiniMax-M2.5 实录）把
+                // 思考过程内联在正文增量里，这里收口后所有消费者拿到的都是干净正文
+                val think = ThinkSuppressor()
                 val full = StringBuilder()
                 conn.inputStream.bufferedReader().useLines { lines ->
                     for (line in lines) {
@@ -176,10 +180,18 @@ object AiClient {
                         if (data == "[DONE]") break
                         val delta = extractDelta(data)
                         if (delta.isNotEmpty()) {
-                            full.append(delta)
-                            onDelta(delta)
+                            val visible = think.feed(delta)
+                            if (visible.isNotEmpty()) {
+                                full.append(visible)
+                                onDelta(visible)
+                            }
                         }
                     }
+                }
+                val tail = think.finish()
+                if (tail.isNotEmpty()) {
+                    full.append(tail)
+                    onDelta(tail)
                 }
                 full.toString()
             } catch (e: CancellationException) {

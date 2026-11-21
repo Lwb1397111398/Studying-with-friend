@@ -39,6 +39,36 @@ class AiClientTest {
     }
 
     @Test
+    fun chat_suppressesInlineThinkBlock_splitAcrossDeltas() {
+        // MiniMax-M2.5 实录（2026-11-21 随手问）：思考段内联在正文增量里，标签跨 SSE 分片；
+        // onDelta 与返回值都不得出现思考内容
+        val server = MiniHttpServer { _, _, _, resp ->
+            resp.sse(listOf("<th", "ink>英文思考草稿", "更多思考", "</thi", "nk>判断婴儿", "是否已出生"))
+        }
+        try {
+            val deltas = mutableListOf<String>()
+            val full = runBlocking { AiClient.chat(request(server.baseUrl)) { deltas.add(it) } }
+            assertEquals("判断婴儿是否已出生", full)
+            assertTrue(deltas.none { it.contains("think") || it.contains("思考") })
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun chat_unclosedThink_returnsEmptyNotThinkingContent() {
+        val server = MiniHttpServer { _, _, _, resp -> resp.sse(listOf("<think>", "只有思考", "没有正文")) }
+        try {
+            val deltas = mutableListOf<String>()
+            val full = runBlocking { AiClient.chat(request(server.baseUrl)) { deltas.add(it) } }
+            assertEquals("", full)
+            assertTrue(deltas.isEmpty())
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun chat_requestHasAuthHeaderStreamAndModel() {
         val auth = ConcurrentLinkedQueue<String>()
         val bodies = ConcurrentLinkedQueue<String>()

@@ -246,6 +246,23 @@ class KitBookParserTest {
         )
     }
 
+    @Test
+    fun preferredTitle_stripsSiteSourceTail() {
+        // 《袖珍民法典评注》实景实录（2026-11-21）：kit.json title 从书源文件名继承
+        // z-library 站源尾巴上书架；作者括号「(杨代雄)」与版次括号不得误伤
+        assertEquals(
+            "袖珍民法典评注(第二版)_(杨代雄)",
+            KitBookParser.preferredTitle(
+                "袖珍民法典评注(第二版)_(杨代雄)_(z-library.sk,_1lib.sk,_z-lib.sk)",
+                "x.zip",
+            ),
+        )
+        assertEquals(
+            "民法总论",
+            KitBookParser.preferredTitle(null, "民法总论_(z-library.sk,_1lib.sk,_z-lib.sk)_Kit图包.zip"),
+        )
+    }
+
     // ---- filterFrontMatter：编扉页假章剔除（实景体验轮 2026-11-21） ----
 
     /** 正文段（长、无页码尾巴） */
@@ -283,7 +300,7 @@ class KitBookParserTest {
 
     @Test
     fun frontMatter_dedupesSameTitleBodyChapters() {
-        // 重名兜底：扉页行「第九章　代理」1 段 5 字 vs 正文「第九章　代　理」354 段——去空白同名，留大
+        // 重名兜底：扉页行「第九章　代理」1 段 5 字 vs 正文「第九章　代　理」354 段——去空白同名，小残片剔
         val chapters = listOf(
             ParsedChapter("第九章　代理", listOf(bodyPara("代理"))),
             ParsedChapter("第九章　代　理", (1..50).map { bodyPara("代理正文第${it}段，讨论代理权的发生与消灭。") }),
@@ -291,6 +308,21 @@ class KitBookParserTest {
         val out = KitBookParser.filterFrontMatter(chapters)
         assertEquals(1, out.size)
         assertEquals(50, out[0].paras.size)
+    }
+
+    @Test
+    fun frontMatter_keepsRealSameNameChaptersBothBig() {
+        // 《袖珍民法典评注》实录（2026-11-21）：民法典六编各有「第一章一般规定」「第一节
+        // 一般规定」——真重名章动辄数千字，不得留大剔小整章删除（内容丢失）
+        val big1 = (1..30).map { bodyPara("总则编一般规定评注第${it}段，完整成句有标点。") }
+        val big2 = (1..30).map { bodyPara("合同编一般规定评注第${it}段，完整成句有标点。") }
+        val out = KitBookParser.filterFrontMatter(
+            listOf(
+                ParsedChapter("第一章一般规定", big1),
+                ParsedChapter("第一章一般规定", big2),
+            ),
+        )
+        assertEquals(2, out.size)
     }
 
     @Test
@@ -338,5 +370,111 @@ class KitBookParserTest {
         }
         val out = KitBookParser.filterFrontMatter(listOf(ParsedChapter("第一章 总则", paras)))
         assertEquals(1, out.size)
+    }
+
+    // ---- 锚行剥标题留余文（实景体验轮 2026-11-21：《袖珍民法典评注》内容丢失实录） ----
+
+    @Test
+    fun stripTitlePrefix_variants() {
+        // 章头与条文同行：剥标题留余文
+        assertEquals(
+            "第一百七十三条内容。",
+            KitBookParser.stripTitlePrefix("第三节代理终止第一百七十三条内容。", "第三节代理终止"),
+        )
+        // 标题带全角空格、行不带：空白容差
+        assertEquals(
+            "第五十七条内容。",
+            KitBookParser.stripTitlePrefix("第一节　一般规定第五十七条内容。", "第一节一般规定"),
+        )
+        // 标题即整行：返回空串（等价旧的整行剔除）
+        assertEquals("", KitBookParser.stripTitlePrefix("第二章自然人", "第二章自然人"))
+        // 行不含完整标题前缀：原样返回（宁漏不删）
+        assertEquals(
+            "正文不匹配原样保留。",
+            KitBookParser.stripTitlePrefix("正文不匹配原样保留。", "第二章自然人"),
+        )
+    }
+
+    @Test
+    fun parse_gluedAnchorLine_keepsRemainderAsParagraph() {
+        val meta = "{\"kit\":1,\"title\":\"评注\",\"pages\":2,\"chapters\":[" +
+            "{\"t\":\"第三节代理终止\",\"p\":1,\"lv\":1,\"r\":\"BODY\",\"a\":\"第三节代理终止\"}," +
+            "{\"t\":\"第八章民事责任\",\"p\":2,\"lv\":1,\"r\":\"BODY\",\"a\":\"第八章民事责任\"}" +
+            "],\"v\":\"v\"}"
+        val txt = listOf(
+            "${KitBookParser.META_BEGIN}$meta${KitBookParser.META_END}",
+            "〔页1〕",
+            "第三节代理终止第一百七十三条 [委托代理的终止]委托代理终止。",
+            "",
+            "〔页2〕",
+            "第八章民事责任",
+            "",
+            "责任正文。",
+        ).joinToString("\n")
+        val out = KitBookParser.parse(KitBookParser.stripMeta(txt), KitBookParser.extract(txt)!!)
+        assertEquals(listOf("第三节代理终止", "第八章民事责任"), out.map { it.title })
+        assertEquals(1, out[0].paras.size)
+        assertEquals("第一百七十三条 [委托代理的终止]委托代理终止。", out[0].paras[0].text)
+    }
+
+    @Test
+    fun parse_emptyHeaderChapter_titleMergesIntoNext() {
+        // 章头行自成一块、正文全归属其下首个节章（「第二章自然人」0 段实录）——
+        // 空章标题前挂（「章名 · 节名」），层级上下文不丢
+        val meta = "{\"kit\":1,\"title\":\"评注\",\"pages\":2,\"chapters\":[" +
+            "{\"t\":\"第二章自然人\",\"p\":1,\"lv\":1,\"r\":\"BODY\",\"a\":\"第二章自然人\"}," +
+            "{\"t\":\"第一节民事权利能力\",\"p\":1,\"lv\":1,\"r\":\"BODY\",\"a\":\"第一节民事权利能力\"}," +
+            "{\"t\":\"第二节监护\",\"p\":2,\"lv\":1,\"r\":\"BODY\",\"a\":\"第二节监护\"}" +
+            "],\"v\":\"v\"}"
+        val txt = listOf(
+            "${KitBookParser.META_BEGIN}$meta${KitBookParser.META_END}",
+            "〔页1〕",
+            "第二章自然人",
+            "",
+            "第一节民事权利能力",
+            "",
+            "第一节正文一段。",
+            "",
+            "〔页2〕",
+            "第二节监护",
+            "",
+            "第二节正文。",
+        ).joinToString("\n")
+        val out = KitBookParser.parse(KitBookParser.stripMeta(txt), KitBookParser.extract(txt)!!)
+        assertEquals(
+            listOf("第二章自然人${KitBookParser.SEP_TITLE_MERGE}第一节民事权利能力", "第二节监护"),
+            out.map { it.title },
+        )
+        assertEquals(1, out[0].paras.size)
+        assertEquals("第一节正文一段。", out[0].paras[0].text)
+    }
+
+    @Test
+    fun parse_consecutiveEmptyChapters_chainMerge() {
+        // 连续空章成链：「第一编」→「第一章」→ 有正文的「第一节」
+        val meta = "{\"kit\":1,\"title\":\"评注\",\"pages\":2,\"chapters\":[" +
+            "{\"t\":\"第一编\",\"p\":1,\"lv\":1,\"r\":\"BODY\",\"a\":\"第一编\"}," +
+            "{\"t\":\"第一章一般规定\",\"p\":1,\"lv\":1,\"r\":\"BODY\",\"a\":\"第一章一般规定\"}," +
+            "{\"t\":\"第一节开篇条文\",\"p\":2,\"lv\":1,\"r\":\"BODY\",\"a\":\"第一节开篇条文\"}" +
+            "],\"v\":\"v\"}"
+        val content = (1..10).joinToString("\n\n") { "条文评注第${it}段，完整成句带标点，内容充实超过残片阈值。" }
+        val txt = listOf(
+            "${KitBookParser.META_BEGIN}$meta${KitBookParser.META_END}",
+            "〔页1〕",
+            "第一编",
+            "",
+            "第一章一般规定",
+            "",
+            "〔页2〕",
+            "第一节开篇条文",
+            "",
+            content,
+        ).joinToString("\n")
+        val out = KitBookParser.parse(KitBookParser.stripMeta(txt), KitBookParser.extract(txt)!!)
+        assertEquals(1, out.size)
+        assertEquals(
+            listOf("第一编", "第一章一般规定", "第一节开篇条文").joinToString(KitBookParser.SEP_TITLE_MERGE),
+            out[0].title,
+        )
     }
 }

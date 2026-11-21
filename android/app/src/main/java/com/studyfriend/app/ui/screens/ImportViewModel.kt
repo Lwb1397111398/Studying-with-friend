@@ -426,7 +426,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 // 「_Kit图包」尾巴，直接取文件名会把尾巴带进书名）
                 val kitTitle = kitMeta?.title?.takeIf { it.isNotBlank() }
                 bookTitle = when {
-                    kitTitle != null -> kitTitle
+                    // 站源尾巴清洗（实景体验轮 2026-11-21）：kit title 从书源文件名继承时
+                    // 会带「_（z-library.sk,…）」，与 preferredTitle 文件名兜底同口径剥掉
+                    kitTitle != null ->
+                        KitBookParser.cleanSiteTail(kitTitle).ifBlank { KitBookParser.preferredTitle(null, name) }
                     bookTitle.isBlank() -> KitBookParser.preferredTitle(null, name)
                     else -> bookTitle
                 }

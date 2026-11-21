@@ -27,7 +27,7 @@ interface SettingDao {
     fun watch(key: String): Flow<String?>
 }
 
-/** 书架行投影：书信息 + 已读章数 */
+/** 书架行投影：书信息 + 粗读完成章数（readState=DONE，UI 文案写「粗读」不说「已读」） */
 data class BookProgress(
     val id: Long,
     val title: String,
@@ -54,7 +54,7 @@ interface BookDao {
     )
     fun getProgressFlow(id: Long): Flow<BookProgress?>
 
-    /** v7 书架进度条批量源：全部书的已读章数投影（同 getProgressFlow 口径，去 WHERE） */
+    /** v7 书架进度条批量源：全部书的粗读完成章数投影（同 getProgressFlow 口径，去 WHERE） */
     @Query(
         """SELECT b.id AS id, b.title AS title, b.author AS author, b.status AS status,
                b.totalChapters AS totalChapters,

@@ -93,13 +93,22 @@ object KitBookParser {
     /**
      * 书名预填：KIT 元数据 title（电脑侧 init 的工程名=真书名）优先；zip 图包文件名固定
      * 带「_Kit图包」尾巴、2026-11-15 起还带「导入这个_」前缀（电脑侧 pack 产出标记，防与
-     * txt/插图版 PDF 混淆），kitTitle 空白走文件名兜底时把已知标记都剥掉。纯 JVM 供单测。
+     * txt/插图版 PDF 混淆），kitTitle 空白走文件名兜底时把已知标记都剥掉。
+     * kit title 本身源自书源文件名时可能带网购站源尾巴（实景体验轮 2026-11-21：《袖珍
+     * 民法典评注》书架实录 `_（z-library.sk,_1lib.sk,_z-lib.sk）`），一并剥掉。纯 JVM 供单测。
      */
     fun preferredTitle(kitTitle: String?, fileName: String): String =
-        kitTitle?.takeIf { it.isNotBlank() }
-            ?: fileName.substringBeforeLast('.')
-                .removeSuffix("_Kit图包").removePrefix("导入这个_")
-                .ifBlank { "未命名" }
+        kitTitle?.takeIf { it.isNotBlank() }?.let(::cleanSiteTail)?.takeIf { it.isNotBlank() }
+            ?: cleanSiteTail(
+                fileName.substringBeforeLast('.')
+                    .removeSuffix("_Kit图包").removePrefix("导入这个_"),
+            ).ifBlank { "未命名" }
+
+    /** 网购电子书文件名惯带的站源尾巴：`_（z-library.sk,_1lib.sk,_z-lib.sk）` 形态（连前面的下划线一起吃） */
+    private val RE_SITE_TAIL = Regex("""_*[（(](?:z-library|1lib|z-lib)\.sk[^)）]*[)）]\s*$""")
+
+    /** 书名卫生：剥网购站源尾巴（导入页 kit title 预填与文件名兜底共用） */
+    internal fun cleanSiteTail(s: String): String = s.replace(RE_SITE_TAIL, "").trim()
 
     /** 按章表切章。[body] 须已剥元数据块。锚定规则：anchor（标题行前 8 字）为主判据、
      * 起始页号过闸（blockPage >= p，同源页号恰相等，闸的作用是拦住目录页同文条目误锚），
@@ -133,7 +142,7 @@ object KitBookParser {
             }
         }
 
-        val result = mutableListOf<ParsedChapter>()
+        val collected = mutableListOf<ParsedChapter>()
         for (ci in defs.indices) {
             val start = starts[ci]
             if (start < 0) continue // 锚未命中：跳章，段落归前章
@@ -150,14 +159,58 @@ object KitBookParser {
                 if (bi == start && def.anchor.isNotBlank()) {
                     val anchorIdx = lines.indexOfFirst { anchorHit(it, def.anchor) }
                     if (anchorIdx >= 0) {
-                        lines = lines.filterIndexed { i, _ -> i != anchorIdx }
+                        // 锚行剥标题留余文（实景体验轮 2026-11-21 内容丢失实录）：kit txt
+                        // 章头常与正文同行（「第三节代理终止第一百七十三条 [委托代理的终止]…」
+                        // 是一行），整行剔除会把粘住的条文一起删掉——只剥标题前缀，余文成段
+                        lines = lines.mapIndexed { i, l ->
+                            if (i != anchorIdx) l else stripTitlePrefix(l, def.title)
+                        }.filter { it.isNotBlank() }
                     }
                 }
                 paras.addAll(parasOfKit(lines, role, blockPages[bi]))
             }
-            if (paras.isNotEmpty()) result.add(ParsedChapter(def.title, paras))
+            collected.add(ParsedChapter(def.title, paras))
         }
-        return filterFrontMatter(result)
+        // 空章标题前挂（实景体验轮 2026-11-21）：《袖珍民法典评注》章表 章/节混级——章头行
+        // 自成一块、正文全部归属其下首个节章，切出的「第二章自然人」只有标题块 0 段，直接
+        // 丢会连带丢失章节层级上下文。空章标题排队挂到下一个有正文章（「章名 · 节名」），
+        // 连续空章自然成链；尾部空章无后章可挂，随弃。
+        val merged = mutableListOf<ParsedChapter>()
+        val pendingTitles = ArrayDeque<String>()
+        for (ch in collected) {
+            if (ch.paras.isEmpty()) {
+                pendingTitles.addLast(ch.title)
+                continue
+            }
+            val title = if (pendingTitles.isEmpty()) {
+                ch.title
+            } else {
+                val t = (pendingTitles.toList() + ch.title).joinToString(SEP_TITLE_MERGE)
+                pendingTitles.clear()
+                t
+            }
+            merged.add(ch.copy(title = title))
+        }
+        return filterFrontMatter(merged)
+    }
+
+    /** 空章标题并入后章的连接符 */
+    internal const val SEP_TITLE_MERGE = " · "
+
+    /**
+     * 剥掉行首的章标题（容空白差异），返回余文；行不含完整标题前缀时原样返回（宁漏不删）。
+     * 标题即整行时返回空串（等价旧的整行剔除）。
+     */
+    internal fun stripTitlePrefix(line: String, title: String): String {
+        val t = title.filter { !it.isWhitespace() }
+        if (t.isEmpty()) return line
+        var li = 0
+        for (tc in t) {
+            while (li < line.length && line[li].isWhitespace()) li++
+            if (li >= line.length || line[li] != tc) return line
+            li++
+        }
+        return line.substring(li).trim()
     }
 
     /** 简目形态行：以「/ 075」式页码尾巴收尾（编扉页/分编目录页的行特征，实景轮 2026-11-21） */
@@ -206,7 +259,11 @@ object KitBookParser {
                 }
             }
         }
-        // 判据 3：重名兜底——幸存 BODY 章去空白同名时只留总字数最大者
+        // 判据 3：重名兜底——幸存 BODY 章去空白同名时，仅当小章是残片形态（<200 字，与
+        // 判据 1 同阈值）才剔大留小。《袖珍民法典评注》实录（2026-11-21）：民法典六编各有
+        // 「第一章一般规定」「第一节一般规定」，真重名章动辄数千字，一律留大剔小会把真章
+        // 连同评注正文整章删除（内容丢失）；wave-1 假章形态（「第九章　代理」1 段 5 字）
+        // 仍会被剔。
         val survivors = chapters.withIndex().filter { (i, _) -> isBody[i] && !drop[i] }
         val byTitle = survivors.groupBy { (_, ch) -> ch.title.filter { c -> !c.isWhitespace() } }
         for ((i, ch) in survivors) {
@@ -214,7 +271,7 @@ object KitBookParser {
             val group = byTitle.getValue(key)
             if (group.size <= 1) continue
             val best = group.maxBy { (_, c) -> c.paras.sumOf { p -> p.text.length } }
-            if (best.index != i) drop[i] = true
+            if (best.index != i && ch.paras.sumOf { p -> p.text.length } < 200) drop[i] = true
         }
         return chapters.filterIndexed { i, _ -> !drop[i] }
     }
