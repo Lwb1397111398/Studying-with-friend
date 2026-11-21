@@ -318,11 +318,13 @@ fun ReadScreen(
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        // 委托属性不能 smart cast（M4a 坑 #15）：取局部变量再判空
+                        // 委托属性不能 smart cast（M4a 坑 #15）：取局部变量再判空。
+                        // 实景体验轮：进度放前面——长书名吃掉省略号时保住「已读 x/y 章」
+                        //（「不当得利-王泽鉴2023 · 已读 0/…」装机实录，进度被截没了）
                         val bp = bookProgress
                         if (bp != null && bp.totalChapters > 0) {
                             Text(
-                                "$bookTitle · 已读 ${bp.readChapters}/${bp.totalChapters} 章",
+                                "已读 ${bp.readChapters}/${bp.totalChapters} 章 · $bookTitle",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,

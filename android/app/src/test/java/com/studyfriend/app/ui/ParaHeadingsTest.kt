@@ -25,13 +25,31 @@ class ParaHeadingsTest {
         assertEquals(1, ParaHeadings.level("第一讲 民法是什么"))
     }
 
-    // ---------- 二级（一、xxx） ----------
+    // ---------- 二级（一、xxx / 第X款） ----------
 
     @Test
     fun l2_chineseNumeralWithDunhao() {
         assertEquals(2, ParaHeadings.level("一、所有权的意义"))
         assertEquals(2, ParaHeadings.level("十二、无因管理"))
         assertEquals(2, ParaHeadings.level("二．用益物权"))
+    }
+
+    @Test
+    fun l2_kuanTitle() {
+        // 《不当得利》装机实录：王泽鉴书款级标题「第X款 xxx」此前与正文同款渲染
+        assertEquals(2, ParaHeadings.level("第一款问题的提出"))
+        assertEquals(2, ParaHeadings.level("第二款 不当得利的意义"))
+        assertEquals(2, ParaHeadings.level("第十款请求权基础"))
+    }
+
+    @Test
+    fun l2_kuanGuards() {
+        // 「第三款、第四款规定的适用」并列句：款后接顿号 → 正文
+        assertEquals(0, ParaHeadings.level("第三款、第四款规定的适用"))
+        // 款后接逗号 → BODY_PUNCT 拦
+        assertEquals(0, ParaHeadings.level("第二款，学说上有争议。"))
+        // 句中提及款级（非开头）
+        assertEquals(0, ParaHeadings.level("依第一款规定，甲得请求返还。"))
     }
 
     // ---------- 三级（（一）/1. /1.1） ----------

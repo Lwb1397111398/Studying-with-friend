@@ -79,8 +79,10 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
+                        // 实景体验轮：未填 Key 时不显示默认模型名（新装机「主力：gpt-4o-mini（未配置
+                        // API Key）」是噪音——模型名还没意义，直接给动作引导）
                         Text(
-                            if (vm.keyReady) "主力：${vm.mainModel}" else "主力：${vm.mainModel}（未配置 API Key）",
+                            if (vm.keyReady) "主力：${vm.mainModel}" else "主力：未配置 API Key，点进去填好就能用",
                             style = MaterialTheme.typography.bodyMedium,
                             color = if (vm.keyReady) MaterialTheme.colorScheme.onSurface
                             else MaterialTheme.colorScheme.error,

@@ -140,7 +140,8 @@ fun ShelfScreen(
             ) { CircularProgressIndicator() }
             list.isEmpty() -> EmptyState(
                 title = "书架还是空的",
-                subtitle = "点右下角 + 导入 TXT，开始和搭子一起读书",
+                // 实景体验轮：格式列全——手里是 Kit 图包/扫描 PDF 的新用户别被「导入 TXT」劝退
+                subtitle = "点右下角 + 导入 TXT、PDF 或 Kit 图包，开始和搭子一起读书",
                 icon = Icons.Filled.Add,
             )
             else -> BookShelf(

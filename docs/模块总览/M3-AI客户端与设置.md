@@ -81,6 +81,8 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
 
 ## 最后更新
 
+- 2026-11-21 **实景体验轮第二波设置页一件**：AI 模型卡未配置文案「主力：gpt-4o-mini（未配置 API Key）」→「主力：未配置 API Key，点进去填好就能用」——装机实录新装机显示默认档案模型名是噪音（Key 都没填，模型名没有意义），文案改动作引导（SettingsScreen.kt）。已配置时仍显示「主力：<模型名>」不变。
+
 - 2026-11-15 **P0-② 降档梯子轮**：AiClient.chatJson 加「JSON mode→纯 prompt+剥壳提取→校验重试」降档链（详见功能清单「JSON 剥壳与修复重试」行）；`ChatRequest` 加 `jsonMode` 字段（默认 false 零回归面）；chatJson 签名 validate 挂 onDelta 前（保持全部既有尾随 lambda 调用语义）；`AiClientChatJsonFn` 适配器改 onDelta 命名传参。AiClientTest +3 例（response_format 进请求体 / 400 降档不再带 / 校验失败纠正语重试后抛结构不合格）。接入方：QuizJudge（M5 同日条）。粗读归并等其余 chatJson 调用方行为零变化（后续任务按需接入 jsonMode）。
 
 - 2026-11-15 **档案体系多模型轮（本轮，老板点名「很多 LLM 设置、不同功能自己选、界面要漂亮」）**：

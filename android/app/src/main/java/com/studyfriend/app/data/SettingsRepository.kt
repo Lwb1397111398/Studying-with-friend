@@ -312,13 +312,15 @@ class SettingsRepository(
         db.settingDao().upsert(SettingEntity(KEY_READ_LINE_HEIGHT, mult.toString()))
     }
 
-    // ---- 翻页模式（体验优化轮）：true=点屏幕两侧/左右滑翻页，false=上下滚动；watch 供阅读页即时生效 ----
+    // ---- 翻页模式（体验优化轮）：true=点屏幕两侧/左右滑翻页，false=上下滚动；watch 供阅读页即时生效。
+    // ---- 实景体验轮（2026-11-21）：默认改开——新装机点两侧全是切沉浸，老板 11-15 点名的翻页
+    // ---- 要去 Aa 弹层手动开才生效（装机实录）。无键=开；只有显式存过 "false"（用户主动关过）才关 ----
 
     fun readPageModeFlow(): Flow<Boolean> =
-        db.settingDao().watch(KEY_READ_PAGE_MODE).map { it == "true" }
+        db.settingDao().watch(KEY_READ_PAGE_MODE).map { it != "false" }
 
     suspend fun readPageMode(): Boolean =
-        db.settingDao().get(KEY_READ_PAGE_MODE)?.value == "true"
+        db.settingDao().get(KEY_READ_PAGE_MODE)?.value != "false"
 
     suspend fun saveReadPageMode(on: Boolean) {
         db.settingDao().upsert(SettingEntity(KEY_READ_PAGE_MODE, if (on) "true" else "false"))
