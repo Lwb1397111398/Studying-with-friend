@@ -2,6 +2,7 @@ package com.studyfriend.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,7 +39,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -52,6 +53,8 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,13 +70,20 @@ import kotlin.math.roundToInt
 
 // 从 ReadScreen.kt 拆出（2026-10-11 结构批次）：段落行/划词文本/概要卡/讲解卡的渲染
 
-/** 正文阅读字号/行距：随「Aa」弹层调节（功能补齐轮起行距可调，默认 1.7 倍） */
-private fun bodyTextStyle(fontSize: Int, lineMult: Float): TextStyle =
-    TextStyle(fontSize = fontSize.sp, lineHeight = (fontSize * lineMult).roundToInt().sp)
+/** 正文阅读字号/行距：随「Aa」弹层调节（功能补齐轮起行距可调，默认 1.7 倍）；
+ *  阅读体验轮：中文书籍惯例首行缩进两字（indentChars=2，标题/次级段传 0 不缩进） */
+private fun bodyTextStyle(fontSize: Int, lineMult: Float, indentChars: Int = 0): TextStyle = TextStyle(
+    fontSize = fontSize.sp,
+    lineHeight = (fontSize * lineMult).roundToInt().sp,
+    textIndent = if (indentChars > 0) TextIndent(firstLine = (fontSize * indentChars).sp) else TextIndent.None,
+)
 
 /**
- * 段落行（计划 M4a §3 + 质检 P1-6 + §3.4 视觉 + P7 划词）：讲/合并讲徽标 + why；
- * SKIP 段全文半透明仍可读；EXPLAIN 左侧主题色竖条；正文长按取词随手问。
+ * 段落行（计划 M4a §3 + P7 划词 + 阅读体验轮 2026-11-21 重排）：
+ * - 章内节标题（第X节/一、/（一）…）走标题样式：加粗、上留白拉开层级、不缩进、不缩进；
+ * - EXPLAIN 段左侧主题色竖条 + why 小字（「★ 讲」「合并讲」胶囊已删——观感噪音）；
+ * - SKIP 段与普通段同样渲染（「已跳过」标签与半透明已删，老板拍板影响观感）；
+ * - 正文首行缩进两字；正文长按取词随手问。
  */
 @Composable
 internal fun ParaRow(
@@ -111,9 +121,11 @@ internal fun ParaRow(
         )
         return
     }
+    // 章内节标题（第X节/一、/（一）/1.）：标题样式渲染，AI 标注信息（why/竖条）不掺进来
+    val headingLevel = ParaHeadings.level(p.text)
     // EXPLAIN 段左侧主题色竖条（M4a §3.4）：IntrinsicSize 让竖条随内容高度；
     // 学习闭环轮：有批注的段右上角小铅笔标记，点开看/删自己的笔记
-    val explained = p.aiAction == DbValues.ACT_EXPLAIN
+    val explained = p.aiAction == DbValues.ACT_EXPLAIN && headingLevel == 0
     Box(Modifier.fillMaxWidth()) {
         Row(
             Modifier
@@ -136,50 +148,50 @@ internal fun ParaRow(
         Column(
             Modifier
                 .weight(1f)
-                .padding(horizontal = if (explained) 12.dp else 16.dp, vertical = 12.dp),
+                .padding(
+                    start = if (explained) 12.dp else 16.dp,
+                    end = if (explained) 12.dp else 16.dp,
+                    // 标题段上方大留白拉开层级（下小留白贴正文）；普通段 8dp 上下（段间 16dp，
+                    // 原 24dp 偏松——阅读体验轮收紧）
+                    top = if (headingLevel > 0) 18.dp else 8.dp,
+                    bottom = if (headingLevel > 0) 6.dp else 8.dp,
+                ),
         ) {
-            when (p.aiAction) {
-                DbValues.ACT_EXPLAIN, DbValues.ACT_GROUP -> {
-                    ParaTag(if (explained) "★ 讲" else "合并讲")
-                    if (!p.why.isNullOrBlank()) {
-                        Text(
-                            "为什么讲：${p.why}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    SelectableText(
-                        text = p.text,
-                        style = bodyTextStyle(fontSize, lineHeightMult),
-                        highlightRange = selectedRange,
-                        onLongPress = onLongPress,
-                        onSelectionChange = onSelectionChange,
-                        onAnchorChange = onAnchorChange,
-                        onDragStateChange = onDragStateChange,
-                        onTap = onTap,
-                    )
-                }
-                DbValues.ACT_SKIP -> {
-                    Text(
-                        "已跳过",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    SelectableText(
-                        text = p.text,
-                        style = bodyTextStyle(fontSize, lineHeightMult),
-                        highlightRange = selectedRange,
-                        onLongPress = onLongPress,
-                        onSelectionChange = onSelectionChange,
-                        onAnchorChange = onAnchorChange,
-                        onDragStateChange = onDragStateChange,
-                        onTap = onTap,
-                        modifier = Modifier.alpha(0.55f),
-                    )
-                }
-                else -> SelectableText(
+            if (headingLevel > 0) {
+                // 节标题：一级（第X节/篇/回）字号+2 加粗主色；二三级（一、/（一）/1.）加粗原色
+                val level1 = headingLevel == 1
+                SelectableText(
                     text = p.text,
-                    style = bodyTextStyle(fontSize, lineHeightMult),
+                    style = bodyTextStyle(
+                        if (level1) fontSize + 2 else fontSize,
+                        lineHeightMult,
+                        indentChars = 0,
+                    ),
+                    color = if (level1) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                    fontWeight = FontWeight.SemiBold,
+                    highlightRange = selectedRange,
+                    onLongPress = onLongPress,
+                    onSelectionChange = onSelectionChange,
+                    onAnchorChange = onAnchorChange,
+                    onDragStateChange = onDragStateChange,
+                    onTap = onTap,
+                )
+            } else {
+                // EXPLAIN/GROUP 段：why 收成一行主色小字（原「★ 讲/合并讲」胶囊 + 「为什么讲：」
+                // 两行噪声已删）；SKIP 与普通段同款渲染（「已跳过」标签与半透明已删）
+                if ((p.aiAction == DbValues.ACT_EXPLAIN || p.aiAction == DbValues.ACT_GROUP) &&
+                    !p.why.isNullOrBlank()
+                ) {
+                    Text(
+                        "◆ ${p.why}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+                SelectableText(
+                    text = p.text,
+                    style = bodyTextStyle(fontSize, lineHeightMult, indentChars = 2),
                     highlightRange = selectedRange,
                     onLongPress = onLongPress,
                     onSelectionChange = onSelectionChange,
@@ -222,6 +234,7 @@ private fun SelectableText(
     style: TextStyle,
     modifier: Modifier = Modifier,
     color: Color = Color.Unspecified,
+    fontWeight: FontWeight? = null,
     highlightRange: IntRange?,
     onLongPress: (IntRange, IntOffset) -> Unit,
     onSelectionChange: ((IntRange) -> Unit)? = null,
@@ -326,6 +339,7 @@ private fun SelectableText(
             text = annotated,
             style = style,
             color = color,
+            fontWeight = fontWeight,
             onTextLayout = { layout.value = it },
             modifier = Modifier
                 .onGloballyPositioned { windowBounds.value = it.boundsInWindow() }
@@ -389,17 +403,31 @@ private fun SelectionHandle(
     )
 }
 
+/** 章尾「下一章」卡片（阅读体验轮）：读完整章不用回到顶栏找箭头，点卡片直接进下一章 */
 @Composable
-private fun ParaTag(text: String) {
+internal fun NextChapterCard(title: String, onClick: () -> Unit) {
     Surface(
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        shape = RoundedCornerShape(4.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clickable(onClick = onClick),
     ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-        )
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("下一章", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2)
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "进入下一章",
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        }
     }
 }
 

@@ -739,6 +739,12 @@ fun ReadScreen(
                         )
                     }
                 }
+                // 阅读体验轮：章尾「下一章」卡片——读完整章直接点进下一章，不用回顶栏找箭头
+                nextChapter?.let { nc ->
+                    item(key = "next-chapter") {
+                        NextChapterCard(title = nc.title, onClick = { onOpenChapter(nc.id, -1L) })
+                    }
+                }
                 item { Spacer(Modifier.height(32.dp)) }
             }
         }

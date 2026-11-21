@@ -8,6 +8,7 @@ import com.studyfriend.app.data.ai.SecretStore
 import com.studyfriend.app.data.db.StudyDatabase
 import com.studyfriend.app.data.study.AiClientChatJsonFn
 import com.studyfriend.app.data.study.AiClientChatTextFn
+import com.studyfriend.app.data.study.BookAnalysisRunner
 import com.studyfriend.app.data.study.NoteRunner
 import com.studyfriend.app.data.study.OverviewRunner
 import com.studyfriend.app.data.study.RoughReadRunner
@@ -81,6 +82,19 @@ class StudyApp : Application() {
             db = database,
             context = applicationContext,
             settings = settingsRepo,
+            scope = appScope,
+            gate = aiGate,
+        )
+    }
+
+    /** 全局唯一一键分析任务（阅读体验轮）：逐章「粗读→讲解」自动推进，经 aiGate 互斥 */
+    val bookAnalysisRunner: BookAnalysisRunner by lazy {
+        BookAnalysisRunner(
+            db = database,
+            context = applicationContext,
+            settings = settingsRepo,
+            chatJsonFn = AiClientChatJsonFn,
+            chatTextFn = AiClientChatTextFn,
             scope = appScope,
             gate = aiGate,
         )

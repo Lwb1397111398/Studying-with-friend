@@ -113,21 +113,25 @@ class M4aUiSmokeTest {
         compose.setContent {
             StudyFriendTheme { ReadScreen(chapterId = chapterId, onBack = {}) }
         }
-        awaitText("为什么讲：核心概念首次出现")
+        // 阅读体验轮：why 收成一行「◆ 」小字（原「为什么讲：」前缀 + ★ 讲胶囊已删）
+        awaitText("◆ 核心概念首次出现")
     }
 
     @Test
-    fun read_skipFullTextDimmedAndGroupTag() {
+    fun read_skipRendersNormallyAndNoTags() {
         compose.setContent {
             StudyFriendTheme { ReadScreen(chapterId = chapterId, onBack = {}) }
         }
         awaitText("普通段落正文") // 等 Room Flow 首发射、LazyColumn 合成，滚动容器才存在
         // P7 工具行引入横向滚动后 hasScrollAction() 会双匹配：这里只认纵向滚动容器
-        compose.onNode(hasVerticalScrollAction()).performScrollToNode(hasText("已跳过"))
-        awaitText("已跳过")
-        // P7 顶部收纳后纵向空间充裕，但 Robolectric 视口仍小：滚动懒列表让 GROUP 行合成
-        compose.onNode(hasVerticalScrollAction()).performScrollToNode(hasText("合并讲"))
-        awaitText("合并讲")
+        // 阅读体验轮：SKIP 段不再显示「已跳过」标签、不再半透明——正文正常渲染
+        compose.onNode(hasVerticalScrollAction()).performScrollToNode(hasText("跳过段落被折叠"))
+        awaitText("跳过段落被折叠")
+        compose.onNodeWithText("已跳过").assertDoesNotExist()
+        // GROUP 段「合并讲」胶囊同批删除：组首段正常渲染，讲解卡挂在段下
+        compose.onNode(hasVerticalScrollAction()).performScrollToNode(hasText("组首段落"))
+        awaitText("组首段落")
+        compose.onNodeWithText("合并讲").assertDoesNotExist()
     }
 
     /** 只匹配带纵向滚动轴的容器（P7 工具行的横向滚动不满足） */
