@@ -2751,7 +2751,11 @@ def pack_pdf(job: Path, m: dict, book: dict[int, list[str]], notes: list[str],
                 pix.save(str(fp))
             iw, ih = ImageReader(str(fp)).getSize()
             w = min(14 * cm, iw * 72.0 / m["dpi"] * 1.6)
-            return Image(str(fp), width=w, height=w * ih / iw)
+            h = w * ih / iw
+            if h > 23 * cm:  # 页框高约 25.3cm，竖长图按高度反算宽度，防 LayoutError
+                h = 23 * cm
+                w = h * iw / ih
+            return Image(str(fp), width=w, height=h)
         except Exception as e:
             out(f"  [警告] 图 {f['id']}（第 {f['page']} 页）裁剪失败：{e}")
             return None
