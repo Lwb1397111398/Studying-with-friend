@@ -348,6 +348,33 @@ class SettingsRepository(
         db.settingDao().upsert(SettingEntity(KEY_READ_VOLUME_KEY, if (on) "true" else "false"))
     }
 
+    // ---- 阅读字体（实景体验轮第七波）："default"=系统字体；"lxgw"=霞鹜文楷 Lite
+    // ---- （OFL-1.1 随包再分发，assets/OFL-LXGWWenKai-Lite.txt）。watch 供阅读页即时切换 ----
+
+    fun readFontFamilyFlow(): Flow<String> =
+        db.settingDao().watch(KEY_READ_FONT_FAMILY).map { it?.takeIf { v -> v.isNotBlank() } ?: READ_FONT_DEFAULT }
+
+    suspend fun saveReadFontFamily(id: String) {
+        db.settingDao().upsert(SettingEntity(KEY_READ_FONT_FAMILY, id))
+    }
+
+    // ---- 阅读页亮度（实景体验轮第七波，借鉴 legado）：0.15~1.0 写 window.screenBrightness
+    // ---- 只覆盖阅读页窗口、离页恢复系统亮度；-1=跟随系统（默认）。滑条拖动即生效、关弹层存库 ----
+
+    fun readBrightnessFlow(): Flow<Float> =
+        db.settingDao().watch(KEY_READ_BRIGHTNESS).map {
+            it?.toFloatOrNull()?.takeIf { v -> v in READ_BRIGHTNESS_MIN..READ_BRIGHTNESS_MAX } ?: -1f
+        }
+
+    suspend fun readBrightness(): Float =
+        db.settingDao().get(KEY_READ_BRIGHTNESS)?.value?.toFloatOrNull()
+            ?.takeIf { it in READ_BRIGHTNESS_MIN..READ_BRIGHTNESS_MAX } ?: -1f
+
+    suspend fun saveReadBrightness(v: Float) {
+        if (v != -1f && v !in READ_BRIGHTNESS_MIN..READ_BRIGHTNESS_MAX) return
+        db.settingDao().upsert(SettingEntity(KEY_READ_BRIGHTNESS, v.toString()))
+    }
+
     // ---- 每日阅读目标分钟（P1-⑤）：进度环/热力图色阶基准；坏值回退默认 ----
 
     suspend fun readDailyGoalMinutes(): Int =
@@ -567,6 +594,14 @@ class SettingsRepository(
         const val KEY_READ_THEME = "read_theme"
         const val KEY_READ_THEME_DEFAULT = "follow"
         const val KEY_READ_VOLUME_KEY = "read_volume_key"
+        // 阅读字体（实景体验轮第七波）：default=系统 / lxgw=霞鹜文楷 Lite
+        const val KEY_READ_FONT_FAMILY = "read_font_family"
+        const val READ_FONT_DEFAULT = "default"
+        const val READ_FONT_LXGW = "lxgw"
+        // 阅读页亮度（实景体验轮第七波）：-1=跟随系统；0.15~1.0=固定亮度
+        const val KEY_READ_BRIGHTNESS = "read_brightness"
+        const val READ_BRIGHTNESS_MIN = 0.15f
+        const val READ_BRIGHTNESS_MAX = 1.0f
         // 外观主题三态（system=跟随系统）
         const val KEY_THEME = "theme_mode"
         const val THEME_SYSTEM = "system"

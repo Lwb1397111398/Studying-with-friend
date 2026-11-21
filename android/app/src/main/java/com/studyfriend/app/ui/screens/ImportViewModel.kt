@@ -154,6 +154,10 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
 
     private var sourceText: String? = null
 
+    /** 本次导入的源文件名（去扩展名前的展示名）：书名被用户清空时，confirm 落库前
+     *  用它+kit 权威名兜底（实景体验轮第七波实录：清空书名后书架出现「未命名」） */
+    private var sourceName: String = ""
+
     /** KIT 成品书元数据（bookocr-kit pack 的 txt 头部协议块命中时非空）：
      *  parse() 据此分流 KitBookParser（电脑侧章界直入）；换文件/粘贴/失败时清空。
      *  mutableStateOf：isKitBook 供确认页观察（KIT 书隐藏「识别规则」入口） */
@@ -324,6 +328,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 pendingVisionItems = null // 旧书的队列暂存同步作废（否则换书确认会错入队）
                 failedVisionItems = null
                 ocrImported = false
+                sourceName = "" // 上一本的文件名兜底源作废（本文件解析成功后重设）
                 kitMeta = null // 上一本的 KIT 元数据作废（txt/zip 分支命中时重设）
                 kitZipFigures = emptyList() // 上一本图包清单与暂存图同步作废
                 clearFigures() // P4：旧书幸存图同步作废
@@ -415,6 +420,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
                 sourceText = text
                 sourceType = if (pdf) DbValues.SRC_PDF else DbValues.SRC_TXT
                 sourceUri = uri.toString()
+                sourceName = name
                 isPdf = pdf
                 currentRegex = null
                 editedTitles.clear()
@@ -836,7 +842,12 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val now = System.currentTimeMillis()
                 val book = BookEntity(
-                    title = bookTitle.ifBlank { "未命名" },
+                    // 书名兜底（第七波）：用户清空书名框时回退 kit 权威名/文件名，不再落「未命名」
+                    // （《民法概要》装机实录：预填被清空后书架出现「未命名」）。preferredTitle 双空
+                    // 才回「未命名」；粘贴文本无文件名，沿用原兜底
+                    title = bookTitle.ifBlank {
+                        KitBookParser.preferredTitle(kitMeta?.title, sourceName)
+                    },
                     author = author.trim(),
                     sourceType = sourceType,
                     filePath = sourceUri,
@@ -935,6 +946,7 @@ class ImportViewModel(app: Application) : AndroidViewModel(app) {
     fun reset() {
         drainImportDone()
         sourceText = null
+        sourceName = ""
         kitMeta = null
         sourceType = DbValues.SRC_PASTE
         sourceUri = ""

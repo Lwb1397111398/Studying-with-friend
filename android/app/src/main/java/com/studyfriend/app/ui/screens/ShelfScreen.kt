@@ -519,10 +519,18 @@ private fun BookCard(
                         .background(Color.White.copy(alpha = 0.55f)),
                 )
                 Spacer(Modifier.height(12.dp))
+                // 封面书名自适应字号（第七波）：短名大字、长名小字不再挤成一坨——
+                // 《中国民法典评注·条文选注（第3册）》15sp 恒定字号实录观感差
+                val coverFontSize = when (book.title.length) {
+                    in 0..4 -> 22.sp
+                    in 5..8 -> 18.sp
+                    in 9..14 -> 15.sp
+                    else -> 13.sp
+                }
                 Text(
                     book.title,
                     color = Color.White.copy(alpha = 0.96f),
-                    fontSize = 15.sp,
+                    fontSize = coverFontSize,
                     fontWeight = FontWeight.SemiBold,
                     lineHeight = 21.sp,
                     textAlign = TextAlign.Center,

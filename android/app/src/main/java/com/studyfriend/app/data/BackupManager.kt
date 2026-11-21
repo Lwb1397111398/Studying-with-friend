@@ -455,13 +455,15 @@ private data class BackupParaMemo(
     val quote: String,
     val text: String,
     val createdAt: Long,
+    // v13 存疑条目（待弄懂清单）；默认 'note' 兼容旧备份文件（缺字段反序列化不炸）
+    val kind: String = ParaMemoEntity.KIND_NOTE,
 )
 
 private fun ParaMemoEntity.toBackup() =
-    BackupParaMemo(id, bookId, chapterId, paraId, paraIdx, quote, text, createdAt)
+    BackupParaMemo(id, bookId, chapterId, paraId, paraIdx, quote, text, createdAt, kind)
 
 private fun BackupParaMemo.toEntity() =
-    ParaMemoEntity(id, bookId, chapterId, paraId, paraIdx, quote, text, createdAt)
+    ParaMemoEntity(id, bookId, chapterId, paraId, paraIdx, quote, text, createdAt, kind)
 
 @Serializable
 private data class BackupReadingStat(

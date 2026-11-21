@@ -412,7 +412,14 @@ data class ParaMemoEntity(
     val quote: String,
     val text: String,
     val createdAt: Long,
-)
+    /** 'note'=普通批注；'doubt'=存疑（待弄懂清单，实景体验轮第七波）。存量行回填 'note' */
+    val kind: String = KIND_NOTE,
+) {
+    companion object {
+        const val KIND_NOTE = "note"
+        const val KIND_DOUBT = "doubt"
+    }
+}
 
 /**
  * 阅读时长统计（体验增量轮）：一本书一天一行，minutes 累计（upsert 递增）。

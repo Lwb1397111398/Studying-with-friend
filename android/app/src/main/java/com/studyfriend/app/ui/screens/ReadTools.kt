@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,6 +28,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -48,12 +50,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.studyfriend.app.R
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.study.NoteRunState
 import com.studyfriend.app.data.study.RoughRunState
@@ -402,6 +407,10 @@ internal fun FontSizeSheet(
     onThemeChange: (String) -> Unit,
     volumeKey: Boolean,
     onVolumeKeyChange: (Boolean) -> Unit,
+    fontFamilyId: String,
+    onFontFamilyChange: (String) -> Unit,
+    brightness: Float,
+    onBrightnessChange: (Float) -> Unit,
     onChange: (Int, Float) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -409,6 +418,7 @@ internal fun FontSizeSheet(
         Column(
             Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp)
                 .navigationBarsPadding()
                 .padding(bottom = 24.dp),
@@ -426,11 +436,14 @@ internal fun FontSizeSheet(
                     )
                 }) { Text("恢复默认") }
             }
-            // 预览文字按当前字号/行距渲染，拖动即时看到效果
+            // 预览文字按当前字号/行距/字体渲染，拖动即时看到效果
             Text(
                 "示例文字：保理合同是应收账款债权人将现有的……",
                 fontSize = fontSize.sp,
                 lineHeight = (fontSize * lineHeightMult).toInt().sp,
+                fontFamily = if (fontFamilyId == SettingsRepository.READ_FONT_LXGW) {
+                    FontFamily(Font(R.font.lxgw_wenkai_lite_regular))
+                } else null,
             )
             Slider(
                 value = fontSize.toFloat(),
@@ -516,6 +529,61 @@ internal fun FontSizeSheet(
                 }
                 Switch(checked = volumeKey, onCheckedChange = onVolumeKeyChange)
             }
+
+            Spacer(Modifier.height(12.dp))
+            // 阅读字体（第七波）：默认系统字体 / 霞鹜文楷 Lite（OFL-1.1 随包再分发）——
+            // 正文段与节标题即时切换，即点即存
+            Text("阅读字体", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilterChip(
+                    selected = fontFamilyId == SettingsRepository.READ_FONT_DEFAULT,
+                    onClick = { onFontFamilyChange(SettingsRepository.READ_FONT_DEFAULT) },
+                    label = { Text("系统默认") },
+                )
+                FilterChip(
+                    selected = fontFamilyId == SettingsRepository.READ_FONT_LXGW,
+                    onClick = { onFontFamilyChange(SettingsRepository.READ_FONT_LXGW) },
+                    label = {
+                        Text(
+                            "霞鹜文楷",
+                            fontFamily = if (fontFamilyId == SettingsRepository.READ_FONT_LXGW) {
+                                FontFamily(Font(R.font.lxgw_wenkai_lite_regular))
+                            } else null,
+                        )
+                    },
+                )
+            }
+            Text(
+                "楷体风格开源字体（OFL 许可），正文与节标题生效",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+
+            Spacer(Modifier.height(12.dp))
+            // 阅读页亮度（第七波，借鉴 legado）：拖动即生效（只覆盖阅读页窗口），
+            // 关弹层统一存库；「跟随系统」恢复 -1
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("亮度", style = MaterialTheme.typography.titleMedium)
+                if (brightness >= 0f) {
+                    TextButton(onClick = { onBrightnessChange(-1f) }) { Text("跟随系统") }
+                }
+            }
+            Slider(
+                value = if (brightness >= 0f) brightness else 0.6f,
+                onValueChange = { onBrightnessChange((it * 100).roundToInt() / 100f) },
+                valueRange = SettingsRepository.READ_BRIGHTNESS_MIN..SettingsRepository.READ_BRIGHTNESS_MAX,
+            )
+            Text(
+                if (brightness >= 0f) "亮度 ${(brightness * 100).roundToInt()}%（只对阅读页生效）" else "跟随系统亮度",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

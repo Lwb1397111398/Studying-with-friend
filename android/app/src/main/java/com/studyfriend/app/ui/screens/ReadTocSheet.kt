@@ -39,12 +39,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.studyfriend.app.data.db.BookmarkWithChapter
 import com.studyfriend.app.data.db.ChapterWithAsset
+import com.studyfriend.app.data.db.ParaMemoEntity
 import com.studyfriend.app.data.db.ParaMemoWithChapter
 
 /**
  * 目录+书签+批注抽屉（功能补齐轮 + 学习闭环轮）：上半=全书章列表（当前章高亮，点章跳章）；
- * 下半=书签/批注双 Tab（「把当前位置加书签」按钮只在书签 Tab；批注 Tab=全书笔记列表：
- * 章名+笔记摘+删除，点批注跳段）。从阅读页顶栏目录按钮呼出。
+ * 下半=书签/批注/存疑三 Tab（「把当前位置加书签」按钮只在书签 Tab；批注 Tab=全书笔记列表：
+ * 章名+笔记摘+删除，点批注跳段；存疑 Tab=待弄懂清单（第七波）：只存引用不写感想，
+ * 攒着课后集中问 AI）。从阅读页顶栏目录按钮呼出。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,17 +63,53 @@ internal fun ReadTocSheet(
     onDeleteMemo: (ParaMemoWithChapter) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // 下半区视图：false=书签，true=批注（学习闭环轮新增）
-    var memoTab by rememberSaveable { mutableStateOf(false) }
+    // 下半区视图：0=书签，1=批注，2=存疑（第七波待弄懂清单）
+    var memoTab by rememberSaveable { mutableStateOf(0) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding(),
-        ) {
-            // —— 目录（占上半，可滚）——
-            Text(
-                "目录",
+        ReadTocSheetContent(
+            chapters = chapters,
+            currentChapterId = currentChapterId,
+            bookmarks = bookmarks,
+            memos = memos,
+            memoTab = memoTab,
+            onTabChange = { memoTab = it },
+            onOpenChapter = onOpenChapter,
+            onAddBookmark = onAddBookmark,
+            onOpenBookmark = onOpenBookmark,
+            onDeleteBookmark = onDeleteBookmark,
+            onOpenMemo = onOpenMemo,
+            onDeleteMemo = onDeleteMemo,
+        )
+    }
+}
+
+/** 抽屉内容（sheet 壳分离）：memoTab 参数化——Compose 测试直渲染本函数即可验证
+ *  存疑 Tab 列表（弹层独立 window 的语义树测试点不到 Tab，第七波装机实录） */
+@Composable
+internal fun ReadTocSheetContent(
+    chapters: List<ChapterWithAsset>,
+    currentChapterId: Long,
+    bookmarks: List<BookmarkWithChapter>,
+    memos: List<ParaMemoWithChapter>,
+    memoTab: Int,
+    onTabChange: (Int) -> Unit,
+    onOpenChapter: (chapterId: Long) -> Unit,
+    onAddBookmark: () -> Unit,
+    onOpenBookmark: (BookmarkWithChapter) -> Unit,
+    onDeleteBookmark: (BookmarkWithChapter) -> Unit,
+    onOpenMemo: (ParaMemoWithChapter) -> Unit,
+    onDeleteMemo: (ParaMemoWithChapter) -> Unit,
+) {
+    val noteMemos = memos.filter { it.memo.kind != ParaMemoEntity.KIND_DOUBT }
+    val doubtMemos = memos.filter { it.memo.kind == ParaMemoEntity.KIND_DOUBT }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding(),
+    ) {
+        // —— 目录（占上半，可滚）——
+        Text(
+            "目录",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
@@ -141,17 +179,22 @@ internal fun ReadTocSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 FilterChip(
-                    selected = !memoTab,
-                    onClick = { memoTab = false },
+                    selected = memoTab == 0,
+                    onClick = { onTabChange(0) },
                     label = { Text("书签 ${bookmarks.size}") },
                 )
                 FilterChip(
-                    selected = memoTab,
-                    onClick = { memoTab = true },
-                    label = { Text("批注 ${memos.size}") },
+                    selected = memoTab == 1,
+                    onClick = { onTabChange(1) },
+                    label = { Text("批注 ${noteMemos.size}") },
+                )
+                FilterChip(
+                    selected = memoTab == 2,
+                    onClick = { onTabChange(2) },
+                    label = { Text("存疑 ${doubtMemos.size}") },
                 )
             }
-            if (!memoTab) {
+            if (memoTab == 0) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -211,9 +254,12 @@ internal fun ReadTocSheet(
                     }
                 }
             } else {
-                if (memos.isEmpty()) {
+                // 批注（memoTab==1）与存疑（memoTab==2，第七波待弄懂清单）共用列表骨架
+                val tabList = if (memoTab == 2) doubtMemos else noteMemos
+                if (tabList.isEmpty()) {
                     Text(
-                        "还没有批注。读到有想法的段落，长按选中文字点「记一笔」。",
+                        if (memoTab == 2) "还没有存疑。读到没弄懂的句子，长按选中点「记一笔」再勾「存疑」，攒起来之后集中问搭子。"
+                        else "还没有批注。读到有想法的段落，长按选中文字点「记一笔」。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -224,7 +270,7 @@ internal fun ReadTocSheet(
                             .fillMaxWidth()
                             .heightIn(max = 240.dp),
                     ) {
-                        items(memos, key = { it.memo.id }) { m ->
+                        items(tabList, key = { it.memo.id }) { m ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -258,6 +304,5 @@ internal fun ReadTocSheet(
                 }
             }
             Spacer(Modifier.height(24.dp))
-        }
     }
 }

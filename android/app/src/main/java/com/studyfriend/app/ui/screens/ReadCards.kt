@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.unit.IntOffset
@@ -70,11 +72,17 @@ import kotlin.math.roundToInt
 
 // 从 ReadScreen.kt 拆出（2026-10-11 结构批次）：段落行/划词文本/概要卡/讲解卡的渲染
 
+/** 阅读字体（实景体验轮第七波）：ReadScreen 根部按 read_font_family 提供，
+ *  null=跟随系统；霞鹜文楷等自定义字体在这里下发到全部正文段与标题段 */
+internal val LocalReadFontFamily = compositionLocalOf<FontFamily?> { null }
+
 /** 正文阅读字号/行距：随「Aa」弹层调节（功能补齐轮起行距可调，默认 1.7 倍）；
- *  阅读体验轮：中文书籍惯例首行缩进两字（indentChars=2，标题/次级段传 0 不缩进） */
-private fun bodyTextStyle(fontSize: Int, lineMult: Float, indentChars: Int = 0): TextStyle = TextStyle(
+ *  阅读体验轮：中文书籍惯例首行缩进两字（indentChars=2，标题/次级段传 0 不缩进）；
+ *  第七波：fontFamily 非空时正文走自选字体（霞鹜文楷 Lite） */
+private fun bodyTextStyle(fontSize: Int, lineMult: Float, indentChars: Int = 0, fontFamily: FontFamily? = null): TextStyle = TextStyle(
     fontSize = fontSize.sp,
     lineHeight = (fontSize * lineMult).roundToInt().sp,
+    fontFamily = fontFamily,
     textIndent = if (indentChars > 0) TextIndent(firstLine = (fontSize * indentChars).sp) else TextIndent.None,
 )
 
@@ -167,6 +175,7 @@ internal fun ParaRow(
                         if (level1) fontSize + 2 else fontSize,
                         lineHeightMult,
                         indentChars = 0,
+                        fontFamily = LocalReadFontFamily.current,
                     ),
                     color = if (level1) MaterialTheme.colorScheme.primary else Color.Unspecified,
                     fontWeight = FontWeight.SemiBold,
@@ -192,7 +201,7 @@ internal fun ParaRow(
                 }
                 SelectableText(
                     text = p.text,
-                    style = bodyTextStyle(fontSize, lineHeightMult, indentChars = 2),
+                    style = bodyTextStyle(fontSize, lineHeightMult, indentChars = 2, fontFamily = LocalReadFontFamily.current),
                     highlightRange = selectedRange,
                     onLongPress = onLongPress,
                     onSelectionChange = onSelectionChange,

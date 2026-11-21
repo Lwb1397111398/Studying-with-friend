@@ -217,3 +217,24 @@ EPUB 3 Media Overlays「朗读同步逐句高亮」，本地 EPUB 配 MP3/M4B �
 ### 明确不做（本轮调研复核）
 
 双语对照（场景不成立+GPL）、AI 音色克隆（算力不匹配）、跨书知识图谱（与导图重叠+成本 L）、本地向量 RAG（平板内存代价+已有轻量方案）、自定义书源（与导入制定位冲突）、WeRead 笔记同步（协议逆向合规风险）。
+
+## 十、定向补充调研（2026-11-21 实景体验轮第七波）
+
+> 主测《民法概要-王泽鉴第2版》装机实录 + 第六波存档候选转正。零新增调研库，霞鹜文楷经 gh api 实测后落地。
+
+### 本轮落地（5 件）
+
+| 落地件 | 出处 | 许可证约束 | 落点 |
+| --- | --- | --- | --- |
+| 阅读字体霞鹜文楷 Lite | lxgw/LxgwWenKai-Lite 577★ v1.530（主仓 27.1k★），OFL-1.1 经 GitHub API 核实 | OFL 允许打包再分发，**硬性要求随包附许可文本**——已放 `assets/OFL-LXGWWenKai-Lite.txt`；Lite Regular TTF 13.3 MiB（res/font/lxgw_wenkai_lite_regular.ttf），官方明说「适合嵌入 APP」（GB2312 全覆盖） | read_font_family 键 + LocalReadFontFamily + Aa 弹层字体 chip（chip 文字本身用该字体渲染，所见即所得） |
+| 待弄懂清单 | deepread 思路（第六波存档候选 4） | 无 | para_memos 加 kind 列（Room v12→v13，存量回填 note）+ 记一笔弹层「存疑」开关 + 抽屉「存疑」Tab；零 AI 调用，攒着集中问 |
+| 阅读页亮度滑条 | legado 思路（第六波存档候选 8） | 通用 Android 技巧 | read_brightness 键（-1=跟随系统/0.15~1.0）+ window.screenBrightness 只覆盖阅读页窗口、离页恢复 + Aa 弹层滑条 |
+| 导入书名空回退 | 自家 wave-1 preferredTitle 增强（清空书名落「未命名」实录） | 无 | ImportViewModel sourceName 字段 + confirmImport 兜底 preferredTitle(kitMeta?.title, sourceName) |
+| 封面书名自适应字号 | 自研（「中国民法典评注·条文选注（第3册）」15sp 恒定字号挤封面实录） | 无 | ShelfScreen BookCard 按字数四档 22/18/15/13sp |
+
+### 第六波存档候选状态更新（第九节 → 本轮）
+
+- 候选 1（霞鹜文楷）→ **本轮落地**（老板本轮授权「充分的自由度」，破「不引外部字体」决策并如实申报）。
+- 候选 4（待弄懂清单）→ **本轮落地**（记一笔弹层开关形态，浮条不加按钮——七按钮会挤爆 393dp 屏宽）。
+- 候选 8（亮度滑条）→ **本轮落地**（Aa 弹层滑条 + 「跟随系统」恢复按钮）。
+- 其余候选（长图分享卡/章节伴读页/封面生成器/对话树/离线 HTML 大厅/桌面 Widget）维持存档未排期。

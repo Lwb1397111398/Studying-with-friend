@@ -81,7 +81,8 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
 
 ## 最后更新
 
-- 2026-11-21 **实景体验轮第六波（本轮）设置层两键**：①`read_theme`——阅读背景主题包 id（"follow"=跟随书房默认 / ReadingTheme.ALL 五套固定纸色），`readThemeFlow()` watch 供阅读页即时切换（详见 M4a）；②`read_volume_key`——音量键翻页开关（默认关），开时阅读页向 `StudyApp.volumeKeyTurnHook` 注册回调、MainActivity.dispatchKeyEvent 拦音量加/减转翻页并消费（防系统音量条弹出），离页注销。零 schema 变更（settings KV），Aa 弹层即开即存（借鉴 legado，详见 docs/调研/第九节）。
+- 2026-11-21 **实景体验轮第七波（本轮）设置层两键**：①`read_font_family`——阅读字体 id（"default"=系统 / "lxgw"=霞鹜文楷 Lite v1.530，OFL-1.1 随包再分发、许可文本 `assets/OFL-LXGWWenKai-Lite.txt`；字体文件 `res/font/lxgw_wenkai_lite_regular.ttf` 13.3MB，APK 相应增大），`readFontFamilyFlow()` watch 供阅读页即时切换（详见 M4a）；②`read_brightness`——阅读页亮度（-1=跟随系统 / 0.15~1.0 固定值，坏值回退 -1），滑条拖动内存态即时生效、关弹层落库，只覆盖阅读页窗口离页恢复（详见 M4a）。零 schema 变更（settings KV）。
+- 2026-11-21 **实景体验轮第六波（上一轮）设置层两键**：①`read_theme`——阅读背景主题包 id（"follow"=跟随书房默认 / ReadingTheme.ALL 五套固定纸色），`readThemeFlow()` watch 供阅读页即时切换（详见 M4a）；②`read_volume_key`——音量键翻页开关（默认关），开时阅读页向 `StudyApp.volumeKeyTurnHook` 注册回调、MainActivity.dispatchKeyEvent 拦音量加/减转翻页并消费（防系统音量条弹出），离页注销。零 schema 变更（settings KV），Aa 弹层即开即存（借鉴 legado，详见 docs/调研/第九节）。
 
 - 2026-11-21 **实景体验轮第四波（本轮，主测《袖珍民法典评注》条文评注体装机）AI 侧一件**：**推理模型 `<think>` 思考段抑制**——MiniMax-M2.5 等推理模型把思考过程以 `<think>…</think>` 内联在正文增量里流出，随手问装机实录整段英文思考草稿原文上屏。新 `ThinkSuppressor`（ThinkFilter.kt）：流式状态机收口在 `AiClient.chat` 增量链路——标签跨 SSE 分片不漏不提前上屏（半截开/闭标签扣住）、未闭合 think 不吃正文、正文以半截标签收尾时 finish 放行；onDelta 与返回值全部消费者一次过滤受益（随手问/换个讲法/讲解/总结/粗读/判卷/视觉），落库内容不再混思考段。AiClientTest +2（分片抑制/未闭合返回空）+ 新 ThinkSuppressorTest 7 例。装机复测：随手问回答只剩中文正文（截图 bookocr-kit/.e2e/user_exp4/03_qa_no_think.png）。
 

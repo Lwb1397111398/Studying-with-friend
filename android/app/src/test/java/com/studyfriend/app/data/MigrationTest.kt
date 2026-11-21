@@ -510,4 +510,40 @@ fun migrate8To9_readingStatsUsable() {
             }
         }
     }
+
+@Test
+fun migrate12To13_paraMemosKindColumnBackfilled() {
+    val dbName = "migration-test-1213.db"
+    helper.createDatabase(dbName, 12).use { v12 ->
+        v12.execSQL(
+            "INSERT INTO books (title, author, sourceType, filePath, status, totalChapters, " +
+                "overviewJson, createdAt, updatedAt) VALUES ('旧书', '', 'TXT', '', 'READY', 1, NULL, 1, 1)",
+        )
+        v12.execSQL(
+            "INSERT INTO chapters (bookId, idx, title, readState, gist, keyTermsJson, level, parentOrder, calibrated) " +
+                "VALUES (1, 0, '第一章', 'NOT_READ', NULL, NULL, 1, NULL, 0)",
+        )
+        v12.execSQL(
+            "INSERT INTO para_memos (bookId, chapterId, paraId, paraIdx, quote, text, createdAt) " +
+                "VALUES (1, 1, 1, 0, '不当得利的构成要件', '四要件背熟', 99)",
+        )
+    }
+    // 12→13（实景体验轮第七波）：para_memos 加 kind 列，存量批注全部回填 'note'
+    helper.runMigrationsAndValidate(dbName, 13, true, *MIGRATIONS).use { v13 ->
+        v13.execSQL(
+            "INSERT INTO para_memos (bookId, chapterId, paraId, paraIdx, quote, text, createdAt, kind) " +
+                "VALUES (1, 1, 2, 1, '善意取得的例外', '', 100, 'doubt')",
+        )
+        v13.query("SELECT text, kind FROM para_memos ORDER BY id").use { cur ->
+            assertTrue(cur.moveToFirst())
+            // 存量行回填 'note'
+            assertEquals("四要件背熟", cur.getString(0))
+            assertEquals("note", cur.getString(1))
+            // 新写入的存疑行 kind 原样保留
+            assertTrue(cur.moveToNext())
+            assertEquals("doubt", cur.getString(1))
+        }
+    }
 }
+}
+

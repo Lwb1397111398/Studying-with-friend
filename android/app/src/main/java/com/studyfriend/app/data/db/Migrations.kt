@@ -284,7 +284,15 @@ val MIGRATION_11_12 = object : Migration(11, 12) {
     }
 }
 
+// 待弄懂清单（实景体验轮第七波）：para_memos 加 kind 列——'note'=普通批注，
+// 'doubt'=存疑条目（只存引用不写感想，攒着课后集中问）。存量行全部回填 'note'。
+val MIGRATION_12_13 = object : Migration(12, 13) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `para_memos` ADD COLUMN `kind` TEXT NOT NULL DEFAULT 'note'")
+    }
+}
+
 val MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
+    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13,
 )

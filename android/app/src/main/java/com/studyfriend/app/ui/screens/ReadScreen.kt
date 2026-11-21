@@ -60,6 +60,8 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -68,6 +70,7 @@ import androidx.compose.ui.unit.round
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.studyfriend.app.R
 import com.studyfriend.app.StudyApp
 import com.studyfriend.app.data.SettingsRepository
 import com.studyfriend.app.data.db.DbValues
@@ -140,14 +143,40 @@ fun ReadScreen(
     val readingTheme = remember(readThemeId) { ReadingTheme.byId(readThemeId) }
     // 音量键翻页（第六波，借鉴 legado）：开=音量加/减翻上/下一页
     val volumeKey by app.settingsRepo.readVolumeKeyFlow().collectAsStateWithLifecycle(initialValue = false)
+    // 阅读字体（第七波）：default=系统 / lxgw=霞鹜文楷 Lite（res/font，OFL-1.1）
+    val readFontFamilyId by app.settingsRepo.readFontFamilyFlow().collectAsStateWithLifecycle(initialValue = SettingsRepository.READ_FONT_DEFAULT)
+    val readFontFamily = remember(readFontFamilyId) {
+        if (readFontFamilyId == SettingsRepository.READ_FONT_LXGW) {
+            FontFamily(Font(R.font.lxgw_wenkai_lite_regular))
+        } else null
+    }
+    // 阅读页亮度（第七波，借鉴 legado）：-1=跟随系统；0.15~1.0 只覆盖阅读页窗口，离页恢复
+    val readBrightnessSaved by app.settingsRepo.readBrightnessFlow().collectAsStateWithLifecycle(initialValue = -1f)
+    var readBrightness by remember { mutableFloatStateOf(-1f) }
     LaunchedEffect(Unit) {
         readFontSize = app.settingsRepo.readFontSize()
         readLineHeight = app.settingsRepo.readLineHeight()
+        readBrightness = app.settingsRepo.readBrightness()
+    }
+    // 弹层拖动即时生效；关弹层（showFontSheet 变 false）把内存值落库
+    LaunchedEffect(showFontSheet) {
+        if (!showFontSheet && readBrightness >= 0f) app.settingsRepo.saveReadBrightness(readBrightness)
+    }
+    LaunchedEffect(readBrightnessSaved) {
+        // 弹层外的恢复场景（进页/设置变更）同步内存态
+        if (!showFontSheet) readBrightness = readBrightnessSaved
     }
     val scope = rememberCoroutineScope()
 
     // v7 屏幕常亮：读书时不熄屏（离开页面即恢复系统默认）
     val window = (LocalContext.current as? Activity)?.window
+    // 阅读页亮度（第七波）：固定亮度只覆盖阅读页窗口，离页恢复系统值（screenBrightness=-1）
+    DisposableEffect(readBrightness, window) {
+        if (readBrightness in 0.15f..1.0f) {
+            window?.attributes = window?.attributes?.apply { screenBrightness = readBrightness }
+        }
+        onDispose { window?.attributes = window?.attributes?.apply { screenBrightness = -1f } }
+    }
     DisposableEffect(window) {
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
@@ -276,7 +305,11 @@ fun ReadScreen(
 
     // 阅读主题包（第六波）：固定纸色时整页染主题底色；正文默认色走 LocalContentColor
     // （Text 无显式 color 时自动取它）；follow=null 全走现状。弹层保持主题 chrome 不染纸色
-    CompositionLocalProvider(LocalReadingTheme provides readingTheme) {
+    // 阅读字体（第七波）：LocalReadFontFamily 下发正文段与标题段（null=系统字体）
+    CompositionLocalProvider(
+        LocalReadingTheme provides readingTheme,
+        LocalReadFontFamily provides readFontFamily,
+    ) {
     Box(
         Modifier
             .fillMaxSize()
@@ -899,6 +932,10 @@ fun ReadScreen(
             onThemeChange = { id -> scope.launch { app.settingsRepo.saveReadTheme(id) } },
             volumeKey = volumeKey,
             onVolumeKeyChange = { on -> scope.launch { app.settingsRepo.saveReadVolumeKey(on) } },
+            fontFamilyId = readFontFamilyId,
+            onFontFamilyChange = { id -> scope.launch { app.settingsRepo.saveReadFontFamily(id) } },
+            brightness = readBrightness,
+            onBrightnessChange = { v -> readBrightness = v },
             onChange = { size, line -> readFontSize = size; readLineHeight = line },
             onDismiss = {
                 showFontSheet = false
@@ -933,9 +970,10 @@ fun ReadScreen(
             val quote = draftPara.text.substring(draft.range.first, draft.range.last + 1)
             MemoDraftDialog(
                 quote = quote,
-                onSave = { text ->
+                onSave = { text, doubt ->
                     val bid = bookIdForMark
-                    if (bid != null && text.isNotBlank()) {
+                    // 存疑（第七波）：允许感想留空，kind='doubt' 进抽屉「存疑」Tab；普通批注仍要求非空
+                    if (bid != null && (doubt || text.isNotBlank())) {
                         app.appScope.launch {
                             app.database.paraMemoDao().insert(
                                 com.studyfriend.app.data.db.ParaMemoEntity(
@@ -946,6 +984,8 @@ fun ReadScreen(
                                     quote = quote.take(100),
                                     text = text,
                                     createdAt = System.currentTimeMillis(),
+                                    kind = if (doubt) com.studyfriend.app.data.db.ParaMemoEntity.KIND_DOUBT
+                                    else com.studyfriend.app.data.db.ParaMemoEntity.KIND_NOTE,
                                 ),
                             )
                         }

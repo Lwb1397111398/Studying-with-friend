@@ -94,6 +94,10 @@ class BackupManagerTest {
         db.paraMemoDao().insert(
             ParaMemoEntity(bookId = bookId, chapterId = chIds[0], paraId = paras[0], paraIdx = 0, quote = "代理权", text = "记一笔", createdAt = 15L),
         )
+        // v13 存疑条目（待弄懂清单）：kind 随备份往返不丢（第七波）
+        db.paraMemoDao().insert(
+            ParaMemoEntity(bookId = bookId, chapterId = chIds[0], paraId = paras[0], paraIdx = 0, quote = "善意取得的例外", text = "", createdAt = 16L, kind = ParaMemoEntity.KIND_DOUBT),
+        )
         db.settingDao().upsert(SettingEntity("api_base", "https://example.com/v1"))
         db.settingDao().upsert(SettingEntity(SettingsRepository.KEY_ENC, "k1:加密密文不该导出"))
         db.settingDao().upsert(SettingEntity(SettingsRepository.KEY_GITHUB_TOKEN_ENC, "k1:也不该导出"))
@@ -127,7 +131,7 @@ class BackupManagerTest {
             assertEquals(1, summary.reviewItems)
             assertEquals(1, summary.bookmarks)
             assertEquals(1, summary.qaHistory)
-            assertEquals(1, summary.paraMemos)
+            assertEquals(2, summary.paraMemos)
 
             // 加密键绝不进备份；普通设置键在场
             assertFalse("api_key_enc 不得出现在备份里", json.contains("api_key_enc"))
@@ -176,7 +180,9 @@ class BackupManagerTest {
             assertEquals(1, db.backupDao().allReviewItems().size)
             assertEquals(1, db.backupDao().allBookmarks().size)
             assertEquals(1, db.backupDao().allQaHistory().size)
-            assertEquals(1, db.backupDao().allParaMemos().size)
+            assertEquals(2, db.backupDao().allParaMemos().size)
+            // 存疑 kind 随备份往返保留（v13，第七波待弄懂清单）
+            assertEquals(1, db.backupDao().allParaMemos().count { it.kind == ParaMemoEntity.KIND_DOUBT })
             assertEquals("dark", db.settingDao().get("theme_mode")?.value)
         } finally {
             db.close()
