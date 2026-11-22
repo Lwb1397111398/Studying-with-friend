@@ -419,15 +419,29 @@ class SettingsRepository(
         db.settingDao().upsert(SettingEntity(KEY_TTS_RATE, rate.toString()))
     }
 
-    // ---- 朗读引擎（TTS 双模式）：system=手机自带 / local=本地离线模型；坏值回退 system ----
+    // ---- 朗读引擎（TTS 三模式）：system=手机自带 / local=本地离线模型 / edge=Edge 在线朗读；
+    //      坏值回退 edge（2026-11-22 修复「点朗读闪退」：真机两条旧引擎路径从未验证过，
+    //      Edge 在线朗读零依赖（无需系统引擎/无需 205MB 模型），设为默认；显式选过的用户保持其选择 ----
 
     suspend fun ttsEngineMode(): String =
         db.settingDao().get(KEY_TTS_ENGINE)?.value
-            ?.takeIf { it == TTS_ENGINE_SYSTEM || it == TTS_ENGINE_LOCAL } ?: TTS_ENGINE_SYSTEM
+            ?.takeIf { it == TTS_ENGINE_SYSTEM || it == TTS_ENGINE_LOCAL || it == TTS_ENGINE_EDGE }
+            ?: TTS_ENGINE_EDGE
 
     suspend fun saveTtsEngineMode(mode: String) {
-        if (mode != TTS_ENGINE_SYSTEM && mode != TTS_ENGINE_LOCAL) return
+        if (mode != TTS_ENGINE_SYSTEM && mode != TTS_ENGINE_LOCAL && mode != TTS_ENGINE_EDGE) return
         db.settingDao().upsert(SettingEntity(KEY_TTS_ENGINE, mode))
+    }
+
+    // ---- Edge 在线朗读音色：晓晓（默认）/ 云希 ----
+
+    suspend fun ttsEdgeVoice(): String =
+        db.settingDao().get(KEY_TTS_EDGE_VOICE)?.value
+            ?.takeIf { it == EDGE_VOICE_XIAOXIAO || it == EDGE_VOICE_YUNXI } ?: EDGE_VOICE_XIAOXIAO
+
+    suspend fun saveTtsEdgeVoice(voice: String) {
+        if (voice != EDGE_VOICE_XIAOXIAO && voice != EDGE_VOICE_YUNXI) return
+        db.settingDao().upsert(SettingEntity(KEY_TTS_EDGE_VOICE, voice))
     }
 
     // ---- 复习到期提醒（功能补齐轮）：默认开，"false" 显式关闭；StudyApp 按此注册每日查询 ----
@@ -616,6 +630,11 @@ class SettingsRepository(
         const val KEY_TTS_ENGINE = "tts_engine"
         const val TTS_ENGINE_SYSTEM = "system"
         const val TTS_ENGINE_LOCAL = "local"
+        const val TTS_ENGINE_EDGE = "edge"
+        // Edge 在线朗读音色（值即微软神经语音名）
+        const val KEY_TTS_EDGE_VOICE = "tts_edge_voice"
+        const val EDGE_VOICE_XIAOXIAO = "zh-CN-XiaoxiaoNeural"
+        const val EDGE_VOICE_YUNXI = "zh-CN-YunxiNeural"
         // 复习到期提醒（每日本地通知）
         const val KEY_REVIEW_REMINDER = "review_reminder"
         // 每日阅读目标分钟（P1-⑤ 激励统计：进度环/热力图色阶基准）

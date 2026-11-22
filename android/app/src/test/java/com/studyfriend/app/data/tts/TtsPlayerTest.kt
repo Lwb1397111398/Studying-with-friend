@@ -301,4 +301,49 @@ class TtsPlayerTest {
         // 超长硬切：4500 字 → 2 块，起点数一致
         assertEquals(2, splitSentenceStarts("甲".repeat(4500)).size)
     }
+
+    // ---------- 11. EDGE 模式分流（2026-11-22 TTS 三模式）：走 Edge 引擎，prepare 失败不回落 ----------
+
+    @Test
+    fun edgeMode_speaksThroughEdgeEngineWithoutTouchingSystem(): Unit = runBlocking {
+        val system = FakeEngine()
+        val edge = FakeEngine()
+        val player = TtsPlayer(system, scope, localEngine = null, edgeEngine = edge)
+        player.mode = TtsEngineMode.EDGE
+
+        player.toggle("内容。")
+        awaitState(player) { it is TtsState.Speaking }
+
+        assertTrue(edge.prepareCalled)
+        assertFalse("EDGE 不走系统引擎", system.prepareCalled)
+        edge.onDoneCb?.invoke()
+        assertEquals(TtsState.Idle, player.state.value)
+    }
+
+    @Test
+    fun edgeUnavailable_showsEdgeErrorWithoutFallback(): Unit = runBlocking {
+        val system = FakeEngine()
+        val edge = FakeEngine()
+        edge.prepareResult = "Edge 在线朗读需要网络连接，请联网后使用（也可切回「手机自带」引擎）"
+        val player = TtsPlayer(system, scope, localEngine = null, edgeEngine = edge)
+        player.mode = TtsEngineMode.EDGE
+
+        player.toggle("内容。")
+        val s = awaitState(player) { it is TtsState.Error } as TtsState.Error
+
+        assertEquals(edge.prepareResult, s.message)
+        assertFalse("EDGE 失败不回落系统引擎（回落只会退回已不可用的路径）", system.prepareCalled)
+    }
+
+    @Test
+    fun edgeMode_withoutEdgeEngine_fallsBackToSystem(): Unit = runBlocking {
+        val system = FakeEngine()
+        val player = TtsPlayer(system, scope, localEngine = null, edgeEngine = null)
+        player.mode = TtsEngineMode.EDGE
+
+        player.toggle("内容。")
+        awaitState(player) { it is TtsState.Speaking }
+
+        assertTrue(system.prepareCalled)
+    }
 }

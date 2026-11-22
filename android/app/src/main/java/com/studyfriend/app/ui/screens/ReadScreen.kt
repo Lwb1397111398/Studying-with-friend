@@ -93,6 +93,7 @@ import com.studyfriend.app.data.study.ParaIdsCodec
 import com.studyfriend.app.data.study.QuickQa
 import com.studyfriend.app.data.study.enumerateUnits
 import com.studyfriend.app.data.tts.AndroidTtsEngine
+import com.studyfriend.app.data.tts.EdgeTtsEngine
 import com.studyfriend.app.data.tts.SherpaTtsEngine
 import com.studyfriend.app.data.tts.TtsEngineMode
 import com.studyfriend.app.data.tts.TtsPlayer
@@ -284,20 +285,23 @@ fun ReadScreen(
     // v7 目录+书签抽屉开关
     var showTocSheet by remember { mutableStateOf(false) }
 
-    // v7 正文听书（TTS 双模式）：系统引擎 + 离线模型引擎都构造好，模式按设置选；语速从设置读入
+    // v7 正文听书（TTS 三模式）：系统引擎 + 离线模型引擎 + Edge 在线引擎都构造好，模式按设置选；语速从设置读入
     val ttsScope = rememberCoroutineScope()
     val ttsEngine = remember { AndroidTtsEngine(app) }
     val sherpaEngine = remember { SherpaTtsEngine(app) }
-    val ttsPlayer = remember { TtsPlayer(ttsEngine, ttsScope, sherpaEngine) }
+    val edgeEngine = remember { EdgeTtsEngine(app) }
+    val ttsPlayer = remember { TtsPlayer(ttsEngine, ttsScope, sherpaEngine, edgeEngine) }
     val ttsNotice by ttsPlayer.notice.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) {
         val rate = app.settingsRepo.ttsRate()
         ttsEngine.rate = rate
         sherpaEngine.rate = rate
-        ttsPlayer.mode = if (app.settingsRepo.ttsEngineMode() == SettingsRepository.TTS_ENGINE_LOCAL) {
-            TtsEngineMode.LOCAL
-        } else {
-            TtsEngineMode.SYSTEM
+        edgeEngine.rate = rate
+        edgeEngine.voice = app.settingsRepo.ttsEdgeVoice()
+        ttsPlayer.mode = when (app.settingsRepo.ttsEngineMode()) {
+            SettingsRepository.TTS_ENGINE_LOCAL -> TtsEngineMode.LOCAL
+            SettingsRepository.TTS_ENGINE_EDGE -> TtsEngineMode.EDGE
+            else -> TtsEngineMode.SYSTEM
         }
     }
     val ttsState by ttsPlayer.state.collectAsStateWithLifecycle()

@@ -148,6 +148,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                     detailLevel = repo.detailLevel()
                     reviewReminder = repo.reviewReminderEnabled()
                     ttsEngine = repo.ttsEngineMode()
+                    ttsEdgeVoice = repo.ttsEdgeVoice()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -198,8 +199,12 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 朗读引擎（TTS 双模式）：即点即存，下次朗读生效 */
-    var ttsEngine by mutableStateOf(SettingsRepository.TTS_ENGINE_SYSTEM)
+    /** 朗读引擎（TTS 三模式）：即点即存，下次朗读生效 */
+    var ttsEngine by mutableStateOf(SettingsRepository.TTS_ENGINE_EDGE)
+        private set
+
+    /** Edge 在线朗读音色（选「Edge 在线」引擎时设置页展示音色行） */
+    var ttsEdgeVoice by mutableStateOf(SettingsRepository.EDGE_VOICE_XIAOXIAO)
         private set
 
     /** 离线朗读模型就绪与已下字节（设置页下载管理区展示用，refreshTtsModel 刷新） */
@@ -226,6 +231,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { reviewReminder = repo.reviewReminderEnabled() }
         viewModelScope.launch { dailyGoal = repo.readDailyGoalMinutes() }
         viewModelScope.launch { ttsEngine = repo.ttsEngineMode() }
+        viewModelScope.launch { ttsEdgeVoice = repo.ttsEdgeVoice() }
         refreshTtsModel()
         // 下载结束（成功/失败/中断）后刷新就绪状态与已下字节
         viewModelScope.launch {
@@ -308,6 +314,21 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 repo.saveTtsEngineMode(mode)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 保存失败静默，重进回读真实值
+            }
+        }
+    }
+
+    /** Edge 在线朗读音色：即点即存，下一句朗读生效 */
+    fun chooseTtsEdgeVoice(voice: String) {
+        if (voice != SettingsRepository.EDGE_VOICE_XIAOXIAO && voice != SettingsRepository.EDGE_VOICE_YUNXI) return
+        ttsEdgeVoice = voice
+        viewModelScope.launch {
+            try {
+                repo.saveTtsEdgeVoice(voice)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

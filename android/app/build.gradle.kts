@@ -136,11 +136,16 @@ dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     // JBIG2 等解码缺口不走 ImageIO 插件（Android 无 javax.imageio，装了也轮不到）——
     // 统一由系统 PdfRenderer 兜底渲染（PdfFigureExtractor.renderAndSave，J2 实测救回 4 张）
+    // Edge 在线朗读（TTS 三模式之「Edge 在线」）：Edge 浏览器「大声朗读」走 WebSocket 协议，
+    // java.net.http 要 API 34+，minSdk 26 只能用 OkHttp 的 WebSocket 客户端
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.room:room-testing:2.6.1")
+    // EdgeTtsClient 协议测试：MockWebServer 起 ws:// 服务端按 Edge 协议回包
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     // JVM 单测里 org.json 是 Android stub（方法全抛 not mocked），KitBookParserTest 用真实现顶替
     testImplementation("org.json:json:20240303")
     // Compose UI 冒烟测试（M4a：章目录/阅读页渲染）；manifest 须随 debug 变体合并

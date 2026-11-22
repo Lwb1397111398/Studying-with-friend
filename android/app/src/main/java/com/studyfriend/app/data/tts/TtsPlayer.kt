@@ -9,8 +9,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/** 朗读引擎模式（TTS 双模式）：SYSTEM=手机自带系统引擎 / LOCAL=本地离线模型（sherpa kokoro） */
-enum class TtsEngineMode { SYSTEM, LOCAL }
+/** 朗读引擎模式（TTS 三模式）：SYSTEM=手机自带系统引擎 / LOCAL=本地离线模型（sherpa kokoro）/ EDGE=Edge 在线朗读 */
+enum class TtsEngineMode { SYSTEM, LOCAL, EDGE }
 
 /** TTS 引擎抽象（计划 M5 §2.6）：逐句进度与错误都要有出口（评审 P1-2）。
  *  [prepare] 返回 null=可用；非 null=用户可读的不可用原因（错误文案分级由引擎决定） */
@@ -46,6 +46,7 @@ class TtsPlayer(
     private val systemEngine: TtsEngine,
     private val scope: CoroutineScope,
     private val localEngine: TtsEngine? = null,
+    private val edgeEngine: TtsEngine? = null,
 ) {
 
     private val _state = MutableStateFlow<TtsState>(TtsState.Idle)
@@ -82,9 +83,15 @@ class TtsPlayer(
     private suspend fun startSpeaking(text: String, fromSentence: Int, totalFull: Int) {
         _notice.value = null
         _state.value = TtsState.Preparing
-        var engine = if (mode == TtsEngineMode.LOCAL) localEngine ?: systemEngine else systemEngine
+        // 三模式分发：LOCAL 不可用自动回落系统语音；EDGE 不可用直接报错（回落系统语音只会
+        // 退回已被证明不可用的路径，明说原因让用户自己选更清楚）
+        var engine = when (mode) {
+            TtsEngineMode.LOCAL -> localEngine ?: systemEngine
+            TtsEngineMode.EDGE -> edgeEngine ?: systemEngine
+            else -> systemEngine
+        }
         var err = engine.prepare()
-        if (err != null && engine !== systemEngine) {
+        if (err != null && engine !== systemEngine && mode == TtsEngineMode.LOCAL) {
             // 本地模型不可用：自动回落系统语音，明说原因（回落文案留给 UI 朗读中显示）
             _notice.value = "离线朗读暂不可用（$err），这次先用系统语音"
             engine = systemEngine

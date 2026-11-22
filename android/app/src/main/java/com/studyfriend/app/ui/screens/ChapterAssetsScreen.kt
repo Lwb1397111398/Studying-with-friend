@@ -66,6 +66,7 @@ import com.studyfriend.app.data.study.SummaryRunState
 import com.studyfriend.app.data.study.buildExportMd
 import com.studyfriend.app.data.study.decodeCheckQuestions
 import com.studyfriend.app.data.tts.AndroidTtsEngine
+import com.studyfriend.app.data.tts.EdgeTtsEngine
 import com.studyfriend.app.data.tts.SherpaTtsEngine
 import com.studyfriend.app.data.tts.TtsEngineMode
 import com.studyfriend.app.data.tts.TtsPlayer
@@ -570,12 +571,12 @@ private fun MemoryPane(asset: ChapterAssetEntity, onParaRef: (Int) -> Unit = {},
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val app = context.applicationContext as StudyApp
-    val tts = remember { TtsPlayer(AndroidTtsEngine(app), scope, SherpaTtsEngine(app)) }
+    val tts = remember { TtsPlayer(AndroidTtsEngine(app), scope, SherpaTtsEngine(app), EdgeTtsEngine(app)) }
     LaunchedEffect(Unit) {
-        tts.mode = if (app.settingsRepo.ttsEngineMode() == SettingsRepository.TTS_ENGINE_LOCAL) {
-            TtsEngineMode.LOCAL
-        } else {
-            TtsEngineMode.SYSTEM
+        tts.mode = when (app.settingsRepo.ttsEngineMode()) {
+            SettingsRepository.TTS_ENGINE_LOCAL -> TtsEngineMode.LOCAL
+            SettingsRepository.TTS_ENGINE_EDGE -> TtsEngineMode.EDGE
+            else -> TtsEngineMode.SYSTEM
         }
     }
     DisposableEffect(Unit) { onDispose { tts.shutdown() } }

@@ -136,10 +136,12 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                // 朗读引擎（TTS 双模式）：手机自带 / 本地离线模型（sherpa kokoro，模型在下方下载管理）。
-                // 「听的思维」同机实测：系统引擎要先声明 queries 才绑得上（本次修复的根因）
+                // 朗读引擎（TTS 三模式）：Edge 在线（默认，无需系统引擎/无需下载模型）/
+                // 手机自带 / 本地离线模型（sherpa kokoro，模型在下方下载管理）。
+                // 「听的思维」同机实测：系统引擎要先声明 queries 才绑得上（旧报错的根因）
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(
+                        SettingsRepository.TTS_ENGINE_EDGE to "Edge 在线",
                         SettingsRepository.TTS_ENGINE_SYSTEM to "手机自带",
                         SettingsRepository.TTS_ENGINE_LOCAL to "离线模型",
                     ).forEach { (mode, label) ->
@@ -149,6 +151,26 @@ fun SettingsScreen(
                             label = { Text(label) },
                         )
                     }
+                }
+                // Edge 音色行（选「Edge 在线」时出现）：晓晓=Edge 浏览器中文默认声，云希=男声
+                if (vm.ttsEngine == SettingsRepository.TTS_ENGINE_EDGE) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            SettingsRepository.EDGE_VOICE_XIAOXIAO to "晓晓（女）",
+                            SettingsRepository.EDGE_VOICE_YUNXI to "云希（男）",
+                        ).forEach { (v, label) ->
+                            FilterChip(
+                                selected = vm.ttsEdgeVoice == v,
+                                onClick = { vm.chooseTtsEdgeVoice(v) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text(
+                        "Edge 在线朗读走微软服务器在线合成，需要网络；不依赖手机自带的朗读引擎",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 TtsModelSection(vm)
             }

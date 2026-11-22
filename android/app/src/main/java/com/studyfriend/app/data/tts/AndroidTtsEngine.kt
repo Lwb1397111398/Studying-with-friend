@@ -37,11 +37,15 @@ class AndroidTtsEngine(private val context: Context) : TtsEngine {
         tts = null
         val status = withTimeoutOrNull(INIT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
-                val engine = TextToSpeech(context) { s ->
-                    if (cont.isActive) cont.resume(s)
+                // 少数 ROM 的 TextToSpeech 构造器会直接抛异常（bind 失败等），兜成人话错误别闪退
+                val engine = try {
+                    TextToSpeech(context) { s -> if (cont.isActive) cont.resume(s) }
+                } catch (t: Throwable) {
+                    if (cont.isActive) cont.resume(TextToSpeech.ERROR)
+                    null
                 }
                 tts = engine
-                cont.invokeOnCancellation { runCatching { engine.shutdown() } }
+                cont.invokeOnCancellation { runCatching { engine?.shutdown() } }
             }
         }
         if (status == null) {
@@ -52,8 +56,9 @@ class AndroidTtsEngine(private val context: Context) : TtsEngine {
             return "系统朗读引擎初始化失败（$status），请到系统设置检查「文字转语音（TTS）」"
         }
         val engine = tts
-        engine?.setLanguage(Locale.SIMPLIFIED_CHINESE)
-        engine?.setSpeechRate(rate)
+        // setLanguage/setSpeechRate 个别引擎返回异常状态甚至抛异常——放宽不判死，speak 阶段兜底
+        runCatching { engine?.setLanguage(Locale.SIMPLIFIED_CHINESE) }
+        runCatching { engine?.setSpeechRate(rate) }
         return null
     }
 
@@ -79,22 +84,28 @@ class AndroidTtsEngine(private val context: Context) : TtsEngine {
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
-                onError("TTS 合成失败（$errorCode），可在设置里切换离线朗读模型")
+                onError("TTS 合成失败（$errorCode），可在设置里切换朗读引擎")
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                onError("TTS 合成失败，可在设置里切换离线朗读模型")
+                onError("TTS 合成失败，可在设置里切换朗读引擎")
             }
         })
-        for ((i, s) in sentences.withIndex()) {
-            val r = engine.speak(s, TextToSpeech.QUEUE_ADD, Bundle(), i.toString())
-            if (r != TextToSpeech.SUCCESS) {
-                // 入队中断时停掉已入队语句：不能"界面报错、喇叭还在响"
-                engine.stop()
-                onError("TTS 入队失败")
-                return
+        // 个别引擎在 speak 入队时抛异常（引擎服务崩了/binder 死了），兜成错误别闪退
+        runCatching {
+            for ((i, s) in sentences.withIndex()) {
+                val r = engine.speak(s, TextToSpeech.QUEUE_ADD, Bundle(), i.toString())
+                if (r != TextToSpeech.SUCCESS) {
+                    // 入队中断时停掉已入队语句：不能"界面报错、喇叭还在响"
+                    runCatching { engine.stop() }
+                    onError("TTS 入队失败")
+                    return
+                }
             }
+        }.onFailure {
+            runCatching { engine.stop() }
+            onError("TTS 引擎异常（${it.javaClass.simpleName}），可在设置里切换朗读引擎")
         }
     }
 
