@@ -4,6 +4,7 @@ import java.io.File
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -295,6 +296,121 @@ class UpdateCheckerTest {
             dest.readBytes().toList(),
         )
         assertNull(part.takeIf { it.exists() })
+    }
+
+    // ---- downloadApk 并行分块（大包提速路径：≥8MB 且有镜像时启用；单测用 chunkCount 强制开启）----
+
+    @Test
+    fun `downloadApk 大包分块并行拼出完整文件且进度单调到 100`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        val progress = Collections.synchronizedList(mutableListOf<Int>())
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            chunkCount = 3,
+        ) { progress.add(it) }
+        assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
+        // 三段按序拼接后与单流整包字节完全一致
+        assertEquals(
+            ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }.toList(),
+            dest.readBytes().toList(),
+        )
+        assertEquals(100, progress.last())
+        assertEquals("进度应单调", progress, progress.sorted())
+        // 段断点与整包 .part 都不残留
+        for (i in 0 until 3) {
+            assertNull(File(dest.parentFile, dest.name + ".part.c$i").takeIf { it.exists() })
+        }
+        assertNull(File(dest.parentFile, dest.name + ".part").takeIf { it.exists() })
+        // 三段各发一次请求
+        assertEquals(3, fake.downloadRequests.get())
+    }
+
+    @Test
+    fun `downloadApk 分块并行某段失败自动换源成功`() {
+        tmp.newFolder("updates")
+        fake.downloadStatus = 500
+        val mirror = FakeGitHub().also { it.start() }
+        try {
+            val dest = File(tmp.root, "updates/update-20.apk")
+            val progress = Collections.synchronizedList(mutableListOf<Int>())
+            UpdateChecker.downloadApk(
+                "http://127.0.0.1:${fake.port}/download/app.apk",
+                token = null,
+                dest = dest,
+                expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+                mirrors = listOf("http://127.0.0.1:${mirror.port}/"),
+                chunkCount = 2,
+            ) { progress.add(it) }
+            assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
+            assertEquals(
+                ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }.toList(),
+                dest.readBytes().toList(),
+            )
+            assertEquals(100, progress.last())
+            // 源池轮转：段 0 先直连(500)再镜像，段 1 直接镜像
+            assertEquals(1, fake.downloadRequests.get())
+            assertEquals(2, mirror.downloadRequests.get())
+        } finally {
+            mirror.stop()
+        }
+    }
+
+    @Test
+    fun `downloadApk 分块并行段断点续传只补缺口`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        val part0 = File(tmp.root, "updates/update-20.apk.part.c0")
+        // 第 0 段前 40% 是上轮拉到的断点（与假服务器载荷同构）
+        part0.writeBytes(ByteArray(40_000) { (it % 251).toByte() })
+        val progress = Collections.synchronizedList(mutableListOf<Int>())
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            chunkCount = 2,
+        ) { progress.add(it) }
+        assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
+        assertEquals(
+            ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }.toList(),
+            dest.readBytes().toList(),
+        )
+        assertNull(part0.takeIf { it.exists() })
+        // 段 0 续传 1 次 + 段 1 整段 1 次，不重下已收字节
+        assertEquals(2, fake.downloadRequests.get())
+        // 首个进度从已收的 20% 起步
+        assertTrue(progress.first() >= 20)
+        assertEquals(100, progress.last())
+    }
+
+    @Test
+    fun `downloadApk 分块并行非零段遇不支持 Range 源时报人话且断点保留`() {
+        tmp.newFolder("updates")
+        fake.ignoreRange = true
+        val dest = File(tmp.root, "updates/update-20.apk")
+        try {
+            UpdateChecker.downloadApk(
+                "http://127.0.0.1:${fake.port}/download/app.apk",
+                token = null,
+                dest = dest,
+                expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+                chunkCount = 2,
+            ) { }
+            throw AssertionError("应当抛出 UpdateException")
+        } catch (e: UpdateException) {
+            assertTrue(e.message!!.contains("段"))
+            assertTrue(e.message!!.contains("断点"))
+        }
+        // 段 0（第 0 段允许 200 整包读到段边界）已齐保留；段 1 建连前即抛错、无断点文件；整包不落地
+        assertEquals(100_000L, File(tmp.root, "updates/update-20.apk.part.c0").length())
+        assertNull(File(tmp.root, "updates/update-20.apk.part.c1").takeIf { it.exists() })
+        assertTrue(!dest.exists())
+        // 段 0 一次 + 段 1 一次（唯一源轮转一轮）
+        assertEquals(2, fake.downloadRequests.get())
     }
 }
 

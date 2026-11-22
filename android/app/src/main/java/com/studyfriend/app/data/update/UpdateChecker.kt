@@ -54,17 +54,28 @@ object UpdateChecker {
     const val UPDATE_TAG = "latest"
 
     /**
-     * 下载兜底镜像：GitHub 的资产 CDN（release-assets.githubusercontent.com）在国内常被整段
-     * 阻断（2026-10-25 实测：检查更新走的 api.github.com 通，下载 302 跳转后的资产 CDN
-     * TCP 建连即超时，80MB 包 0 字节到手），直连失败后依次改走「镜像前缀 + 原地址」重试。
+     * 下载源池里的镜像：GitHub 的资产 CDN（release-assets.githubusercontent.com）在国内时好时坏
+     * （2026-10-25 实测整段阻断 0 字节到手；2026-11-22 本宽带直连又能以 ~230KB/s 拉通）——
+     * 所以 App 不再「直连失败才换镜像」，而是把直连和镜像组成源池一起并行分块拉，谁通用谁（见 downloadApk）。
      * 镜像站随时会死：这里只保留实测能用的，死一个删一个（改此列表 → push → CI 自动出新版）；
      * 判活命令见 docs/模块总览/M7-应用自更新.md「换源兜底」一节。
+     * 2026-11-22 验尸已删（全部超时或 403）：gh-proxy.com / ghproxy.net / github.moeyy.xyz /
+     * gh.llkk.cc / ghproxy.link / ghproxy.vip / ghproxy.site / ghproxy.cc / hub.gitmirror.com /
+     * ghproxy.homeboyc.cn / cf.ghproxy.cc。
      */
     val DOWNLOAD_MIRRORS = listOf(
-        "https://ghfast.top/",   // 2026-10-25 实测可用，80MB 包持续约 440KB/s
-        "https://gh-proxy.com/", // 2026-10-25 本网络 TLS 握手被掐（约 1s 快速失败）；他网可能可用，留作备胎
-        "https://ghproxy.net/",  // 同上
+        "https://ghfast.top/",   // 2026-11-22 实测可用：支持 Range 断点；单连 ~260KB/s，双连各 ~580KB/s（并行友好），单源 4 连接起开始饿死
     )
+
+    /** 并行分块下载门槛：包体 ≥8MB 且源池 ≥2 个时启用；小包与 E2E 假服务器仍走单流整包 */
+    private const val PARALLEL_MIN_BYTES = 8L * 1024 * 1024
+
+    /**
+     * 分块目标大小 ~16MB、块数 2~4：镜像会掐单条长连接（2026-10-25 实测 ~12MB 处被掐），块小断点续传粒度细；
+     * 源池轮转使**单源并发 ≤2**（2026-11-22 实测单源 4 连接会有 2 条被饿死），块数封顶 4。
+     */
+    private const val CHUNK_TARGET_BYTES = 16L * 1024 * 1024
+    private const val CHUNK_MAX = 4
 
     /**
      * 查询最新发布并与当前版本比较（versionCode 大于当前才算有更新）。
@@ -98,11 +109,13 @@ object UpdateChecker {
     /**
      * 下载 APK 到 [dest]，onProgress 回调整数百分比（IO 线程回调）。
      * 同版本号的完整文件已存在（长度与远端一致）时直接复用，不重复下载。
-     * 先写 `.part` 临时文件、校验长度后再改名——`.part` 半截包**保留作断点**：
-     * 下次请求带 Range 从断点续拉（镜像/重试都续），字节齐了才改名，
-     * 永远不会留下半截冒充完整包（2026-10-25 实测：83MB 包经镜像单发必被掐断，
-     * 续传才能下完）。仅 github.com 的地址拼镜像（E2E/单测的本地假服务器地址不拼）；
-     * 测试用 [mirrors] 参数注入本地假镜像。
+     * 大包（≥8MB 且源池 ≥2 个）走**并行分块**：整包切 2~4 段，每段一线程并发拉，
+     * 段与段之间按「直连 + 镜像」源池轮转——46MB 包实测单连 ~260KB/s，并行后整体 ~3 倍速；
+     * 每段先写独立 `.part.c<N>` 断点、Range 续拉、某段换源不影响其他段，全部齐了拼接改名。
+     * 小包/无镜像走单流整包（E2E 假服务器同此路径）：先写 `.part`、校验长度后才改名。
+     * 永远不会留下半截冒充完整包（2026-10-25 实测：镜像单发长连接必被掐断，断点续传才能下完）。
+     * 仅 github.com 的地址拼镜像（E2E/单测的本地假服务器地址不拼）；
+     * 测试用 [mirrors]/[chunkCount] 参数注入本地假镜像与强制分块数。
      */
     fun downloadApk(
         url: String,
@@ -110,6 +123,7 @@ object UpdateChecker {
         dest: File,
         expectedSize: Long,
         mirrors: List<String> = if (url.startsWith("https://github.com/")) DOWNLOAD_MIRRORS else emptyList(),
+        chunkCount: Int = 0,
         onProgress: (Int) -> Unit,
     ) {
         dest.parentFile?.mkdirs()
@@ -123,8 +137,19 @@ object UpdateChecker {
             finalizeDownload(tmp, onProgress)
             return
         }
+        val sources = listOf(url) + mirrors.map { it + url }
+        val parallel = expectedSize > 0 &&
+            (chunkCount > 0 || (expectedSize >= PARALLEL_MIN_BYTES && sources.size >= 2))
+        if (parallel) {
+            downloadParallel(
+                sources, token, tmp, expectedSize,
+                chunks = chunkCount.takeIf { it > 0 } ?: autoChunkCount(expectedSize),
+                onProgress = onProgress,
+            )
+            return
+        }
         var lastError: Exception? = null
-        for (source in listOf(url) + mirrors.map { it + url }) {
+        for (source in sources) {
             try {
                 downloadFrom(source, token, tmp, onProgress)
                 return
@@ -140,6 +165,156 @@ object UpdateChecker {
             lastError,
         )
     }
+
+    /**
+     * 并行分块下载引擎：每段一个线程，段内按源池轮转重试（offset=段号错开，单源并发 ≤2）。
+     * 每段独立断点文件 `.part.c<N>`（比单条断点粒度细：某段被镜像掐断只续该段）；
+     * 全部段齐 → 拼接进整包 `.part` → 校验总长 → 统一改名收尾。
+     * 任一段全源失败即抛人话汇总，已齐的段保留作断点，重试只补缺口。
+     */
+    private fun downloadParallel(
+        sources: List<String>,
+        token: String?,
+        tmp: File,
+        expectedSize: Long,
+        chunks: Int,
+        onProgress: (Int) -> Unit,
+    ) {
+        val chunkSize = (expectedSize + chunks - 1) / chunks
+        val parts = (0 until chunks).map { File(tmp.parentFile, tmp.name + ".c$it") }
+        val chunkDone = Array(chunks) { java.util.concurrent.atomic.AtomicLong(0L) }
+        val lastPct = java.util.concurrent.atomic.AtomicInteger(-1)
+        val errors = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val failedCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /** 段 i 的期望字节数（末段可短于 chunkSize） */
+        fun chunkLen(i: Int): Long = minOf(chunkSize * (i + 1), expectedSize) - chunkSize * i
+
+        /** 全局进度 = 各段已收字节数之和；只报单调递增的百分比（段断点被弃用重下时防回跳） */
+        fun tick() {
+            while (true) {
+                val cur = lastPct.get()
+                val total = chunkDone.withIndex().sumOf { (i, d) -> d.get().coerceAtMost(chunkLen(i)) }
+                val pct = ((total * 100) / expectedSize).toInt().coerceIn(0, 99)
+                if (pct <= cur) return
+                if (lastPct.compareAndSet(cur, pct)) {
+                    onProgress(pct)
+                    return
+                }
+            }
+        }
+
+        // 断点预扫描（主线程、线程启动前定案，避免各线程初始化进度竞态）：脏断点弃用，其余计入初始进度
+        for (i in 0 until chunks) {
+            val part = parts[i]
+            val want = chunkLen(i)
+            val have = if (part.exists() && part.length() <= want) part.length() else 0L
+            if (have == 0L && part.exists()) part.delete()
+            chunkDone[i].set(have)
+        }
+        tick()
+
+        val threads = (0 until chunks).map { i ->
+            Thread {
+                val want = chunkLen(i)
+                val start = chunkSize * i
+                val part = parts[i]
+                if (chunkDone[i].get() == want) return@Thread // 该段上一轮已拉齐，只等拼接
+                for (attempt in sources.indices) {
+                    val source = sources[(i + attempt) % sources.size]
+                    try {
+                        downloadChunkFrom(
+                            source, token, part, start, want,
+                            have = part.length().coerceAtMost(want),
+                        ) { n ->
+                            chunkDone[i].addAndGet(n.toLong())
+                            tick()
+                        }
+                        return@Thread
+                    } catch (e: Exception) {
+                        errors.add("段${i + 1}@${hostOf(source)}: ${e.message}")
+                    }
+                }
+                failedCount.incrementAndGet()
+            }.apply { start() }
+        }
+        threads.forEach { it.join() }
+        if (failedCount.get() > 0) {
+            throw UpdateException(
+                "下载失败：${chunks} 段并行里有 ${failedCount.get()} 段没拉完" +
+                    "（${errors.firstOrNull() ?: "未知错误"}）。再点一次「立即更新」会从各段断点继续，多试几次可下完",
+            )
+        }
+        // 各段齐了 → 按序拼接进整包 .part → 校验总长 → 删段断点 → 统一改名收尾
+        java.io.FileOutputStream(tmp).use { out ->
+            parts.forEach { p -> p.inputStream().use { it.copyTo(out, 64 * 1024) } }
+        }
+        if (tmp.length() != expectedSize) {
+            throw UpdateException("拼接安装包失败（${tmp.length()}/${expectedSize} 字节），请重试")
+        }
+        parts.forEach { it.delete() }
+        finalizeDownload(tmp, onProgress)
+    }
+
+    /**
+     * 单段单源下载：Range 从段内断点（[start]+[have]）续拉到段尾 [want]。
+     * 源不支持 Range 回整包 200 时：只有「第 0 段从头拉」能直接消费（读到段边界即停），
+     * 其余段内容对不上号 → 抛错换下一个源。收流截到段边界为止（服务器多发不写盘）。
+     */
+    private fun downloadChunkFrom(
+        url: String,
+        token: String?,
+        part: File,
+        start: Long,
+        want: Long,
+        have: Long,
+        onAppend: (Int) -> Unit,
+    ) {
+        val conn = open(url, token)
+        try {
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            if (have > 0) {
+                conn.setRequestProperty("Range", "bytes=${start + have}-${start + want - 1}")
+            } else if (start > 0) {
+                conn.setRequestProperty("Range", "bytes=$start-${start + want - 1}")
+            }
+            val code = conn.responseCode
+            if (code == 200 && (start > 0 || have > 0)) {
+                throw UpdateException("该源不支持断点续传（HTTP 200 整包）")
+            }
+            if (code !in 200..299) {
+                throw UpdateException("下载失败（HTTP $code）")
+            }
+            conn.inputStream.use { input ->
+                java.io.FileOutputStream(part, have > 0).use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    while (part.length() < want) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        val remaining = (want - part.length()).toInt()
+                        val w = if (n > remaining) remaining else n
+                        out.write(buf, 0, w)
+                        onAppend(w)
+                        if (n > remaining) break // 服务器多发（Range 未兑现）：截到段边界为止
+                    }
+                }
+            }
+            if (part.length() != want) {
+                throw UpdateException("分块不完整（已收 ${part.length()}/$want 字节）")
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** 从镜像前缀拼出的源地址里取主机名（人话错误信息用），如 https://ghfast.top/https://github.com/... → ghfast.top */
+    private fun hostOf(source: String): String =
+        source.substringAfter("://").substringBefore('/')
+
+    /** 按包体自动定块数：目标 ~16MB/段，2~4 段（8~16MB 包 2 段、32MB 2 段、48MB 3 段、64MB+ 4 段） */
+    private fun autoChunkCount(size: Long): Int =
+        (((size + CHUNK_TARGET_BYTES - 1) / CHUNK_TARGET_BYTES).toInt().coerceIn(2, CHUNK_MAX))
 
     /** 单源下载到 [tmp]：已有字节带 Range 续拉，服务器不支持 Range 回 200 则从头重下；成功校验长度后改名 */
     private fun downloadFrom(url: String, token: String?, tmp: File, onProgress: (Int) -> Unit) {
