@@ -72,6 +72,49 @@ import kotlin.math.roundToInt
 
 // 从 ReadScreen.kt 拆出（2026-10-11 结构批次）：段落行/划词文本/概要卡/讲解卡的渲染
 
+/**
+ * 章扉（2026-11-22 实景体验轮第九波，借鉴 readest「章首过渡」issue 思路）：章首过渡区——
+ * 小字编号眉（第一章）+ 大字章名 + 琥珀装饰线，出版书的翻章仪式感。随滚动自然经过不拦交互，
+ * 颜色成套走阅读主题包（次级色=眉/装饰线走主色），字体跟随 LocalReadFontFamily（霞鹜文楷）。
+ */
+@Composable
+internal fun ChapterHero(kicker: String?, title: String) {
+    val theme = LocalReadingTheme.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 24.dp, end = 24.dp, top = 38.dp, bottom = 8.dp),
+    ) {
+        if (!kicker.isNullOrBlank()) {
+            Text(
+                kicker,
+                style = MaterialTheme.typography.labelLarge,
+                letterSpacing = 3.sp,
+                color = theme?.secondary ?: MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+        Text(
+            title,
+            fontSize = 26.sp,
+            lineHeight = 36.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = LocalReadFontFamily.current,
+            color = theme?.text ?: Color.Unspecified,
+        )
+        Spacer(Modifier.height(14.dp))
+        Box(
+            Modifier
+                .width(44.dp)
+                .height(3.dp)
+                .background(
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                    RoundedCornerShape(2.dp),
+                ),
+        )
+    }
+}
+
 /** 阅读字体（实景体验轮第七波）：ReadScreen 根部按 read_font_family 提供，
  *  null=跟随系统；霞鹜文楷等自定义字体在这里下发到全部正文段与标题段 */
 internal val LocalReadFontFamily = compositionLocalOf<FontFamily?> { null }

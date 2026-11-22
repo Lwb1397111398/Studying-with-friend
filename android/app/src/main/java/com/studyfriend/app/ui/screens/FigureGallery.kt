@@ -59,24 +59,69 @@ import kotlinx.coroutines.withContext
 private const val TAG_FIG = "FigureRow"
 
 /**
- * 暗色主题插图柔化（2026-11-21 实景体验轮第五波）：《侵权行为》装机实录——扫描书插图
- * 几乎全是白底黑字线图，暗色主题下纯白大块嵌在深棕背景里非常刺眼（行内与全屏预览都炸）。
- * 处理：暗色下 RGB 各通道 ×0.76（白底→约 194 灰底，黑白对比仍在；彩色插图整体变暗不失真，
- * 不做黑白反转——反转会让彩色图变补色怪图）。亮色主题返回 null 不动。
+ * 暗色主题插图柔化（2026-11-21 实景体验轮第五波引入；第九波改**按图自适应**）：
+ * 《侵权行为》装机实录——扫描书插图几乎全是白底黑字线图，暗色主题下纯白大块嵌在深棕
+ * 背景里非常刺眼。wave-5 用定值 RGB×0.76（白底→约 194 灰底）；第九波主测《民法思维》
+ * 实录发现定值压不住**高亮度彩色图**——原书双色印刷的青底比较表 ×0.76 后依然炸眼。
+ * 处理：采样图的 P95 亮度，亮部越亮压得越狠，目标亮部 ≈0.55——白底线图（p95≈0.97）
+ * 压到 0.57 系数、青底表格（p95≈0.85）压到 0.65，暗图（p95≤0.58）完全不动；
+ * 下限 0.40 防压成墨团。不做黑白反转——反转会让彩色图变补色怪图。
  */
 @Composable
-internal fun figureToneFilter(): ColorFilter? {
+internal fun figureToneFilter(bitmap: Bitmap?): ColorFilter? {
     // 阅读主题包（第六波）：墨玉/纯黑纸色下同样刺眼——暗色判据取「阅读页实际底色」
     // （固定主题优先，其次全局主题 surface）
     val rt = LocalReadingTheme.current
     val dark = (rt?.bg ?: MaterialTheme.colorScheme.surface).luminance() < 0.5f
     if (!dark) return null
+    val peak = remember(bitmap) { bitmap?.let { imagePeakLuma(it) } ?: return@remember null } ?: return null
     // Compose ColorMatrix 是 identity 数组，直接改 RGB 对角系数（0/5/10 位）压亮度
+    val factor = (TARGET_PEAK / peak).coerceIn(MIN_FACTOR, 1f)
+    if (factor >= 0.97f) return null
     val m = ColorMatrix()
-    m.values[0] = 0.76f
-    m.values[5] = 0.76f
-    m.values[10] = 0.76f
+    m.values[0] = factor
+    m.values[5] = factor
+    m.values[10] = factor
     return ColorFilter.colorMatrix(m)
+}
+
+/** 暗色图目标亮部亮度（P95 被压到这个值附近）与系数下限 */
+private const val TARGET_PEAK = 0.55f
+private const val MIN_FACTOR = 0.40f
+
+/**
+ * 采样亮度 P95（0~1）：网格抽点（每边约 64 点）→ luma 排序取 95 分位。比均值更贴
+ * 「亮部多扎眼」的体感——白底黑字线图均值被黑字拉低，P95 仍≈0.97。解码失败按最亮
+ * 处理（1f → 按下限系数压，宁暗勿刺）。
+ */
+internal fun imagePeakLuma(b: Bitmap): Float {
+    val w = b.width
+    val h = b.height
+    if (w <= 0 || h <= 0) return 1f
+    val step = maxOf(1, minOf(w, h) / 64)
+    val cols = (w + step - 1) / step
+    val rows = (h + step - 1) / step
+    val lumas = FloatArray(cols * rows)
+    var n = 0
+    var y = 0
+    while (y < h) {
+        var x = 0
+        while (x < w) {
+            val px = b.getPixel(x, y)
+            val r = (px shr 16 and 0xFF) / 255f
+            val g = (px shr 8 and 0xFF) / 255f
+            val bl = (px and 0xFF) / 255f
+            if (n < lumas.size) {
+                lumas[n++] = 0.2126f * r + 0.7152f * g + 0.0722f * bl
+            }
+            x += step
+        }
+        y += step
+    }
+    if (n == 0) return 1f
+    val arr = lumas.copyOf(n)
+    arr.sort()
+    return arr[((n - 1) * 95) / 100]
 }
 
 /** 混排行：段行 / 图行 */
@@ -246,7 +291,7 @@ internal fun FigureRow(
                 bitmap = bmp.asImageBitmap(),
                 contentDescription = "示意图，第${f.pageNo}页", // TODO(P6): caption
                 contentScale = ContentScale.FillWidth,
-                colorFilter = figureToneFilter(),
+                colorFilter = figureToneFilter(bmp),
                 modifier = Modifier.fillMaxSize(),
             )
             lost -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -340,7 +385,7 @@ internal fun FigurePreviewDialog(f: FigureEntity, filesRoot: File, onDismiss: ()
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "示意图全屏预览，第${f.pageNo}页",
                     contentScale = ContentScale.Fit,
-                    colorFilter = figureToneFilter(),
+                    colorFilter = figureToneFilter(bmp),
                     modifier = Modifier.fillMaxSize(),
                 )
                 corrupt -> Text("图片已损坏", color = MaterialTheme.colorScheme.error)

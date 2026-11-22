@@ -25,11 +25,13 @@ interface TtsEngine {
     fun shutdown()
 }
 
-/** 朗读状态机：Idle / Preparing / Speaking(已播句数, 总句数) / Error */
+/** 朗读状态机：Idle / Preparing / Speaking(已播句数, 总句数) / Paused(暂停在下一句序号, 总句数) / Error */
 sealed interface TtsState {
     data object Idle : TtsState
     data object Preparing : TtsState
     data class Speaking(val sentenceIdx: Int, val total: Int) : TtsState
+    /** 暂停（第九波实景轮）：sentenceIdx = 恢复时要从头重读的那一句序号（0-based） */
+    data class Paused(val sentenceIdx: Int, val total: Int) : TtsState
     data class Error(val message: String) : TtsState
 }
 
@@ -37,6 +39,8 @@ sealed interface TtsState {
  * 朗读控制（TTS 双模式）：按 [mode] 选引擎，本地模型不可用时自动回落系统语音并经
  * [notice] 说明原因（「听的思维」回落链经验）；toggle 切换播放/停止；stop 回 Idle；
  * 引擎晚到的"用户停止引发 onError"依状态忽略（已回 Idle 即不报错）。
+ * 第九波实景轮加暂停/恢复（anx-reader v1.14.0 思路）：pause 停引擎记下一句序号，
+ * resume 从该句在原文中的偏移重切文本继续——句→段映射仍按全文句号口径，进度不跳变。
  */
 class TtsPlayer(
     private val systemEngine: TtsEngine,
@@ -62,52 +66,116 @@ class TtsPlayer(
     @Volatile
     private var activeEngine: TtsEngine? = null
 
+    /** toggle 入口记全文：pause 现场（含 Preparing 无进度）恢复时要能重切文本 */
+    @Volatile
+    private var lastToggleText: String? = null
+
+    /** 暂停现场是否有效（stop/toggle 新播会清） */
+    @Volatile
+    private var pausedText: String? = null
+
+    /**
+     * 播放入口（toggle 与 resume 共用）：[fromSentence] > 0 时从该句在原文中的偏移
+     * 重切子文本续播，句进度回调加回偏移保持全文口径；口径对不上回退整篇从头播。
+     * [totalFull] 为全文句数（恢复场景），从头播传 0 由这里现算。
+     */
+    private suspend fun startSpeaking(text: String, fromSentence: Int, totalFull: Int) {
+        _notice.value = null
+        _state.value = TtsState.Preparing
+        var engine = if (mode == TtsEngineMode.LOCAL) localEngine ?: systemEngine else systemEngine
+        var err = engine.prepare()
+        if (err != null && engine !== systemEngine) {
+            // 本地模型不可用：自动回落系统语音，明说原因（回落文案留给 UI 朗读中显示）
+            _notice.value = "离线朗读暂不可用（$err），这次先用系统语音"
+            engine = systemEngine
+            err = engine.prepare()
+        }
+        if (err != null) {
+            _state.value = TtsState.Error(err)
+            job = null
+            return
+        }
+        val fullTotal = if (totalFull > 0) totalFull else splitSentences(text).size
+        // 恢复场景：从 fromSentence 的原文偏移切子文本续播；口径对不上（分句数不齐）回退整篇
+        val start: Int? = if (fromSentence > 0) {
+            val starts = splitSentenceStarts(text)
+            if (starts.size == fullTotal) starts.getOrNull(fromSentence) else null
+        } else {
+            null
+        }
+        val textToSpeak = if (start != null) text.substring(start) else text
+        val total = fullTotal
+        if (splitSentences(textToSpeak).isEmpty()) {
+            _state.value = TtsState.Error("没有可朗读的内容")
+            job = null
+            return
+        }
+        // prepare 与 speak 入队之间无挂起点，这里补一次取消检查：stop 已执行过就不再入队发声
+        kotlin.coroutines.coroutineContext.ensureActive()
+        activeEngine = engine
+        _state.value = TtsState.Speaking(sentenceIdx = if (start != null) fromSentence else 0, total = total)
+        val base = if (start != null) fromSentence else 0
+        engine.speak(
+            textToSpeak,
+            onSentence = { idx ->
+                // idx 相对子文本；加回 base 得全文句号（句→段映射/进度不跳变）
+                _state.update {
+                    if (it is TtsState.Speaking || it is TtsState.Preparing) {
+                        TtsState.Speaking(base + idx, total)
+                    } else {
+                        it
+                    }
+                }
+            },
+            onDone = {
+                _state.value = TtsState.Idle
+                _notice.value = null
+                pausedText = null
+                job = null
+            },
+            onError = { msg ->
+                // 用户 stop 已回 Idle：晚到的停止类错误不再覆盖成 Error
+                _state.update {
+                    if (it is TtsState.Speaking || it is TtsState.Preparing) TtsState.Error(msg) else it
+                }
+                job = null
+            },
+        )
+    }
+
     fun toggle(text: String) {
         if (job != null) {
             stop()
             return
         }
-        job = scope.launch {
-            _notice.value = null
-            _state.value = TtsState.Preparing
-            var engine = if (mode == TtsEngineMode.LOCAL) localEngine ?: systemEngine else systemEngine
-            var err = engine.prepare()
-            if (err != null && engine !== systemEngine) {
-                // 本地模型不可用：自动回落系统语音，明说原因（回落文案留给 UI 朗读中显示）
-                _notice.value = "离线朗读暂不可用（$err），这次先用系统语音"
-                engine = systemEngine
-                err = engine.prepare()
-            }
-            if (err != null) {
-                _state.value = TtsState.Error(err)
-                job = null
-                return@launch
-            }
-            val sentences = splitSentences(text)
-            if (sentences.isEmpty()) {
-                _state.value = TtsState.Error("没有可朗读的内容")
-                job = null
-                return@launch
-            }
-            // prepare 与 speak 入队之间无挂起点，这里补一次取消检查：stop 已执行过就不再入队发声
-            ensureActive()
-            activeEngine = engine
-            _state.value = TtsState.Speaking(sentenceIdx = 0, total = sentences.size)
-            engine.speak(
-                text,
-                onSentence = { idx -> _state.update { if (it is TtsState.Speaking) TtsState.Speaking(idx, sentences.size) else it } },
-                onDone = {
-                    _state.value = TtsState.Idle
-                    _notice.value = null
-                    job = null
-                },
-                onError = { msg ->
-                    // 用户 stop 已回 Idle：晚到的停止类错误不再覆盖成 Error
-                    _state.update { if (it is TtsState.Speaking || it is TtsState.Preparing) TtsState.Error(msg) else it }
-                    job = null
-                },
-            )
-        }
+        pausedText = null
+        lastToggleText = text
+        job = scope.launch { startSpeaking(text, fromSentence = 0, totalFull = 0) }
+    }
+
+    /**
+     * 暂停（第九波）：停引擎记「下一句从哪继续」。只能从 Speaking/Preparing 暂停；
+     * Preparing 阶段没有进度，按第 0 句恢复。恢复素材（全文）留存到 resume/stop 为止。
+     */
+    fun pause() {
+        val job0 = job ?: return
+        val s = _state.value
+        if (s !is TtsState.Speaking && s !is TtsState.Preparing) return
+        pausedText = lastToggleText
+        job0.cancel()
+        job = null
+        (activeEngine ?: systemEngine).stop()
+        val total = (s as? TtsState.Speaking)?.total ?: splitSentences(lastToggleText.orEmpty()).size
+        val next = if (s is TtsState.Speaking) s.sentenceIdx + 1 else 0
+        _state.value = TtsState.Paused(sentenceIdx = next, total = total)
+    }
+
+    /** 恢复：从暂停句起继续播；没暂停现场（Idle/Error/未播过）就不动 */
+    fun resume() {
+        if (job != null) return
+        val text = pausedText ?: return
+        val s = _state.value as? TtsState.Paused ?: return
+        job = scope.launch { startSpeaking(text, fromSentence = s.sentenceIdx, totalFull = s.total) }
     }
 
     fun stop() {
@@ -116,6 +184,7 @@ class TtsPlayer(
         (activeEngine ?: systemEngine).stop()
         _state.value = TtsState.Idle
         _notice.value = null
+        pausedText = null
     }
 
     fun shutdown() {
@@ -123,6 +192,53 @@ class TtsPlayer(
         systemEngine.shutdown()
         localEngine?.shutdown()
     }
+}
+
+/**
+ * 分句起始偏移版（第九波，供 resume 从句偏移切文本）：返回每句在原文中的起始偏移，
+ * 口径与 [splitSentences] 同（同分隔符/同去空白句/同超长硬切）。splitSentences 会丢弃
+ * 空白句导致偏移列表与句数不齐——检测到不齐返回空表，调用方回退整篇重播（宁重播不错位）。
+ */
+internal fun splitSentenceStarts(text: String): List<Int> {
+    val raw = mutableListOf<Int>()
+    var bufStart = 0
+    for ((i, ch) in text.withIndex()) {
+        if (ch == '。' || ch == '！' || ch == '？' || ch == '!' || ch == '?' || ch == '；' || ch == ';' || ch == '\n') {
+            raw.add(bufStart)
+            bufStart = i + 1
+        }
+    }
+    if (bufStart < text.length) raw.add(bufStart)
+    // splitSentences 只丢「trim 后空白」的 piece；空白 piece 的起点从 raw 里剔除即对齐
+    val pieces = mutableListOf<String>()
+    var bufStart2 = 0
+    for ((i, ch) in text.withIndex()) {
+        if (ch == '。' || ch == '！' || ch == '？' || ch == '!' || ch == '?' || ch == '；' || ch == ';' || ch == '\n') {
+            pieces.add(text.substring(bufStart2, i + 1))
+            bufStart2 = i + 1
+        }
+    }
+    if (bufStart2 < text.length) pieces.add(text.substring(bufStart2))
+    val kept = raw.filterIndexed { idx, _ -> pieces.getOrNull(idx)?.trim()?.isNotEmpty() == true }
+    // 超长硬切：splitSentences 对 trim 后的 piece 按 MAX_LEN 切块——切块只出现在句内，
+    // 每个额外块的起始 = 前块起始 + MAX_LEN（在原文中的位置因 trim 前移量一致，resume
+    // 只要求「从某块起播」，起点偏后几个空白字符无感知）
+    val result = mutableListOf<Int>()
+    for ((idx, start) in kept.withIndex()) {
+        val piece = pieces.getOrNull(idx)?.trim() ?: continue
+        var i = 0
+        var first = true
+        while (i < piece.length) {
+            if (first) {
+                result.add(start)
+                first = false
+            } else {
+                result.add(start + i)
+            }
+            i += MAX_LEN
+        }
+    }
+    return result
 }
 
 /** 分句：句末标点/分号/换行切分；空白丢弃；超长句按 4000 字符硬切（TTS 单次入队上限） */
@@ -151,6 +267,8 @@ internal fun splitSentences(text: String): List<String> {
     return result
 }
 
+private const val MAX_LEN = 4000
+
 /**
  * 句→段定位（功能补齐轮正文听书）：朗读文本 = 多段顺序拼接，[paraSentenceCounts]
  * 是每段的分句数（splitSentences 同口径）；返回全局句序号 [sentenceIdx] 落在第几段
@@ -165,5 +283,3 @@ internal fun sentenceToParaIndex(paraSentenceCounts: List<Int>, sentenceIdx: Int
     }
     return paraSentenceCounts.size - 1
 }
-
-private const val MAX_LEN = 4000

@@ -43,6 +43,7 @@ class TtsPlayerTest {
         var onSentenceCb: ((Int) -> Unit)? = null
         var onDoneCb: (() -> Unit)? = null
         var onErrorCb: ((String) -> Unit)? = null
+        var lastSpokenText: String? = null
 
         override suspend fun prepare(): String? {
             prepareCalled = true
@@ -50,6 +51,7 @@ class TtsPlayerTest {
         }
 
         override fun speak(text: String, onSentence: (Int) -> Unit, onDone: () -> Unit, onError: (String) -> Unit) {
+            lastSpokenText = text
             onSentenceCb = onSentence
             onDoneCb = onDone
             onErrorCb = onError
@@ -219,5 +221,84 @@ class TtsPlayerTest {
 
         assertEquals("本机没有可用的系统朗读引擎", s.message)
         assertFalse(local.stopCalled)
+    }
+
+    // ---------- 9. 暂停/恢复（第九波实景轮） ----------
+
+    @Test
+    fun pause_fromSpeaking_recordsNextSentenceAndStopsEngine(): Unit = runBlocking {
+        val engine = FakeEngine()
+        val player = TtsPlayer(engine, scope)
+        player.toggle("三句话。第一句。第二句！")
+        awaitState(player) { it is TtsState.Speaking }
+        engine.onSentenceCb?.invoke(1) // 已播完第 1 句（全文 3 句）
+
+        player.pause()
+
+        val s = player.state.value
+        assertTrue("暂停态", s is TtsState.Paused)
+        assertEquals("下一句=第 2 句（0-based）", 2, (s as TtsState.Paused).sentenceIdx)
+        assertEquals(3, s.total)
+        assertTrue(engine.stopCalled)
+    }
+
+    @Test
+    fun resume_continuesFromPausedSentenceWithFullIndexing(): Unit = runBlocking {
+        val engine = FakeEngine()
+        val player = TtsPlayer(engine, scope)
+        val text = "三句话。第一句。第二句！"
+        player.toggle(text)
+        awaitState(player) { it is TtsState.Speaking }
+        engine.onSentenceCb?.invoke(1)
+        player.pause()
+
+        player.resume()
+        awaitState(player) { it is TtsState.Speaking }
+
+        // 引擎收到的恢复文本 = 从第 2 句「第一句。」起的子文本（分句起始偏移切分）
+        assertEquals(text.substring(splitSentenceStarts(text)[2]), engine.lastSpokenText)
+        // 全文句号口径：子文本里推进 0 句 = 全文第 2 句
+        assertEquals(TtsState.Speaking(2, 3), player.state.value)
+        engine.onSentenceCb?.invoke(1)
+        assertEquals(TtsState.Speaking(3, 3), player.state.value)
+        engine.onDoneCb?.invoke()
+        assertEquals(TtsState.Idle, player.state.value)
+    }
+
+    @Test
+    fun pause_onIdle_orStopClearsPause(): Unit = runBlocking {
+        val engine = FakeEngine()
+        val player = TtsPlayer(engine, scope)
+        // Idle 时 pause 不动
+        player.pause()
+        assertEquals(TtsState.Idle, player.state.value)
+        // 暂停后 stop → Idle 且恢复现场清空（resume 不再动）
+        player.toggle("内容。")
+        awaitState(player) { it is TtsState.Speaking }
+        player.pause()
+        assertTrue(player.state.value is TtsState.Paused)
+        player.stop()
+        assertEquals(TtsState.Idle, player.state.value)
+        player.resume()
+        assertEquals("stop 已清暂停现场，resume 不动", TtsState.Idle, player.state.value)
+    }
+
+    // ---------- 10. 分句起始偏移与 splitSentences 对齐（resume 切分的前提） ----------
+
+    @Test
+    fun splitSentenceStarts_alignsWithSplitSentences() {
+        val text = "三句话。第一句。第二句！"
+        val starts = splitSentenceStarts(text)
+        val pieces = splitSentences(text)
+        assertEquals(pieces.size, starts.size)
+        // 每个起点截到句尾应包含对应句文本（trim 后相等）
+        pieces.forEachIndexed { i, piece ->
+            val end = if (i + 1 < starts.size) starts[i + 1] else text.length
+            assertEquals(piece, text.substring(starts[i], end).trim())
+        }
+        // 空白句被丢时起点列表同步剔除（「。  。」中间空白句）
+        assertEquals(splitSentences("有句。   。有句！").size, splitSentenceStarts("有句。   。有句！").size)
+        // 超长硬切：4500 字 → 2 块，起点数一致
+        assertEquals(2, splitSentenceStarts("甲".repeat(4500)).size)
     }
 }

@@ -52,17 +52,19 @@ object Routes {
     const val BOOK = "book/{bookId}"
     // highlight 为可选参数（P5 章节树）：节行点击带节标题，ReadScreen 滚动定位到该段
     // paraId 为可选参数（功能补齐轮全书搜索）：点搜索结果直接滚到命中段，优先级高于 highlight
-    const val READ = "read/{chapterId}?highlight={highlight}&paraId={paraId}"
+    // fresh 为可选参数（第九波切章落章头）：true=箭头/章尾卡/抽屉跳章，落章头不恢复旧位置
+    const val READ = "read/{chapterId}?highlight={highlight}&paraId={paraId}&fresh={fresh}"
     const val SUMMARY = "summary/{chapterId}"
     const val OVERVIEW = "overview/{bookId}"
     // v7 全书搜索页：bookId 限定搜索范围
     const val SEARCH = "search/{bookId}"
 
     fun book(bookId: Long) = "book/$bookId"
-    fun read(chapterId: Long, highlight: String? = null, paraId: Long = -1L): String {
+    fun read(chapterId: Long, highlight: String? = null, paraId: Long = -1L, fresh: Boolean = false): String {
         val params = buildList {
             if (!highlight.isNullOrBlank()) add("highlight=${android.net.Uri.encode(highlight)}")
             if (paraId >= 0) add("paraId=$paraId")
+            if (fresh) add("fresh=true")
         }
         return if (params.isEmpty()) "read/$chapterId" else "read/$chapterId?${params.joinToString("&")}"
     }
@@ -209,20 +211,28 @@ fun AppNav() {
                         type = NavType.LongType
                         defaultValue = -1L
                     },
+                    // 第九波切章落章头：箭头/章尾卡/抽屉跳章（paraId=-1 口径）落章头不恢复旧位置
+                    navArgument("fresh") {
+                        type = NavType.BoolType
+                        defaultValue = false
+                    },
                 ),
             ) { entry ->
                 val chapterId = entry.arguments?.getLong("chapterId") ?: 0L
                 val highlight = entry.arguments?.getString("highlight")
                 val paraId = entry.arguments?.getLong("paraId") ?: -1L
+                val freshOpen = entry.arguments?.getBoolean("fresh") ?: false
                 ReadScreen(
                     chapterId = chapterId,
                     highlight = highlight,
                     scrollParaId = paraId,
+                    freshOpen = freshOpen,
                     onBack = { navController.popBackStack() },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                     onOpenSummary = { navController.navigate(Routes.summary(chapterId)) },
                     onOpenChapter = { target, pid ->
-                        navController.navigate(Routes.read(target, paraId = pid))
+                        // paraId=-1 = 箭头/章尾卡/抽屉跳章：fresh 落章头；带段锚（书签/批注）照旧定位
+                        navController.navigate(Routes.read(target, paraId = pid, fresh = pid < 0))
                     },
                 )
             }

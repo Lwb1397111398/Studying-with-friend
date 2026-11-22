@@ -81,6 +81,7 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
 
 ## 最后更新
 
+- 2026-11-22 **AI 请求全局限流（第九波实景体验轮）**：新 `data/ai/AiRateLimiter.kt`（滑动窗口 RPM 限流，借鉴 anx-reader v1.14.0 "Add global AI RPM rate limiting" MIT 学思路自写）——每分钟默认 15 次（`DEFAULT_LIMIT_PER_MINUTE`），窗口内最早一次成功领号起算 60s，满了 acquire 挂起等最早记录滑出（+50ms 余量防时钟精度再睡一轮）；`nowMs`/`delayFn` 注入可测（假时钟推进；**实测坑：假 delayFn 若不推进时钟也不真挂起，acquire 的 while 循环热循环卡死测试**）。接入点唯一：`AiClient.chat` 入口 `rpmLimiter.acquire()`——chatJson 各档/视觉转写/随手问/判卷全部收口 chat 自动覆盖，`listModels` 不限（不是对话请求）。防「一键分析全书」批量链路一分钟打爆免费额度（撞 429 后退避重试反而更费）；正常单章链路（块串行每块数秒）不受影响。测试 AiRateLimiterTest 4 例（未满即领/满了等滑出含等待时长断言/滑窗释放/非法 limit 拒绝）。
 - 2026-11-21 **实景体验轮第七波（本轮）设置层两键**：①`read_font_family`——阅读字体 id（"default"=系统 / "lxgw"=霞鹜文楷 Lite v1.530，OFL-1.1 随包再分发、许可文本 `assets/OFL-LXGWWenKai-Lite.txt`；字体文件 `res/font/lxgw_wenkai_lite_regular.ttf` 13.3MB，APK 相应增大），`readFontFamilyFlow()` watch 供阅读页即时切换（详见 M4a）；②`read_brightness`——阅读页亮度（-1=跟随系统 / 0.15~1.0 固定值，坏值回退 -1），滑条拖动内存态即时生效、关弹层落库，只覆盖阅读页窗口离页恢复（详见 M4a）。零 schema 变更（settings KV）。
 - 2026-11-21 **实景体验轮第六波（上一轮）设置层两键**：①`read_theme`——阅读背景主题包 id（"follow"=跟随书房默认 / ReadingTheme.ALL 五套固定纸色），`readThemeFlow()` watch 供阅读页即时切换（详见 M4a）；②`read_volume_key`——音量键翻页开关（默认关），开时阅读页向 `StudyApp.volumeKeyTurnHook` 注册回调、MainActivity.dispatchKeyEvent 拦音量加/减转翻页并消费（防系统音量条弹出），离页注销。零 schema 变更（settings KV），Aa 弹层即开即存（借鉴 legado，详见 docs/调研/第九节）。
 

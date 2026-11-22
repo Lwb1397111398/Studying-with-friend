@@ -81,4 +81,23 @@ internal object ParaHeadings {
     }
 
     fun isHeading(text: String): Boolean = level(text) > 0
+
+    /**
+     * 章扉拆分（2026-11-22 实景体验轮第九波，借鉴 readest「章首过渡」issue 思路）：
+     * 章标题「第一章 法律思维」拆成小字编号眉（第一章）+ 大字章名（法律思维），渲染层
+     * 在章首画「章扉」区块——出版书的章号大字排版，跨章切换多一拍仪式感。拆不开的
+     * （「开篇」「目录」「主要参考书目」「索引」等无编号眉标题）kicker=null、title=原标题。
+     */
+    private val CHAPTER_HEAD = Regex(
+        "^(第[$CN_NUM]{1,7}[章编部篇节回讲课]|Chapter\\s*\\d+|附录[$CN_NUM]{0,4}|序章|序言|序|导论|开篇|凡例)([ 　·．.、:：\\-]+)(.+)$",
+    )
+
+    fun splitChapterTitle(raw: String): ChapterTitleParts {
+        val t = raw.trim()
+        val m = CHAPTER_HEAD.matchEntire(t) ?: return ChapterTitleParts(kicker = null, title = t)
+        return ChapterTitleParts(kicker = m.groupValues[1], title = m.groupValues[3].trim())
+    }
 }
+
+/** 章扉拆分产物：kicker=「第一章」这类编号眉（无则 null），title=章名大字部分 */
+internal data class ChapterTitleParts(val kicker: String?, val title: String)

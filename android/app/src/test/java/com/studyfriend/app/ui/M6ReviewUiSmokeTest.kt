@@ -152,8 +152,10 @@ class M6ReviewUiSmokeTest {
         compose.onNodeWithText("复习章").performClick()
         scrollTo("善意取得的构成要件？")
         awaitText("善意取得的构成要件？")
-        compose.onNodeWithText("看答案").performClick()
-        awaitText("参考答案：无权处分+善意+合理价格+登记")
+        // 第九波翻卡：答案改走 FlipCard 背面——点卡片（题干）翻面，答案面 label「参考答案」+ 答案文本
+        compose.onNodeWithText("善意取得的构成要件？").performClick()
+        awaitText("参考答案")
+        awaitText("无权处分+善意+合理价格+登记")
         scrollTo("记得")
         compose.onNodeWithText("记得").performClick()
 

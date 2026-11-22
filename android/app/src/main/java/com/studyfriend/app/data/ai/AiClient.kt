@@ -58,6 +58,13 @@ object AiClient {
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * 全局 RPM 限流（第九波实景轮）：所有 chat 请求（含 chatJson 各档与视觉转写，全部
+     * 收口到本函数）先领名额——滑动窗口每分钟上限见 AiRateLimiter 默认值，满了自动排队，
+     * 防批量链路一分钟内打爆免费额度（撞 429 后退避重试反而更费）。
+     */
+    private val rpmLimiter = AiRateLimiter()
+
     /** 中转站用户常粘贴全路径或尾斜杠：trim → 去尾 / → 不是 completions 结尾就拼上 */
     fun normalizeChatUrl(raw: String): String =
         raw.trim().trimEnd('/').let {
@@ -130,8 +137,9 @@ object AiClient {
     fun parseTemperature(raw: String, fallback: Double = 0.3): Double =
         raw.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it in 0.0..1.0 } ?: fallback
 
-    suspend fun chat(req: ChatRequest, onDelta: (String) -> Unit = {}): String =
-        withContext(Dispatchers.IO) {
+    suspend fun chat(req: ChatRequest, onDelta: (String) -> Unit = {}): String {
+        rpmLimiter.acquire()
+        return withContext(Dispatchers.IO) {
             val conn = try {
                 URL(normalizeChatUrl(req.baseUrl)).openConnection() as HttpURLConnection
             } catch (e: IOException) {
@@ -210,6 +218,7 @@ object AiClient {
                 conn.disconnect()
             }
         }
+    }
 
     /**
      * 要求 AI 返回 JSON：chat → 剥壳 → 反序列化；失败自动重试 1 次

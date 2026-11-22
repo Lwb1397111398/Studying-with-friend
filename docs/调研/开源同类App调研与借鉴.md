@@ -269,3 +269,45 @@ EPUB 3 Media Overlays「朗读同步逐句高亮」，本地 EPUB 配 MP3/M4B �
 - Kotlin Regex `matchAt(input, index)` 返回可空 MatchResult?；`find(text, off)` 的 `^` 锚仍按输入 index 0 判定——「从任意位置匹配」必须 matchAt。
 - `object.takeIf{}` 返回 receiver 自引用——clear 后再取字段全是清空值（本轮 chip 跳 -1 章实录）。
 - EmptyState 是 fillMaxSize 居中组件——纵向堆叠内容用 Box 浮层，别 Column 追加（会被挤出屏）。
+
+## 十二、第四轮调研（2026-11-22 实景体验轮第九波）
+
+> 主测《民法思维-王泽鉴2022》（方法论/论述体，笔记本侧最新收官 Kit）装机实录 + 子代理第四轮开源调研（19 个新候选，star/许可证经 gh api 实测，避开一~十一节已覆盖与存档项）。本轮落地 6 件：章扉页/切章落章头/术语翻卡 3D 动画/插图自适应暗化/TTS 暂停恢复+悬浮控制条/AI RPM 限流（出处见下表）。
+
+### 主力参考项目实测数据（gh api，2026-11-22）
+
+| 项目 | Stars | License | 语言 | 最近推送 |
+|---|---|---|---|---|
+| readest/readest | 26,565 | AGPL-3.0 | TypeScript | 2026-11-22（活跃） |
+| koodo-reader | 28,937 | AGPL-3.0 | JavaScript | 2026-11-22（活跃） |
+| Anxcye/anx-reader | 9,279 | MIT | Dart | 2026-10-17 |
+| AnkiDroid | 12,310 | GPL-3.0 | Kotlin | 2026-11-22（活跃） |
+
+（另实测：Mindinventory/AutoHighlightTTS 44★ MIT；AdamDawi/FlashcardCompose 21★ MIT 但 2025-02 停更；oleksandrbalan/pagecurl 458★ Apache-2.0 2024-02 停更；omer-faruq/readingstyle.koplugin 32★ GPL-3.0。）
+
+### 本轮落地（6 件，出处与许可证）
+
+| 落地件 | 出处 | 许可证约束 | 落点 |
+| --- | --- | --- | --- |
+| 章首过渡/章扉页（章号小字+章名大字+装饰线） | readest issue #1889「自选章节划分方式与章节切换动画」+ KOReader 页眉 userpatch（均 AGPL 只学思路） | 自写实现，无风险 | ParaHeadings.splitChapterTitle + ReadCards.ChapterHero |
+| 切章落章头（箭头/章尾卡/抽屉 -1 跳章落章头，位置恢复只留给点书直达） | legado 前后章切换语义（GPL 只学思路） | 自写实现 | ReadScreen freshOpen 参数 + Routes.read fresh 导航参数 |
+| 术语卡 3D 翻卡 + 答案渐显 | AnkiDroid 2.21 复习动画跟踪 issue #4833（GPL 只学思路）+ FlashcardCompose 21★（MIT 仅参考） | 自写实现 | ReviewScreen.FlipCard（rotationY 0→180°，90° 换面，答案延迟渐显） |
+| 插图自适应暗化（按图 P95 亮度定压缩强度，替代定值 ×0.76） | 自研（本轮《民法思维》青底比较表实录：定值压不住高亮彩色图） | 无 | FigureGallery.figureToneFilter(bitmap) + imagePeakLuma |
+| TTS 暂停/恢复 + 悬浮控制条 + 点朗读段暂停 | anx-reader v1.14.0（MIT，release notes 实抓） | 思路+API 均通用，自写实现 | TtsPlayer.Paused 状态 + pause/resume 句级续播 + ReadScreen 悬浮条 |
+| AI 请求全局限流（RPM 滑动窗口） | anx-reader v1.14.0 "Add global AI RPM rate limiting"（MIT，学思路） | 自写实现 | data/ai/AiRateLimiter + AiClient.chat 入口 acquire |
+
+### 第四轮候选清单（19 项按三类，全部 gh api 实测 star/license）
+
+**新功能**：①TTS 高亮跟读（AutoHighlightTTS 44★ MIT + UtteranceProgressListener.onRangeStart API 26+ 官方文档；readest v0.12.12 逐句朗读+A-B 循环；M，纯本地零 AI）；②TTS 悬浮控制条+从选中处起播（anx-reader v1.14.0，**本轮已落地暂停恢复+悬浮条，「从选中处起播」存档**）；③专注模式：本次会话时长浮显+番茄钟（Forest/微信读书单次时长思路，S~M）；④阅读统计周报页（readest v0.12.20 reading statistics dashboard + StoryGraph Wrapped 思路，数据全在本地库，S~M）；⑤AI 请求全局限流（anx-reader，S，**本轮已落地**）；⑥直线阅读标尺 Reading Ruler（readest v0.12.20/koodo v2.4.5 同年先后加，存疑后置，S）；⑦手写批注/涂鸦（readest v0.12.16/koodo v2.4.6 Doodle Mode；滚动流下手写层定位难，存疑 L）；⑧生词本 Learning→Mastered 状态（readest Word Lens；与待弄懂清单重叠，不值）。
+
+**体验增强**：⑨章首过渡/章扉页（readest issue #1889，**本轮已落地**）；⑩轻量翻页动画选项（sinasamaki Compose 教程；pagecurl 458★ Apache-2.0 是卷页方案不碰；存档）；⑪长章内节级导航（KOReader 页眉 userpatch 思路，M）；⑫排版设置扩展（Moon+ Reader Typography 面板：段距独立/缩进开关/两端对齐/字重；anx-reader v1.12.0 标题字号分离，S~M 按项拆）；⑬进度滑杆拖动页面预览（readest v0.12.20；与存档「目录滑杆快进」近亲，滚动流下成本高，存档）；⑭术语卡 3D 翻卡+答案渐显（AnkiDroid，**本轮已落地**）；⑮引号对话高亮（readest v0.12.12；法学教材对话少，不值）；⑯白底插图透明化（readest v0.12.20；已有自适应暗化，更激进抠底边际收益小，存疑）。
+
+**视觉美化**：⑰卡组/复习入口封面化（Anki deck 惯例，存疑）；⑱沉浸式顶栏自动隐藏（koodo-reader v2.4.7 immersive title bar；我们已有手动沉浸切换，存档）；⑲新手引导 coach marks（单用户自用，不值——空态文案已覆盖）。
+
+### Top3 推荐（调研代理结论，本轮采纳情况）
+
+1. **章首过渡/章扉页（S）**——小而美代表作，readest 真实 issue 背书 → ✅ 本轮落地。
+2. **术语卡 3D 翻卡+答案渐显（S）**——FSRS 闭环的最后一公里手感 → ✅ 本轮落地。
+3. **TTS 高亮跟读+悬浮控制条（M）**——听书学习闭环 → 🔶 悬浮控制条+暂停恢复本轮落地（S 部分）；高亮跟读（onRangeStart）留存档按额度排期。
+
+**备选第四**：AI RPM 限流护栏（S）→ ✅ 本轮顺手落地。

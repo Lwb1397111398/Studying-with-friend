@@ -89,6 +89,8 @@ internal fun ChapterToolsRow(
     noteUnitCount: Int,
     noteValidCount: Int,
     ttsActive: Boolean = false,
+    /** 第九波：TTS 暂停中（chip 变「继续朗读」，点击恢复续播） */
+    ttsPaused: Boolean = false,
     ttsAvailable: Boolean = false,
     onToggleTts: () -> Unit = {},
     onStart: () -> Unit,
@@ -187,11 +189,19 @@ internal fun ChapterToolsRow(
                     border = chipBorder,
                 )
             }
-            // v7 正文听书：有可读段才显示；朗读中变「停止朗读」
+            // v7 正文听书：有可读段才显示；朗读中变「停止朗读」，暂停中变「继续朗读」（第九波）
             if (ttsAvailable) {
                 AssistChip(
                     onClick = onToggleTts,
-                    label = { Text(if (ttsActive) "停止朗读" else "朗读") },
+                    label = {
+                        Text(
+                            when {
+                                ttsActive && ttsPaused -> "继续朗读"
+                                ttsActive -> "停止朗读"
+                                else -> "朗读"
+                            },
+                        )
+                    },
                     colors = chipColors,
                     border = chipBorder,
                 )

@@ -1,5 +1,8 @@
 package com.studyfriend.app.ui.screens
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -53,10 +57,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -662,6 +668,55 @@ private fun DuePane(
 
 // ---------- 章内评估流（计划 §2.2） ----------
 
+/**
+ * 3D 翻卡（2026-11-22 实景体验轮第九波，AnkiDroid 复习动画 + FlashcardCompose MIT 参考思路）：
+ * rotationY 0→180°，过 90° 换面（背面自身再转 180° 校正镜像，读起来是正字）；
+ * 答案面延迟 180ms 渐显（翻转前半程不露内容，「答案渐显」的低配实现——纯 alpha 免 blur）。
+ * 卡底走阅读主题包卡色（复习页无阅读主题上下文，恒走 MaterialTheme 卡底）。
+ */
+@Composable
+internal fun FlipCard(
+    flipped: Boolean,
+    onFlip: () -> Unit,
+    modifier: Modifier = Modifier,
+    front: @Composable () -> Unit,
+    back: @Composable () -> Unit,
+) {
+    val rotation = animateFloatAsState(
+        targetValue = if (flipped) 180f else 0f,
+        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
+        label = "flipRotation",
+    )
+    val backAlpha = animateFloatAsState(
+        targetValue = if (flipped) 1f else 0f,
+        animationSpec = tween(durationMillis = 320, delayMillis = 180),
+        label = "flipBackAlpha",
+    )
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 190.dp)
+            .clickable(onClickLabel = "翻面看答案") { onFlip() },
+    ) {
+        Box(
+            Modifier.graphicsLayer {
+                rotationY = rotation.value
+                cameraDistance = 16 * density
+            },
+            contentAlignment = Alignment.Center,
+        ) {
+            if (rotation.value <= 90f) {
+                front()
+            } else {
+                // 背面：自身转 180° 校正容器镜像；alpha 渐显防翻面前半程露答案
+                Box(Modifier.graphicsLayer { rotationY = 180f; alpha = backAlpha.value }) { back() }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ReviewSessionPane(
     session: ReviewSession,
@@ -709,18 +764,50 @@ private fun ReviewSessionPane(
         if (qs.isEmpty()) {
             Text("这一章的内容还记得多少？", style = MaterialTheme.typography.titleLarge)
         } else {
+            // 术语/自测卡翻面（第九波实景轮，AnkiDroid 复习动画思路）：问题面→点卡 3D 翻转→
+            // 答案面渐显。评分按钮常驻下方（不翻面直接评分也不拦，老行为不变）
             val q = qs[idx]
-            Text(q.q, style = MaterialTheme.typography.titleLarge)
-            if (revealed) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("参考答案：${q.a}", style = MaterialTheme.typography.bodyLarge)
-                    if (q.explain.isNotBlank()) {
-                        Text(q.explain, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FlipCard(
+                flipped = revealed,
+                onFlip = { revealed = true },
+                front = {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp),
+                    ) {
+                        Text("问题", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(10.dp))
+                        Text(q.q, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            "点卡片看答案",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                }
-            } else {
-                Button(onClick = { revealed = true }, modifier = Modifier.fillMaxWidth()) { Text("看答案") }
-            }
+                },
+                back = {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp),
+                    ) {
+                        Text("参考答案", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(10.dp))
+                        Text(q.a, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
+                        if (q.explain.isNotBlank()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                q.explain,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                },
+            )
         }
         VerdictButtons(previews, ::selfAssess)
     }

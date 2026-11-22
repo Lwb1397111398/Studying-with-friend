@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -138,12 +139,15 @@ fun ReadScreen(
     onBack: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onOpenSummary: () -> Unit = {},
-    /** 跳章（v7 第二参 paraId：书签/搜索定位段锚，-1=章首） */
+    /** 跳章（v7 第二参 paraId：书签/搜索定位段锚，-1=章头；第九波起 -1 语义=**从头读**，
+     *  不再恢复该章旧位置——箭头/章尾卡/抽屉跳章都该看章头，位置恢复只留给「点书直达」） */
     onOpenChapter: (Long, Long) -> Unit = { _, _ -> },
     /** P5 章节树节行锚：非空时滚动定位到节标题段（匹配失败静默不滚动，见 findHighlightIndex） */
     highlight: String? = null,
     /** v7 全书搜索跳转锚：>=0 时直接滚到该段（优先级高于 highlight 与位置记忆） */
     scrollParaId: Long = -1L,
+    /** 第九波切章落章头：true=箭头/章尾卡/抽屉跳章过来（-1 口径），落章头不恢复旧位置 */
+    freshOpen: Boolean = false,
 ) {
     val app = LocalContext.current.applicationContext as StudyApp
     val chapter by app.database.chapterDao().byIdFlow(chapterId)
@@ -467,14 +471,26 @@ fun ReadScreen(
             var ttsParaCounts by remember { mutableStateOf(listOf<Int>()) }
             var ttsParaIds by remember { mutableStateOf(listOf<Long>()) }
             fun toggleTts() {
-                if (ttsState is TtsState.Speaking || ttsState is TtsState.Preparing) {
-                    ttsPlayer.stop()
-                    ttsParaId = null
-                } else {
-                    if (ttsParagraphs.isEmpty()) return
-                    ttsParaCounts = ttsParagraphs.map { splitSentences(it.text).size }
-                    ttsParaIds = ttsParagraphs.map { it.id }
-                    ttsPlayer.toggle(ttsParagraphs.joinToString("\n") { it.text })
+                when (ttsState) {
+                    is TtsState.Speaking, is TtsState.Preparing -> {
+                        ttsPlayer.stop()
+                        ttsParaId = null
+                    }
+                    is TtsState.Paused -> ttsPlayer.resume()
+                    else -> {
+                        if (ttsParagraphs.isEmpty()) return
+                        ttsParaCounts = ttsParagraphs.map { splitSentences(it.text).size }
+                        ttsParaIds = ttsParagraphs.map { it.id }
+                        ttsPlayer.toggle(ttsParagraphs.joinToString("\n") { it.text })
+                    }
+                }
+            }
+            // 暂停/恢复（第九波实景轮，anx-reader 思路）：悬浮条与点当前朗读段共用入口
+            fun pauseOrResumeTts() {
+                when (ttsState) {
+                    is TtsState.Speaking, is TtsState.Preparing -> ttsPlayer.pause()
+                    is TtsState.Paused -> ttsPlayer.resume()
+                    else -> {}
                 }
             }
 
@@ -507,7 +523,8 @@ fun ReadScreen(
                 gateLabel = gateLabel,
                 noteUnitCount = units.size,
                 noteValidCount = noteValidCount,
-                ttsActive = ttsState is TtsState.Speaking || ttsState is TtsState.Preparing,
+                ttsActive = ttsState is TtsState.Speaking || ttsState is TtsState.Preparing || ttsState is TtsState.Paused,
+                ttsPaused = ttsState is TtsState.Paused,
                 ttsAvailable = ttsParagraphs.isNotEmpty(),
                 onToggleTts = { toggleTts() },
                 onStart = { app.roughReadRunner.start(chapterId, force = false) },
@@ -577,8 +594,11 @@ fun ReadScreen(
             val estLineHpx = estFontPx * readLineHeight
             val estGapPx = with(density) { 16.dp.toPx() }
             val estHpadPx = with(density) { 16.dp.toPx() }
-            // gist 卡展开时是 LazyColumn 第 0 个 item（rows 之外），rows 下标 ↔ item 下标要平移
-            val extraHeadItems = if (gistExpanded && !chapter?.gist.isNullOrBlank()) 1 else 0
+            // gist 卡展开时是 LazyColumn 第 0 个 item（rows 之外），rows 下标 ↔ item 下标要平移。
+            // 第九波：章扉 hero 恒为第 0 个 head item，要点卡（展开时）排其后
+            val extraHeadItems = 1 + if (gistExpanded && !chapter?.gist.isNullOrBlank()) 1 else 0
+            // LaunchedEffect 重启前 lambda 可能捕获旧值：经 rememberUpdatedState 每帧取最新
+            val extraHeadItemsLatest by rememberUpdatedState(extraHeadItems)
             fun turnPage(dir: Int) {
                 val vh = listState.layoutInfo.viewportSize.height.toFloat()
                 if (vh <= 0f || rows.isEmpty()) return
@@ -629,10 +649,10 @@ fun ReadScreen(
                 if (highlight != null && rows.isNotEmpty()) {
                     findHighlightIndex(paragraphs, highlight)?.let { paraIdx ->
                         val pid = paragraphs.getOrNull(paraIdx)?.id
-                        if (pid != null) {
-                            rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
-                                .takeIf { it >= 0 }
-                                ?.let { listState.animateScrollToItem(it) }
+                    if (pid != null) {
+                        rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
+                            .takeIf { it >= 0 }
+                            ?.let { listState.animateScrollToItem(it + extraHeadItemsLatest) }
                         }
                     }
                 }
@@ -642,18 +662,26 @@ fun ReadScreen(
                 if (scrollParaId >= 0 && rows.isNotEmpty()) {
                     rows.indexOfFirst { it is ReadRow.Para && it.p.id == scrollParaId }
                         .takeIf { it >= 0 }
-                        ?.let { listState.scrollToItem(it) }
+                        ?.let { listState.scrollToItem(it + extraHeadItemsLatest) }
                 }
             }
-            // v7 位置记忆恢复：无显式跳转参数（搜索 paraId / 节锚 highlight）时滚回上次读到的段
+            // v7 位置记忆恢复：无显式跳转参数（搜索 paraId / 节锚 highlight）时滚回上次读到的段。
+            // 第九波切章落章头：freshOpen（箭头/章尾卡/抽屉 -1 跳章）落章头不恢复旧位置，
+            // 同时把记忆重置到 0（用户选择从头读，退出去再「点书直达」也该回章头）
             val savedParaIdx = chapter?.lastReadParaIdx
             LaunchedEffect(chapter?.id, rows) {
-                if (scrollParaId < 0 && highlight.isNullOrBlank() && savedParaIdx != null && rows.isNotEmpty()) {
+                if (freshOpen) {
+                    if (savedParaIdx != null && savedParaIdx > 0) {
+                        app.appScope.launch {
+                            app.database.chapterDao().updateLastReadPara(chapterId, 0)
+                        }
+                    }
+                } else if (scrollParaId < 0 && highlight.isNullOrBlank() && savedParaIdx != null && rows.isNotEmpty()) {
                     val pid = paragraphs.firstOrNull { it.idx == savedParaIdx }?.id
                     if (pid != null) {
                         rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
                             .takeIf { it >= 0 }
-                            ?.let { listState.scrollToItem(it) }
+                            ?.let { listState.scrollToItem(it + extraHeadItemsLatest) }
                     }
                 }
             }
@@ -682,8 +710,9 @@ fun ReadScreen(
                 ttsParaId = pid
                 val rowIdx = rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
                 if (rowIdx >= 0) {
-                    val inView = listState.layoutInfo.visibleItemsInfo.any { it.index == rowIdx }
-                    if (!inView) listState.animateScrollToItem(rowIdx)
+                    val itemIdx = rowIdx + extraHeadItemsLatest
+                    val inView = listState.layoutInfo.visibleItemsInfo.any { it.index == itemIdx }
+                    if (!inView) listState.animateScrollToItem(itemIdx)
                 }
             }
 
@@ -728,12 +757,12 @@ fun ReadScreen(
                     val pid = app.database.paragraphDao()
                         .byChapterAndIdx(bm.bookmark.chapterId, bm.bookmark.paraIdx)?.id ?: -1L
                     if (bm.bookmark.chapterId == chapterId) {
-                        // 同章：不重复入栈，本地滚到锚段
-                        if (pid >= 0) {
-                            rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
-                                .takeIf { it >= 0 }
-                                ?.let { listState.scrollToItem(it) }
-                        }
+                    // 同章：不重复入栈，本地滚到锚段
+                    if (pid >= 0) {
+                        rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
+                            .takeIf { it >= 0 }
+                            ?.let { listState.scrollToItem(it + extraHeadItemsLatest) }
+                    }
                     } else {
                         recordJumpBack()
                         onOpenChapter(bm.bookmark.chapterId, pid)
@@ -748,7 +777,7 @@ fun ReadScreen(
                     if (m.memo.chapterId == chapterId) {
                         rows.indexOfFirst { it is ReadRow.Para && it.p.id == m.memo.paraId }
                             .takeIf { it >= 0 }
-                            ?.let { listState.scrollToItem(it) }
+                            ?.let { listState.scrollToItem(it + extraHeadItemsLatest) }
                     } else {
                         recordJumpBack()
                         onOpenChapter(m.memo.chapterId, m.memo.paraId)
@@ -810,6 +839,15 @@ fun ReadScreen(
                     // 图行点击由 FigureRow 消费不触发；段间空隙的 tap 从这里兜底进同一入口
                     .pointerInput(Unit) { detectTapGestures(onTap = { handleBodyTap(it) }) },
             ) {
+                // 章扉（第九波实景轮，借鉴 readest「章首过渡」issue 思路）：章号小字+章名
+                // 大字+装饰线的章首过渡区，随滚动自然经过——出版书的翻章仪式感。
+                // 恒渲染（章未到先显「阅读」占位，与顶栏同款先例）：保证 extraHeadItems
+                // 与实际 head item 数恒一致，rows↔item 下标平移不出竞态
+                item(key = "chapter-hero") {
+                    val heroTitle = chapter?.title.orEmpty().ifBlank { "阅读" }
+                    val parts = remember(heroTitle) { ParaHeadings.splitChapterTitle(heroTitle) }
+                    ChapterHero(kicker = parts.kicker, title = parts.title)
+                }
                 // P7 要点卡（折叠）：默认收起，「要点」chip 展开；随正文滚动不占固定空间
                 if (gistExpanded && !chapter?.gist.isNullOrBlank()) {
                     item(key = "gist-card") {
@@ -848,8 +886,17 @@ fun ReadScreen(
                                 },
                                 onDragStateChange = { selectionDragging = it },
                                 // 沉浸单击/翻页点按必须在文本手势层透传（SelectableText 的 detectTapGestures 消费 tap），
-                                // 翻页模式带坐标分区（SelectableText 透传 Text 本地坐标）
-                                onTap = { pos -> handleBodyTap(pos) },
+                                // 翻页模式带坐标分区（SelectableText 透传 Text 本地坐标）；
+                                // 第九波：朗读中点当前朗读段=暂停/恢复（悬浮条之外的第二出口）
+                                onTap = { pos ->
+                                    if ((ttsState is TtsState.Speaking || ttsState is TtsState.Paused) &&
+                                        row.p.id == ttsParaId
+                                    ) {
+                                        pauseOrResumeTts()
+                                    } else {
+                                        handleBodyTap(pos)
+                                    }
+                                },
                             )
                             val unit = anchorById[row.p.id]
                             if (unit != null) {
@@ -867,7 +914,7 @@ fun ReadScreen(
                                         scope.launch {
                                             rows.indexOfFirst { it is ReadRow.Para && it.p.id == pid }
                                                 .takeIf { it >= 0 }
-                                                ?.let { listState.animateScrollToItem(it) }
+                                                ?.let { listState.animateScrollToItem(it + extraHeadItemsLatest) }
                                         }
                                     },
                                 )
@@ -889,6 +936,59 @@ fun ReadScreen(
                     }
                 }
                 item { Spacer(Modifier.height(32.dp)) }
+            }
+
+            // TTS 悬浮控制条（第九波实景轮，借鉴 anx-reader v1.14.0 迷你控制条）：朗读/暂停
+            // 期间常驻底部——听书时的暂停/停止不再依赖顶部工具 chip；点当前朗读的段落
+            // 也可暂停/恢复（ParaRow onTap 分流）。停/恢复走 TtsPlayer 的句级续播
+            val ttsUi = ttsState
+            AnimatedVisibility(
+                visible = ttsUi is TtsState.Speaking || ttsUi is TtsState.Preparing || ttsUi is TtsState.Paused,
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        shape = RoundedCornerShape(20.dp),
+                        shadowElevation = 6.dp,
+                    ) {
+                        Row(
+                            Modifier.padding(start = 8.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = { pauseOrResumeTts() }, modifier = Modifier.size(36.dp)) {
+                                if (ttsUi is TtsState.Paused) {
+                                    Icon(
+                                        Icons.Filled.PlayArrow,
+                                        contentDescription = "继续朗读",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                } else {
+                                    // Pause 不在 material-icons-core 集（extended 要 +9MB）：
+                                    // 暂停用自绘双竖条，停止用自绘方块
+                                    TtsPauseGlyph(tint = MaterialTheme.colorScheme.primary)
+                                    Text("暂停朗读", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            IconButton(onClick = { ttsPlayer.stop(); ttsParaId = null }, modifier = Modifier.size(36.dp)) {
+                                TtsStopGlyph(tint = MaterialTheme.colorScheme.primary)
+                                Text("停止朗读", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Text(
+                                when (val s = ttsUi) {
+                                    is TtsState.Speaking -> "句 ${s.sentenceIdx + 1}/${s.total}"
+                                    is TtsState.Paused -> "已暂停 ${s.sentenceIdx + 1}/${s.total}"
+                                    else -> "正在准备…"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = readingTheme?.secondary ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
             }
 
             // 底部阅读进度细线（第五波实景：长章读到哪里没有感知）——可视首行占全部
@@ -1146,4 +1246,31 @@ internal fun readingFlushMath(pendingMs: Long, elapsedMs: Long): Pair<Int, Long>
     val total = pendingMs + elapsedMs
     require(total >= 0) { "计时时长为负" }
     return ((total / 60000L).toInt()) to (total % 60000L)
+}
+
+/** 暂停图形（第九波）：两根竖条——material-icons-core 没有暂停图标（extended 要 +9MB 不引） */
+@Composable
+internal fun TtsPauseGlyph(tint: Color) {
+    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(
+            Modifier
+                .size(width = 4.dp, height = 15.dp)
+                .background(tint, RoundedCornerShape(1.5.dp)),
+        )
+        Box(
+            Modifier
+                .size(width = 4.dp, height = 15.dp)
+                .background(tint, RoundedCornerShape(1.5.dp)),
+        )
+    }
+}
+
+/** 停止图形（第九波）：实心小方块 */
+@Composable
+internal fun TtsStopGlyph(tint: Color) {
+    Box(
+        Modifier
+            .size(12.dp)
+            .background(tint, RoundedCornerShape(2.dp)),
+    )
 }

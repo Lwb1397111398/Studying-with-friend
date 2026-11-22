@@ -185,3 +185,72 @@ class ParaHeadingsTest {
         assertEquals(0, ParaHeadings.findBlockMarks("【这一段标记内容非常长超过了十四个字的限制长度】").size)
     }
 }
+
+// ---------- 章扉拆分 splitChapterTitle（第九波实景轮） ----------
+
+class ParaHeadingsSplitChapterTitleTest {
+
+    @Test
+    fun chapterWithSpace() {
+        val p = ParaHeadings.splitChapterTitle("第一章 法律思维")
+        assertEquals("第一章", p.kicker)
+        assertEquals("法律思维", p.title)
+    }
+
+    @Test
+    fun chapterWithoutSeparatorSpaceVariants() {
+        val p = ParaHeadings.splitChapterTitle("第二章·请求权基础")
+        assertEquals("第二章", p.kicker)
+        assertEquals("请求权基础", p.title)
+        // 无分隔符（「第三编债」）拆点不可知——设计决策：要求编号眉与章名之间必有分隔符，
+        // 拆不开回退整体大字（kicker=null），不猜拆点
+        val p2 = ParaHeadings.splitChapterTitle("第三编债")
+        assertEquals(null, p2.kicker)
+        assertEquals("第三编债", p2.title)
+    }
+
+    @Test
+    fun chapterWithLongChineseNumeral() {
+        val p = ParaHeadings.splitChapterTitle("第五章 民法请求权基础体系")
+        assertEquals("第五章", p.kicker)
+        assertEquals("民法请求权基础体系", p.title)
+    }
+
+    @Test
+    fun plainTitleNoKicker() {
+        // 无编号眉：开篇/目录/主要参考书目/索引 → 整体作大字章名
+        assertEquals(null, ParaHeadings.splitChapterTitle("开篇").kicker)
+        assertEquals("开篇", ParaHeadings.splitChapterTitle("开篇").title)
+        assertEquals(null, ParaHeadings.splitChapterTitle("主要参考书目").kicker)
+        assertEquals("主要参考书目", ParaHeadings.splitChapterTitle("主要参考书目").title)
+    }
+
+    @Test
+    fun appendixWithNumeral() {
+        val p = ParaHeadings.splitChapterTitle("附录一 民法总则条文索引")
+        assertEquals("附录一", p.kicker)
+        assertEquals("民法总则条文索引", p.title)
+    }
+
+    @Test
+    fun englishChapter() {
+        val p = ParaHeadings.splitChapterTitle("Chapter 3 Case Facts")
+        assertEquals("Chapter 3", p.kicker)
+        assertEquals("Case Facts", p.title)
+    }
+
+    @Test
+    fun titleMayContainPunctuation() {
+        // 章名含顿号/逗号合法（节标题判级拦正文标点，章名不受限）
+        val p = ParaHeadings.splitChapterTitle("第三章 案例事实、法律问题及解答体裁")
+        assertEquals("案例事实、法律问题及解答体裁", p.title)
+    }
+
+    @Test
+    fun noSeparator_wholeAsTitle() {
+        // 「第一章」孤标题（无章名）→ kicker=null 整体大字
+        val p = ParaHeadings.splitChapterTitle("第一章")
+        assertEquals(null, p.kicker)
+        assertEquals("第一章", p.title)
+    }
+}
