@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -79,6 +80,7 @@ internal fun ReadTocSheet(
             onDeleteBookmark = onDeleteBookmark,
             onOpenMemo = onOpenMemo,
             onDeleteMemo = onDeleteMemo,
+            onDismiss = onDismiss,
         )
     }
 }
@@ -99,6 +101,8 @@ internal fun ReadTocSheetContent(
     onDeleteBookmark: (BookmarkWithChapter) -> Unit,
     onOpenMemo: (ParaMemoWithChapter) -> Unit,
     onDeleteMemo: (ParaMemoWithChapter) -> Unit,
+    // 显式关闭按钮（第八波）：sheet 壳传入；带缺省空实现——测试直渲染本函数零改动
+    onDismiss: () -> Unit = {},
 ) {
     val noteMemos = memos.filter { it.memo.kind != ParaMemoEntity.KIND_DOUBT }
     val doubtMemos = memos.filter { it.memo.kind == ParaMemoEntity.KIND_DOUBT }
@@ -108,11 +112,29 @@ internal fun ReadTocSheetContent(
             .navigationBarsPadding(),
     ) {
         // —— 目录（占上半，可滚）——
-        Text(
-            "目录",
+        // 显式关闭按钮（第八波装机实录）：sheet 点 scrim/下拉关闭手势本机实测无效，
+        // 抽屉又没有其他出口（BACK 除外），标题行右侧给个可见的 ×
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "目录",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.padding(horizontal = 8.dp).size(36.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "关闭",
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()

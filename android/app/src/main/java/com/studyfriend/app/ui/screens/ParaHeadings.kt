@@ -37,6 +37,34 @@ internal object ParaHeadings {
     private val PAGE_TAIL = Regex("""[.·•…]{2,}\s*[\d〇零一二三四五六七八九十百千][\d〇零一二三四五六七八九十百千\-－—–~～至到]{0,12}$""")
 
     /**
+     * 段首法条号（实景体验轮第八波，主测《合同编（上）》实录）：释义/评注体条文书
+     * 「第四百六十三条本编调整因合同产生的民事关系。……」条号与条文黏连成段，与正文
+     * 同款渲染时条文骨架完全隐形。返回段首「第X条(之X)」在原文中的字符区间（容前导
+     * 空白，含首尾），非条文段返回 null。不设长度/标点拦截——条文段几乎必有句读，
+     * 走 BODY_PUNCT 会全军覆没；误判面只有「段首恰好以条号开头的引用段」，视觉强调
+     * 无害。段首判据天然排除正文中的「根据第X条的规定」引用。
+     */
+    private val ARTICLE = Regex("第[$CN_NUM]+条(之[$CN_NUM]+)?")
+
+    fun articleNoRange(text: String): IntRange? {
+        val off = text.indexOfFirst { !it.isWhitespace() }
+        if (off < 0) return null
+        // matchAt（非 find+offset）：^ 锚在 find(text, off) 里仍按输入 index 0 判定，
+        // 前导空白段会整体落空——matchAt 才是真正的「从 off 起匹配」
+        return ARTICLE.matchAt(text, off)?.range
+    }
+
+    /**
+     * 书内区块标记（第八波同书实录）：「【条文释义】【案例评注】」是释义/评注体的
+     * 结构骨架，OCR 分段常把它们黏在前段尾巴/下段开头（「……进行调整。【案例评注】」），
+     * 正文里毫无区分度。返回段内全部「【…】」子串（2~14 字，容黏连形态）的字符区间，
+     * 渲染层主色加粗即可与正文区分——不动段落数据，零迁移。 */
+    private val BLOCK_MARK = Regex("""【[^】]{2,14}】""")
+
+    fun findBlockMarks(text: String): List<IntRange> =
+        BLOCK_MARK.findAll(text).map { it.range }.toList()
+
+    /**
      * 判级：0 = 不是标题；1 = 第X节级；2 = 「一、/第X款」级；3 = 「（一）/1.」级。
      * 空串、超长、含正文标点、带页码尾巴一律返回 0。
      */

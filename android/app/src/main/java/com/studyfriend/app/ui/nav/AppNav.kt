@@ -150,7 +150,12 @@ fun AppNav() {
                     onContinueRead = { chapterId -> navController.navigate(Routes.read(chapterId)) },
                 )
             }
-            composable(Routes.REVIEW) { ReviewScreen() }
+            composable(Routes.REVIEW) {
+                ReviewScreen(
+                    // 空态续读卡（第八波）：与书架「继续读」同款直达——Routes.read 进页后位置记忆恢复到段
+                    onContinueRead = { chapterId -> navController.navigate(Routes.read(chapterId)) },
+                )
+            }
             composable(Routes.SETTINGS) {
                 val settingsVm: SettingsViewModel = viewModel()
                 SettingsScreen(

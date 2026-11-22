@@ -132,6 +132,10 @@ internal fun ParaRow(
     }
     // 章内节标题（第X节/一、/（一）/1.）：标题样式渲染，AI 标注信息（why/竖条）不掺进来
     val headingLevel = ParaHeadings.level(p.text)
+    // 法条号段首判级（第八波，《合同编（上）》装机实录）：释义/评注体条文书「第四百六十三条
+    // 本编调整……」条号黏在段首与正文同款，条文骨架隐形。只在非标题段判（标题段不可能是
+    // 条文段）；正文分支条号主色加粗 + 上留白一档
+    val articleRange = if (headingLevel == 0) ParaHeadings.articleNoRange(p.text) else null
     // EXPLAIN 段左侧主题色竖条（M4a §3.4）：IntrinsicSize 让竖条随内容高度；
     // 学习闭环轮：有批注的段右上角小铅笔标记，点开看/删自己的笔记
     val explained = p.aiAction == DbValues.ACT_EXPLAIN && headingLevel == 0
@@ -161,8 +165,12 @@ internal fun ParaRow(
                     start = if (explained) 12.dp else 16.dp,
                     end = if (explained) 12.dp else 16.dp,
                     // 标题段上方大留白拉开层级（下小留白贴正文）；普通段 8dp 上下（段间 16dp，
-                    // 原 24dp 偏松——阅读体验轮收紧）
-                    top = if (headingLevel > 0) 18.dp else 8.dp,
+                    // 原 24dp 偏松——阅读体验轮收紧）；条文段 14dp（第八波，条号导航感）
+                    top = when {
+                        headingLevel > 0 -> 18.dp
+                        articleRange != null -> 14.dp
+                        else -> 8.dp
+                    },
                     bottom = if (headingLevel > 0) 6.dp else 8.dp,
                 ),
         ) {
@@ -203,6 +211,8 @@ internal fun ParaRow(
                     text = p.text,
                     style = bodyTextStyle(fontSize, lineHeightMult, indentChars = 2, fontFamily = LocalReadFontFamily.current),
                     highlightRange = selectedRange,
+                    emphasisPrefix = articleRange,
+                    blockMarks = true,
                     onLongPress = onLongPress,
                     onSelectionChange = onSelectionChange,
                     onAnchorChange = onAnchorChange,
@@ -246,6 +256,10 @@ private fun SelectableText(
     color: Color = Color.Unspecified,
     fontWeight: FontWeight? = null,
     highlightRange: IntRange?,
+    // 法条号段首强调（第八波）：区间内主色加粗（条文骨架，释义/评注体条文书实录）
+    emphasisPrefix: IntRange? = null,
+    // 【区块标记】主色加粗（第八波）：段内「【条文释义】【案例评注】」骨架与正文区分
+    blockMarks: Boolean = false,
     onLongPress: (IntRange, IntOffset) -> Unit,
     onSelectionChange: ((IntRange) -> Unit)? = null,
     onAnchorChange: ((IntOffset) -> Unit)? = null,
@@ -270,17 +284,33 @@ private fun SelectableText(
         val x = if (isStart) cursor.left - halfPx * 0.7f else cursor.right + halfPx * 0.7f
         return Offset(x, cursor.center.y)
     }
-    val annotated = remember(text, highlightRange, highlight) {
-        if (highlightRange == null || highlightRange.isEmpty()) {
+    val primary = MaterialTheme.colorScheme.primary
+    val annotated = remember(text, highlightRange, highlight, primary, emphasisPrefix, blockMarks) {
+        if ((highlightRange == null || highlightRange.isEmpty()) && emphasisPrefix == null && !blockMarks) {
             AnnotatedString(text)
         } else {
             buildAnnotatedString {
                 append(text)
-                addStyle(
-                    SpanStyle(background = highlight),
-                    highlightRange.first,
-                    (highlightRange.last + 1).coerceAtMost(text.length),
-                )
+                // 法条号段首强调（第八波）：条号部分主色加粗，条文段一眼可辨
+                emphasisPrefix?.takeIf { !it.isEmpty() }?.let { r ->
+                    addStyle(
+                        SpanStyle(color = primary, fontWeight = FontWeight.SemiBold),
+                        r.first,
+                        (r.last + 1).coerceAtMost(text.length),
+                    )
+                }
+                if (blockMarks) {
+                    ParaHeadings.findBlockMarks(text).forEach { r ->
+                        addStyle(SpanStyle(color = primary, fontWeight = FontWeight.SemiBold), r.first, r.last + 1)
+                    }
+                }
+                highlightRange?.takeIf { !it.isEmpty() }?.let { r ->
+                    addStyle(
+                        SpanStyle(background = highlight),
+                        r.first,
+                        (r.last + 1).coerceAtMost(text.length),
+                    )
+                }
             }
         }
     }

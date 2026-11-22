@@ -521,14 +521,22 @@ private fun BookCard(
                 Spacer(Modifier.height(12.dp))
                 // 封面书名自适应字号（第七波）：短名大字、长名小字不再挤成一坨——
                 // 《中国民法典评注·条文选注（第3册）》15sp 恒定字号实录观感差
-                val coverFontSize = when (book.title.length) {
+                // 断行优化（第八波实景）：《债法原理-王泽鉴2022》按字符断行拆成
+                // 「债法原/理-王泽鉴/2022」词全碎——书名含「-」（书名-作者分隔符惯例）
+                // 且较长时在首个「-」处换行显示（连字符悬行尾难看一并去掉）；显示层
+                // 替换不动库。字号档改按「最长一行」算：断行后短行能拿大一号字
+                val coverTitle = book.title.let { t ->
+                    val i = t.indexOf('-')
+                    if (t.length >= 8 && i > 1 && i < t.length - 2) t.replaceRange(i, i + 1, "\n") else t
+                }
+                val coverFontSize = when (coverTitle.lines().maxOfOrNull { it.length } ?: 0) {
                     in 0..4 -> 22.sp
                     in 5..8 -> 18.sp
                     in 9..14 -> 15.sp
                     else -> 13.sp
                 }
                 Text(
-                    book.title,
+                    coverTitle,
                     color = Color.White.copy(alpha = 0.96f),
                     fontSize = coverFontSize,
                     fontWeight = FontWeight.SemiBold,

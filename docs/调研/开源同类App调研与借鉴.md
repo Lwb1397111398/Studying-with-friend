@@ -238,3 +238,34 @@ EPUB 3 Media Overlays「朗读同步逐句高亮」，本地 EPUB 配 MP3/M4B �
 - 候选 4（待弄懂清单）→ **本轮落地**（记一笔弹层开关形态，浮条不加按钮——七按钮会挤爆 393dp 屏宽）。
 - 候选 8（亮度滑条）→ **本轮落地**（Aa 弹层滑条 + 「跟随系统」恢复按钮）。
 - 其余候选（长图分享卡/章节伴读页/封面生成器/对话树/离线 HTML 大厅/桌面 Widget）维持存档未排期。
+
+
+## 十一、第三轮调研（2026-11-22 实景体验轮第八波）
+
+> 主测《中国民法典释义与案例评注：合同编（上）》（杨立新，释义与案例评注体）装机实录 + 子代理第三轮开源调研（17 个新候选点，star/许可证经 gh api 实测，避开一~十节已覆盖项）。
+
+### 本轮落地（6 件，出处与许可证）
+
+| 落地件 | 出处 | 许可证约束 | 落点 |
+| --- | --- | --- | --- |
+| 段首法条号判级 +【区块标记】inline 高亮 | 自研（第八波装机实录：释义/评注体条文书条文骨架隐形） | 无 | ParaHeadings.articleNoRange/findBlockMarks + SelectableText emphasisPrefix/blockMarks |
+| 跳转回位 chip（跨章跳转一键回原位） | KOReader 跳转历史栈思路（AGPL，只学思路，简化为单槽） | 自写实现 | ReadJumpBack 单例 + ReadScreen 浮 chip |
+| Aa/抽屉弹层显式 × 关闭按钮 | 通用 Android 弹层惯例（兜底 scrim 手势失效） | 无 | FontSizeSheet/ReadTocSheetContent |
+| 封面书名断行优化 | 自研（「债法原理-王泽鉴2022」字符断行拆词实录） | 无 | BookCard 显示层 replaceRange |
+| 复习空态续读卡 | bookorbit 空态引导思路（AGPL 只学思路）+ 书架横幅复用 | 无 | DuePane Box 底部浮层 + ReviewScreen.onContinueRead |
+| （另：AI 加载骨架屏 shimmer、本章剩余 ETA 等 S 级候选未落地，存档见下） | valentinilk/compose-shimmer（Apache-2.0 可引库）、KOReader ETA 思路 | 未落地 | — |
+
+### 第三轮候选清单（17 项按三类，全部 gh api 实测 star/license）
+
+**新功能**：①划线/存疑→AI 闪卡进 FSRS 队列（obsidian-spaced-repetition 2621★ MIT，与 read-frog 10503★ GPL 思路；**本轮 Top1**——FSRS/划词/存疑全已落地只差焊接，烧 AI 需额度）；②全书全文搜索 FTS4（koodo-reader 28936★ AGPL 思路——**v7 已有全书搜索基础版**，升级空间=FTS 虚表+命中高亮）；③存疑项定时回顾（OBSR「整条笔记按 SR 回顾」，S）；④苏格拉底追问模式（tutor-gpt 934★ GPL 思路，纯 prompt 资产，S）；⑤成就徽章+月度挑战（bookorbit 6707★ AGPL 思路，数据都在缺表现层，M）；⑥章末 AI 双人播客（podcastfy 6843★ Apache-2.0 思路，依赖双音色 TTS，L）。
+
+**体验增强**：①本章剩余 ETA（KOReader 31255★ AGPL 思路——估算精度难保证 UNMEASURED 风险，存档）；②目录滑杆快进（KOReader Skim，M）；③多书签重命名/备注（KOReader，S）；④自动滚动（KOReader，S/M）；⑤点击分区自定义（KOReader tap zone——现有「左右 1/3 翻页+中切沉浸」已覆盖主场景）。
+
+**视觉美化**：①仿真卷页动画（PTQFlipper 91★ MIT 可引库 / harism 1674★ 无 license 只能思路——**与 B 形态翻页交互冲突风险，未排期**）；②bookmap 书籍地图（KOReader 插件思路，M）；③阅读 DNA 画像（bookorbit，M）；④AI 骨架屏 shimmer（compose-shimmer 1085★ Apache-2.0 可引库，S）。
+
+### 本轮新实测坑（与调研无关但同波记录）
+
+- ModalBottomSheet scrim 点击/下拉关闭在模拟器（API 35）全局失效（Aa/抽屉/编辑档案三个 sheet 对照实验坐实），疑与 edge-to-edge 相关，真机待验——修 UI 时给弹层留显式出口。
+- Kotlin Regex `matchAt(input, index)` 返回可空 MatchResult?；`find(text, off)` 的 `^` 锚仍按输入 index 0 判定——「从任意位置匹配」必须 matchAt。
+- `object.takeIf{}` 返回 receiver 自引用——clear 后再取字段全是清空值（本轮 chip 跳 -1 章实录）。
+- EmptyState 是 fillMaxSize 居中组件——纵向堆叠内容用 Box 浮层，别 Column 追加（会被挤出屏）。

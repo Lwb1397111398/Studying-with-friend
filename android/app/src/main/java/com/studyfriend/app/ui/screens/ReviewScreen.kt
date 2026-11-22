@@ -57,6 +57,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyfriend.app.StudyApp
@@ -83,16 +84,20 @@ import com.studyfriend.app.data.study.latestWrongAttempts
 import com.studyfriend.app.data.study.nextStreakMilestone
 import com.studyfriend.app.data.study.streakMilestoneHit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
  * 复习中心（M6 计划 §3.1 + 学习闭环轮）：Tab0 今日复习（到期列表 → 章内评估流）
  * + Tab1 错题本（去重按书分组，可整书重测）+ Tab2 术语卡盒（全书 keyTerms 按书翻看）。
- * 保持无参签名：底栏 Tab 页，自行取 StudyApp 依赖。
+ * 底栏 Tab 页，自行取 StudyApp 依赖；第八波加 onContinueRead（空态续读卡导航回调，
+ * 缺省空实现保持旧无参行为）。
  */
 @Composable
-fun ReviewScreen() {
+fun ReviewScreen(
+    onContinueRead: (chapterId: Long) -> Unit = {},
+) {
     val app = LocalContext.current.applicationContext as StudyApp
     val repo = remember { BookRepository(app.database, app.filesDir) }
 
@@ -206,6 +211,7 @@ fun ReviewScreen() {
                     },
                     sortMode = sortMode,
                     onSortModeChange = setSortMode,
+                    onContinueRead = onContinueRead,
                 )
                 1 -> WrongBookPane(repo = repo, onRetest = { rows ->
                     wrongSession = WrongSession(rows.first().bookTitle, rows)
@@ -500,6 +506,7 @@ private fun DuePane(
     onStart: (DueItem) -> Unit,
     sortMode: String,
     onSortModeChange: (String) -> Unit,
+    onContinueRead: (chapterId: Long) -> Unit = {},
 ) {
     // now 进页固化：跨天停留不翻转，重进页面重新收集拿新 now
     val now = remember { System.currentTimeMillis() }
@@ -522,11 +529,53 @@ private fun DuePane(
         }
     }
     if (visible.isEmpty()) {
-        EmptyState(
-            title = "今天没有要复习的",
-            subtitle = "读完一章后，这里会帮你安排复习",
-            icon = Icons.Filled.Refresh,
-        )
+        // 空态续读卡（第八波实景：空态区大片空白，顺势引导回书——复用书架「继续读」语义，
+        // 最近在读=lastReadAt 非空的 READY 书，与书架横幅同口径）
+        val cont = produceState<Pair<com.studyfriend.app.data.db.BookEntity, com.studyfriend.app.data.db.ChapterEntity>?>(null) {
+            val book = repo.shelfFlow().first().firstOrNull {
+                it.status == DbValues.BOOK_READY && it.lastReadAt != null && it.lastReadChapterId != null
+            }
+            if (book != null) {
+                repo.chapter(book.lastReadChapterId!!)?.let { ch -> value = book to ch }
+            }
+        }
+        // 空态续读卡（第八波实景：空态区大片空白，顺势引导回书——复用书架「继续读」语义，
+        // 最近在读=lastReadAt 非空的 READY 书，与书架横幅同口径）。EmptyState 自身
+        // fillMaxSize 居中，卡用 Box 底部对齐浮在下方，不与空态抢高度
+        Box(Modifier.fillMaxSize()) {
+            EmptyState(
+                title = "今天没有要复习的",
+                subtitle = "读完一章后，这里会帮你安排复习",
+                icon = Icons.Filled.Refresh,
+            )
+            cont.value?.let { (book, ch) ->
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { onContinueRead(ch.id) },
+                ) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                        Text(
+                            "继续读",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "《${book.title}》· ${ch.title}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
         return
     }
     LazyColumn(

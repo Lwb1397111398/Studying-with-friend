@@ -6,8 +6,10 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -16,22 +18,29 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -98,6 +107,24 @@ internal data class TextSelection(val paraId: Long, val range: IntRange, val anc
 
 /** 打开随手问弹层的输入：问答上下文 + 首问 */
 internal data class QaTarget(val ctx: QuickQa.Ctx, val defaultQuestion: String)
+
+/**
+ * 跳转回位（实景体验轮第八波）：抽屉跳章/书签/批注跨章跳转前记下原位置，
+ * 目标章底部浮「回到刚才的位置」chip 一键回原章原段——跳章浏览没有回退手势，
+ * BACK 只会退出阅读页，跳错章要回目录重进两三步。进程级单例（与书架
+ * cachedShelfBooks 同款先例）：跨 ReadScreen 实例（路由级导航）传递。
+ */
+internal object ReadJumpBack {
+    var chapterId: Long = -1
+    var paraId: Long = -1
+    var chapterTitle: String = ""
+
+    fun clear() {
+        chapterId = -1
+        paraId = -1
+        chapterTitle = ""
+    }
+}
 
 /**
  * 阅读页（M4a 计划 §3 + 随手问轮 P7 重排）：顶部一章三件套（标题/章间切换/字号）+
@@ -660,6 +687,20 @@ fun ReadScreen(
                 }
             }
 
+            // 跳转回位（第八波）：跨章跳转前记下当前可视首段与章名，目标章底部浮回位 chip。
+            // 用局部 fun（非 val lambda）：inline lambda 里的 fun 声明才对外层作用域可见（ReadTocSheet 挂载要用）
+            fun currentVisibleParaId(): Long =
+                listState.layoutInfo.visibleItemsInfo.firstNotNullOfOrNull { info ->
+                    (info.key as? String)?.takeIf { k -> k.startsWith("p") }
+                        ?.removePrefix("p")?.toLongOrNull()
+                } ?: -1L
+
+            fun recordJumpBack() {
+                ReadJumpBack.chapterId = chapterId
+                ReadJumpBack.paraId = currentVisibleParaId()
+                ReadJumpBack.chapterTitle = chapter?.title.orEmpty()
+            }
+
             // v7 书签操作：取当前可视首段为锚；同章本地滚动、跨章导航带段锚。
             // 用局部 fun（非 val lambda）：inline lambda 里的 fun 声明才对外层作用域可见（ReadTocSheet 挂载要用）
             fun addBookmarkAtCurrent() {
@@ -694,6 +735,7 @@ fun ReadScreen(
                                 ?.let { listState.scrollToItem(it) }
                         }
                     } else {
+                        recordJumpBack()
                         onOpenChapter(bm.bookmark.chapterId, pid)
                     }
                 }
@@ -708,14 +750,15 @@ fun ReadScreen(
                             .takeIf { it >= 0 }
                             ?.let { listState.scrollToItem(it) }
                     } else {
+                        recordJumpBack()
                         onOpenChapter(m.memo.chapterId, m.memo.paraId)
                     }
                 }
             }
 
-            // v7 目录+书签抽屉（ModalBottomSheet 是 window 级弹层，挂载位置不影响渲染，
-            // 放这里为了让书签操作函数落在同一作用域）
-            if (showTocSheet) {
+    // v7 目录+书签抽屉（ModalBottomSheet 是 window 级弹层，挂载位置不影响渲染，
+    // 放这里为了让书签操作函数落在同一作用域）
+    if (showTocSheet) {
                 ReadTocSheet(
                     chapters = tocChapters,
                     currentChapterId = chapterId,
@@ -723,6 +766,7 @@ fun ReadScreen(
                     memos = bookMemos,
                     onOpenChapter = { target ->
                         showTocSheet = false
+                        if (target != chapterId) recordJumpBack()
                         onOpenChapter(target, -1L)
                     },
                     onAddBookmark = { addBookmarkAtCurrent() },
@@ -858,6 +902,57 @@ fun ReadScreen(
                         (listState.firstVisibleItemIndex / (n - 1f)).coerceIn(0f, 1f)
                     } else {
                         0f
+                    }
+                }
+            }
+            // 跳转回位 chip（第八波）：从抽屉/书签/批注跨章跳过来时一键回原章原段；
+            // 沉浸模式随顶栏一起藏（与进度线同款）。点击即清（回位目标就是记录位置）
+            val jumpBack = remember(chapterId) {
+                ReadJumpBack.takeIf { it.chapterId > 0 && it.paraId > 0 && it.chapterId != chapterId }
+            }
+            AnimatedVisibility(visible = chromeVisible && jumpBack != null) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        shape = RoundedCornerShape(20.dp),
+                        shadowElevation = 6.dp,
+                        modifier = Modifier
+                            .padding(bottom = 6.dp)
+                            .clickable {
+                                // 先取值再 clear：jumpBack 是单例引用（takeIf 返回 receiver），
+                                // clear 后字段已变 -1——装机实录点 chip 落进无效章「阅读」空页
+                                val jb = jumpBack ?: return@clickable
+                                val cid = jb.chapterId
+                                val pid = jb.paraId
+                                ReadJumpBack.clear()
+                                onOpenChapter(cid, pid)
+                            },
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.Refresh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Text(
+                                buildString {
+                                    append("回到刚才的位置")
+                                    jumpBack?.chapterTitle?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 300.dp),
+                            )
+                        }
                     }
                 }
             }

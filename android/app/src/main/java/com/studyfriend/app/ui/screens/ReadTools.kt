@@ -429,12 +429,19 @@ internal fun FontSizeSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("阅读字号", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = {
-                    onChange(
-                        SettingsRepository.DEFAULT_READ_FONT_SIZE,
-                        SettingsRepository.DEFAULT_READ_LINE_HEIGHT,
-                    )
-                }) { Text("恢复默认") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = {
+                        onChange(
+                            SettingsRepository.DEFAULT_READ_FONT_SIZE,
+                            SettingsRepository.DEFAULT_READ_LINE_HEIGHT,
+                        )
+                    }) { Text("恢复默认") }
+                    // 显式关闭按钮（第八波装机实录）：ModalBottomSheet 点 scrim/下拉关闭
+                    // 手势在本机实测无效（BACK 是唯一途径），高频弹层给个可见出口
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, contentDescription = "关闭")
+                    }
+                }
             }
             // 预览文字按当前字号/行距/字体渲染，拖动即时看到效果
             Text(
