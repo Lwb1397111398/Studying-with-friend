@@ -71,11 +71,16 @@ object UpdateChecker {
     private const val PARALLEL_MIN_BYTES = 8L * 1024 * 1024
 
     /**
-     * 分块目标大小 ~16MB、块数 2~4：镜像会掐单条长连接（2026-10-25 实测 ~12MB 处被掐），块小断点续传粒度细；
-     * 源池轮转使**单源并发 ≤2**（2026-11-22 实测单源 4 连接会有 2 条被饿死），块数封顶 4。
+     * 分块目标大小 ~8MB、块数 2~8：镜像掐单条长连接的观测点在 ~12MB（2026-10-25 实测 83MB 单发被掐在
+     * ~12MB），段压到 8MB 低于掐点则基本一次拉完不被掐；超大包（如 205MB OCR 模型）封顶 8 段后单段
+     * 仍超掐点，靠段内 3 轮源池轮转续传补完。线程数 = min(段数, 源数×2)，配合源级信号量（每源 ≤2 许可）
+     * 保证单源并发 ≤2（2026-11-22 实测单源 4 连接会有 2 条被饿死）。
      */
-    private const val CHUNK_TARGET_BYTES = 16L * 1024 * 1024
-    private const val CHUNK_MAX = 4
+    private const val CHUNK_TARGET_BYTES = 8L * 1024 * 1024
+    private const val CHUNK_MAX = 8
+
+    /** 段内源池轮转轮数：被掐/换源后从段断点续拉，每轮至少推进一段字节，3 轮可补完 ~25MB 段 */
+    private const val CHUNK_RETRY_ROUNDS = 3
 
     /**
      * 查询最新发布并与当前版本比较（versionCode 大于当前才算有更新）。
@@ -137,7 +142,9 @@ object UpdateChecker {
             finalizeDownload(tmp, onProgress)
             return
         }
-        val sources = listOf(url) + mirrors.map { it + url }
+        // 源池顺序：镜像优先、直连殿后——国内手机网络直连资产 CDN 大概率被墙（2026-10-25 实测整段阻断），
+        // 直连打头阵只会让每段白等一轮连接超时；直连又能拉通时它兜底补位（2026-11-22 实测 ~230KB/s 可用）
+        val sources = mirrors.map { it + url } + listOf(url)
         val parallel = expectedSize > 0 &&
             (chunkCount > 0 || (expectedSize >= PARALLEL_MIN_BYTES && sources.size >= 2))
         if (parallel) {
@@ -167,10 +174,13 @@ object UpdateChecker {
     }
 
     /**
-     * 并行分块下载引擎：每段一个线程，段内按源池轮转重试（offset=段号错开，单源并发 ≤2）。
+     * 并行分块下载引擎：线程数 = min(段数, 源数×2)，线程完成后按队列领下一段（在跑段号恒为连续窗口）。
      * 每段独立断点文件 `.part.c<N>`（比单条断点粒度细：某段被镜像掐断只续该段）；
+     * 段内源池轮转 [CHUNK_RETRY_ROUNDS] 轮——镜像掐长连接是常态，被掐后从段断点续拉推进，
+     * 轮数不足会导致「直连死一次 + 镜像掐一次」就耗尽重试、首次下载必失败（2026-11-22 装机实录）。
+     * 源级信号量每源 ≤2 并发许可（单源 4 连接实测 2 条被饿死；一次只持一个许可，无死锁）。
      * 全部段齐 → 拼接进整包 `.part` → 校验总长 → 统一改名收尾。
-     * 任一段全源失败即抛人话汇总，已齐的段保留作断点，重试只补缺口。
+     * 任一段全部轮次失败即抛人话汇总，已齐的段保留作断点，重试只补缺口。
      */
     private fun downloadParallel(
         sources: List<String>,
@@ -186,6 +196,8 @@ object UpdateChecker {
         val lastPct = java.util.concurrent.atomic.AtomicInteger(-1)
         val errors = java.util.Collections.synchronizedList(mutableListOf<String>())
         val failedCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val nextChunk = java.util.concurrent.atomic.AtomicInteger(0)
+        val sourcePermits = sources.map { java.util.concurrent.Semaphore(2) }
 
         /** 段 i 的期望字节数（末段可短于 chunkSize） */
         fun chunkLen(i: Int): Long = minOf(chunkSize * (i + 1), expectedSize) - chunkSize * i
@@ -204,6 +216,33 @@ object UpdateChecker {
             }
         }
 
+        /** 拉一段：段内源池轮转 [CHUNK_RETRY_ROUNDS] 轮，被掐/换源后都从段断点续拉，只补缺口 */
+        fun runChunk(i: Int) {
+            val want = chunkLen(i)
+            val start = chunkSize * i
+            val part = parts[i]
+            if (chunkDone[i].get() == want) return // 该段上一轮已拉齐，只等拼接
+            for (attempt in 0 until sources.size * CHUNK_RETRY_ROUNDS) {
+                val si = (i + attempt) % sources.size
+                sourcePermits[si].acquire()
+                try {
+                    downloadChunkFrom(
+                        sources[si], token, part, start, want,
+                        have = part.length().coerceAtMost(want),
+                    ) { n ->
+                        chunkDone[i].addAndGet(n.toLong())
+                        tick()
+                    }
+                    return
+                } catch (e: Exception) {
+                    errors.add("段${i + 1}@${hostOf(sources[si])}: ${e.message}")
+                } finally {
+                    sourcePermits[si].release()
+                }
+            }
+            failedCount.incrementAndGet()
+        }
+
         // 断点预扫描（主线程、线程启动前定案，避免各线程初始化进度竞态）：脏断点弃用，其余计入初始进度
         for (i in 0 until chunks) {
             val part = parts[i]
@@ -214,28 +253,15 @@ object UpdateChecker {
         }
         tick()
 
-        val threads = (0 until chunks).map { i ->
+        // 线程数 = min(段数, 源数×2)；线程完成后从队列领下一段，在跑段号恒为连续窗口
+        val threadCount = minOf(chunks, sources.size * 2)
+        val threads = (0 until threadCount).map {
             Thread {
-                val want = chunkLen(i)
-                val start = chunkSize * i
-                val part = parts[i]
-                if (chunkDone[i].get() == want) return@Thread // 该段上一轮已拉齐，只等拼接
-                for (attempt in sources.indices) {
-                    val source = sources[(i + attempt) % sources.size]
-                    try {
-                        downloadChunkFrom(
-                            source, token, part, start, want,
-                            have = part.length().coerceAtMost(want),
-                        ) { n ->
-                            chunkDone[i].addAndGet(n.toLong())
-                            tick()
-                        }
-                        return@Thread
-                    } catch (e: Exception) {
-                        errors.add("段${i + 1}@${hostOf(source)}: ${e.message}")
-                    }
+                while (true) {
+                    val i = nextChunk.getAndIncrement()
+                    if (i >= chunks) return@Thread
+                    runChunk(i)
                 }
-                failedCount.incrementAndGet()
             }.apply { start() }
         }
         threads.forEach { it.join() }

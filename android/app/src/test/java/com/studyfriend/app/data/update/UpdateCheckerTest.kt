@@ -178,14 +178,14 @@ class UpdateCheckerTest {
     }
 
     @Test
-    fun `downloadApk 直连失败自动换镜像成功`() {
+    fun `downloadApk 镜像优先成功时直连不再空耗`() {
         tmp.newFolder("updates")
-        fake.downloadStatus = 500
+        fake.downloadStatus = 500 // 直连若被误打头阵会先撞 500——命中镜像即成功，不该出现它的请求
         val mirror = FakeGitHub().also { it.start() }
         try {
             val dest = File(tmp.root, "updates/update-20.apk")
             val progress = mutableListOf<Int>()
-            // 镜像前缀拼原地址，与线上镜像同构（路径里带完整原始 URL）
+            // 镜像前缀拼原地址，与线上镜像同构（路径里带完整原始 URL）；源池顺序镜像优先、直连殿后
             UpdateChecker.downloadApk(
                 "http://127.0.0.1:${fake.port}/download/app.apk",
                 token = null,
@@ -195,8 +195,8 @@ class UpdateCheckerTest {
             ) { progress.add(it) }
             assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
             assertEquals(100, progress.last())
-            assertEquals(1, fake.downloadRequests.get())
             assertEquals(1, mirror.downloadRequests.get())
+            assertEquals(0, fake.downloadRequests.get())
             assertNull(File(dest.parentFile, dest.name + ".part").takeIf { it.exists() })
         } finally {
             mirror.stop()
@@ -332,8 +332,8 @@ class UpdateCheckerTest {
     @Test
     fun `downloadApk 分块并行某段失败自动换源成功`() {
         tmp.newFolder("updates")
-        fake.downloadStatus = 500
         val mirror = FakeGitHub().also { it.start() }
+        mirror.downloadStatus = 500 // 源池镜像优先：镜像打头阵失败，两段都落到直连补完
         try {
             val dest = File(tmp.root, "updates/update-20.apk")
             val progress = Collections.synchronizedList(mutableListOf<Int>())
@@ -351,9 +351,9 @@ class UpdateCheckerTest {
                 dest.readBytes().toList(),
             )
             assertEquals(100, progress.last())
-            // 源池轮转：段 0 先直连(500)再镜像，段 1 直接镜像
-            assertEquals(1, fake.downloadRequests.get())
-            assertEquals(2, mirror.downloadRequests.get())
+            // 源池轮转（offset=段号）：段 0 首发镜像(500)落直连，段 1 轮转偏移直接从直连起步
+            assertEquals(1, mirror.downloadRequests.get())
+            assertEquals(2, fake.downloadRequests.get())
         } finally {
             mirror.stop()
         }
@@ -409,8 +409,58 @@ class UpdateCheckerTest {
         assertEquals(100_000L, File(tmp.root, "updates/update-20.apk.part.c0").length())
         assertNull(File(tmp.root, "updates/update-20.apk.part.c1").takeIf { it.exists() })
         assertTrue(!dest.exists())
-        // 段 0 一次 + 段 1 一次（唯一源轮转一轮）
-        assertEquals(2, fake.downloadRequests.get())
+        // 段 0 一次成功；段 1 三轮源池轮转（唯一源）全撞 200 整包 → 3 次请求
+        assertEquals(4, fake.downloadRequests.get())
+    }
+
+    @Test
+    fun `downloadApk 分块并行长连接被掐断后段内续拉补完`() {
+        tmp.newFolder("updates")
+        fake.cutAfterBytes = 60_000 // 每次响应发 60KB 即断开（模拟镜像掐长连接，观测掐点 ~12MB 的等比例缩小）
+        val dest = File(tmp.root, "updates/update-20.apk")
+        val progress = Collections.synchronizedList(mutableListOf<Int>())
+        // 段长 100KB：段 0 = 200整包截断60KB → 续拉40KB；段 1 = 206截断60KB → 续拉40KB，各 2 次请求补完
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            chunkCount = 2,
+        ) { progress.add(it) }
+        assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
+        assertEquals(
+            ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }.toList(),
+            dest.readBytes().toList(),
+        )
+        assertEquals(100, progress.last())
+        assertNull(File(dest.parentFile, dest.name + ".part.c0").takeIf { it.exists() })
+        assertNull(File(dest.parentFile, dest.name + ".part.c1").takeIf { it.exists() })
+        assertEquals(4, fake.downloadRequests.get())
+    }
+
+    @Test
+    fun `downloadApk 段数多于线程数时按队列分发仍拼出完整包`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        val progress = Collections.synchronizedList(mutableListOf<Int>())
+        // 6 段、单源 → 线程数 = min(6, 1×2) = 2，线程完成后从队列领下一段
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            chunkCount = 6,
+        ) { progress.add(it) }
+        assertEquals(FakeGitHub.DOWNLOAD_BYTES.toLong(), dest.length())
+        assertEquals(
+            ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }.toList(),
+            dest.readBytes().toList(),
+        )
+        assertEquals(100, progress.last())
+        assertEquals(6, fake.downloadRequests.get())
+        for (i in 0 until 6) {
+            assertNull(File(dest.parentFile, dest.name + ".part.c$i").takeIf { it.exists() })
+        }
     }
 }
 
@@ -432,6 +482,14 @@ private class FakeGitHub {
 
     /** 置 true 时无视 Range 头恒回 200 全量（模拟不支持断点续传的服务器） */
     @Volatile var ignoreRange: Boolean = false
+
+    /** ≥0 时每次响应最多写出这么多字节就断开连接（模拟镜像掐长连接），已写部分照常到达客户端 */
+    @Volatile var cutAfterBytes: Long = -1
+
+    private fun writeBody(out: java.io.OutputStream, data: ByteArray) {
+        val cut = cutAfterBytes
+        if (cut in 0L until data.size) out.write(data, 0, cut.toInt()) else out.write(data)
+    }
 
     fun start() {
         val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
@@ -492,13 +550,13 @@ private class FakeGitHub {
                                 "Content-Range: bytes $from-${bytes.size - 1}/${bytes.size}\r\n" +
                                 "Connection: close\r\n\r\n").toByteArray(),
                         )
-                        out.write(remain)
+                        writeBody(out, remain)
                     } else {
                         out.write(
                             ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
                                 "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray(),
                         )
-                        out.write(bytes)
+                        writeBody(out, bytes)
                     }
                 } else {
                     out.write(
