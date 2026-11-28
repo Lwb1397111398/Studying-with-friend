@@ -217,9 +217,13 @@ object AiClient {
                     }
 
                     // think 标签抑制（实景体验轮 2026-11-21）：推理模型（MiniMax-M2.5 实录）把
-                    // 思考过程内联在正文增量里，这里收口后所有消费者拿到的都是干净正文；
-                    // onThink 非 null 时思考段增量另路回调（随手问/换个讲法盯屏显示用）
-                    val think = ThinkSuppressor(req.onThink)
+                    // 思考过程内联在正文增量里，这里收口后所有消费者拿到的都是干净正文。
+                    // 思考双路：AiLogBus.think 进运行日志（老板诉求「日志里也想看思考」，
+                    // 所有调用都记）+ req.onThink 另路回调（随手问/换个讲法盯屏显示用）
+                    val think = ThinkSuppressor { t ->
+                        AiLogBus.think(logId, t)
+                        req.onThink?.invoke(t)
+                    }
                     val full = StringBuilder()
                     r.body?.charStream()?.buffered()?.useLines { lines ->
                         for (line in lines) {

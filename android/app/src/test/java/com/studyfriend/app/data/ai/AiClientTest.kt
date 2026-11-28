@@ -75,9 +75,10 @@ class AiClientTest {
     }
 
     @Test
-    fun chat_onThink_receivesThinking_bodyAndLogStayClean() {
+    fun chat_onThink_receivesThinking_bodyAndLogTextStayClean() {
         // 老板诉求「思考亮出来」（2026-11-28）：思考增量另路进 onThink（随手问/换个讲法
-        // 盯屏显示用）；正文 onDelta、返回值、AI 运行日志一律不含思考（落库口径不变）
+        // 盯屏显示用）；正文 onDelta、返回值不含思考（落库口径不变）。
+        // 思考进运行日志独立字段 thinking（老板诉求「日志里也想看思考」），text/chars 仍是正文口径
         val server = MiniHttpServer { _, _, _, resp ->
             resp.sse(listOf("<th", "ink>英文草稿", "更多思考", "</thi", "nk>", "判断婴儿", "是否已出生"))
         }
@@ -91,10 +92,30 @@ class AiClientTest {
             assertEquals("判断婴儿是否已出生", full)
             assertEquals(listOf("判断婴儿", "是否已出生"), deltas)
             assertEquals("英文草稿更多思考", thinks.joinToString(""))
-            // AI 运行日志保持正文口径：text/chars 都不含思考
+            // AI 运行日志：text/chars 保持正文口径；思考独立进 thinking 字段
             val log = AiLogBus.snapshots.value[0]
             assertEquals(full, log.text)
             assertEquals(full.length, log.chars)
+            assertEquals("英文草稿更多思考", log.thinking)
+            assertNotNull(log.thinkFirstMs)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun chat_thinkingGoesToLog_evenWithoutOnThinkConsumer() {
+        // 日志记思考与 UI 是否消费无关：不带 onThink 的调用（讲解/总结/粗读…）思考同样入日志
+        val server = MiniHttpServer { _, _, _, resp ->
+            resp.sse(listOf("<think>后台思考", "</think>", "干净正文"))
+        }
+        try {
+            AiLogBus.clear()
+            val full = runBlocking { AiClient.chat(request(server.baseUrl)) {} }
+            assertEquals("干净正文", full)
+            val log = AiLogBus.snapshots.value[0]
+            assertEquals("干净正文", log.text)
+            assertEquals("后台思考", log.thinking)
         } finally {
             server.stop()
         }

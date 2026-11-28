@@ -38,6 +38,11 @@ data class AiLogSession(
     val chars: Int = 0,
     /** 实时正文（尾部截断，展示用） */
     val text: String = "",
+    /** 思考过程（2026-11-28 老板诉求「日志里也想看思考」）：推理模型 &lt;think&gt; 段
+     *  累积文本，尾部截断展示用；正文/落库口径不受影响 */
+    val thinking: String = "",
+    /** 第一段思考到达时刻；null=本次调用无思考（非推理模型） */
+    val thinkFirstMs: Long? = null,
     val error: String? = null,
 )
 
@@ -95,6 +100,15 @@ object AiLogBus {
         )
     }
 
+    /** 思考段增量（收口在 AiClient.chat：所有 AI 调用的思考都进日志，与 UI 是否亮思考无关） */
+    fun think(id: Long, text: String) = update(id) {
+        it.copy(
+            state = AiLogState.STREAMING,
+            thinking = tail(it.thinking + text),
+            thinkFirstMs = it.thinkFirstMs ?: System.currentTimeMillis(),
+        )
+    }
+
     /** 终态：error=null 完成；否则失败。终态幂等（重复 finish/cancel 不改账） */
     fun finish(id: Long, error: String? = null) = update(id) {
         if (it.state == AiLogState.DONE || it.state == AiLogState.ERROR) return@update it
@@ -142,13 +156,17 @@ object AiLogBus {
     private fun tail(text: String): String =
         if (text.length <= TEXT_TAIL_MAX) text else "…" + text.substring(text.length - TEXT_TAIL_MAX)
 
-    /** DiagLog 一行摘要：排队/首字/出字耗时与速度（首字时刻缺失时给「无输出」） */
+    /** DiagLog 一行摘要：排队/思考/首字/出字耗时与速度（首字时刻缺失时给「无输出」） */
     private fun diagLine(s: AiLogSession): String {
         val queueSec = s.connectMs?.let { (it - s.startMs) / 1000.0 }
         val first = s.firstDeltaMs
         return buildString {
             append("[${s.source}]")
             if (queueSec != null && queueSec >= 0.05) append(" 排队${fmtSec(queueSec)}")
+            // 思考时长=思考首段→正文首字（思考吃满预算无正文时→结束时刻）
+            s.thinkFirstMs?.let { thinkStart ->
+                append(" 思考${fmtSec(((first ?: s.endMs ?: System.currentTimeMillis()) - thinkStart) / 1000.0)}")
+            }
             if (first != null) {
                 append(" 首字${fmtSec((first - (s.connectMs ?: s.startMs)) / 1000.0)}")
                 val span = (s.endMs ?: System.currentTimeMillis()) - first

@@ -100,6 +100,48 @@ class AiLogBusTest {
         assertTrue(AiLogBus.snapshots.value.isEmpty())
     }
 
+    // ---- think 埋点（2026-11-28 老板诉求「日志里也想看思考」） ----
+
+    @Test
+    fun think_accumulates_textAndCharsStayBodyOnly() {
+        val id = AiLogBus.begin("随手问", "m")
+        AiLogBus.think(id, "思考一")
+        AiLogBus.think(id, "思考二")
+        AiLogBus.delta(id, "正文")
+        AiLogBus.finish(id)
+
+        val s = AiLogBus.snapshots.value[0]
+        assertEquals(AiLogState.DONE, s.state)
+        // 思考独立累积，正文口径（text/chars）不混思考
+        assertEquals("思考一思考二", s.thinking)
+        assertEquals("正文", s.text)
+        assertEquals(2, s.chars)
+        assertNotNull(s.thinkFirstMs)
+        assertNotNull(s.firstDeltaMs)
+        // 正文首字晚于思考首段（同毫秒也满足 <=；上面已断言非空，!! 安全）
+        assertTrue(s.thinkFirstMs!! <= s.firstDeltaMs!!)
+    }
+
+    @Test
+    fun think_truncatesTailLikeBody() {
+        val id = AiLogBus.begin("随手问", "m")
+        AiLogBus.think(id, "想".repeat(AiLogBus.TEXT_TAIL_MAX + 500))
+        val s = AiLogBus.snapshots.value[0]
+        assertEquals(AiLogBus.TEXT_TAIL_MAX + 1, s.thinking.length)
+        assertTrue(s.thinking.startsWith("…"))
+        assertNotNull(s.thinkFirstMs)
+    }
+
+    @Test
+    fun noThink_thinkFieldsStayNull() {
+        val id = AiLogBus.begin("粗读", "m")
+        AiLogBus.delta(id, "直接出正文")
+        AiLogBus.finish(id)
+        val s = AiLogBus.snapshots.value[0]
+        assertEquals("", s.thinking)
+        assertNull(s.thinkFirstMs)
+    }
+
     @Test
     fun fmtSpeed_negativeOrZeroSpan_emDash() {
         assertEquals("—", AiLogBus.fmtSpeed(100, 0))

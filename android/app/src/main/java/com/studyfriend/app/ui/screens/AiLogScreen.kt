@@ -140,6 +140,22 @@ private fun AiLogCard(s: AiLogSession, nowMs: Long) {
                 color = if (s.state == AiLogState.ERROR) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // 思考过程区（2026-11-28 老板诉求「日志里也想看思考」）：推理模型思考实时
+            // 追加；点卡片展开逻辑与正文共用（expanded 同一状态）
+            if (s.thinking.isNotEmpty()) {
+                Text(
+                    "思考过程",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+                Text(
+                    s.thinking,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = if (expanded) Int.MAX_VALUE else 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             if (s.text.isNotEmpty()) {
                 Text(
                     s.text,
@@ -187,8 +203,14 @@ private fun statsLine(s: AiLogSession, nowMs: Long): String = when (s.state) {
         val parts = mutableListOf<String>()
         val first = s.firstDeltaMs
         if (first == null) {
-            parts.add("已发出请求，等待首字… ${AiLogBus.fmtSec((nowMs - (s.connectMs ?: s.startMs)) / 1000.0)}")
+            if (s.thinking.isNotEmpty()) {
+                // 推理模型思考流出中：跳动显示思考时长（正文首字前的等待不再是黑盒）
+                s.thinkFirstMs?.let { t -> parts.add("思考中 ${AiLogBus.fmtSec((nowMs - t) / 1000.0)}") }
+            } else {
+                parts.add("已发出请求，等待首字… ${AiLogBus.fmtSec((nowMs - (s.connectMs ?: s.startMs)) / 1000.0)}")
+            }
         } else {
+            s.thinkFirstMs?.let { t -> parts.add("思考 ${AiLogBus.fmtSec((first - t) / 1000.0)}") }
             parts.add("首字 ${AiLogBus.fmtSec((first - (s.connectMs ?: s.startMs)) / 1000.0)}")
             parts.add("已出 ${s.chars} 字")
             val span = nowMs - first
@@ -199,6 +221,10 @@ private fun statsLine(s: AiLogSession, nowMs: Long): String = when (s.state) {
     }
     AiLogState.DONE -> {
         val parts = mutableListOf<String>()
+        s.thinkFirstMs?.let { t ->
+            // 思考时长=思考首段→正文首字（思考吃满预算无正文时→结束时刻）
+            parts.add("思考 ${AiLogBus.fmtSec(((s.firstDeltaMs ?: s.endMs ?: 0L) - t) / 1000.0)}")
+        }
         s.firstDeltaMs?.let { first ->
             parts.add("首字 ${AiLogBus.fmtSec((first - (s.connectMs ?: s.startMs)) / 1000.0)}")
             s.endMs?.let { end ->
