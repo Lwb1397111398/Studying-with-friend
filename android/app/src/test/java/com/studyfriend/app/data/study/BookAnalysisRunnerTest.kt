@@ -24,9 +24,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * 一键分析全书（阅读体验轮，4 例）：真 Room 内存库 + 双假 chat（ChatJsonFn 块调用 /
- * ChatTextFn 讲解调用），锁定——正文章逐章「粗读→讲解」、非正文零调用、无 Key 结构化
- * 失败、已分析章续跑零调用。
+ * 一键分析全书（阅读体验轮 4 例 + 总结总览并入 2026-11-28 共 5 例）：真 Room 内存库 +
+ * 双假 chat（ChatJsonFn 块调用 / ChatTextFn 按 source 分流讲解·总结·总览），锁定——
+ * 正文章逐章「粗读→讲解→总结」、收尾生成全书总览、非正文零调用、无 Key 结构化失败、
+ * 已分析章续跑零调用、全部完成后重跑四层缓存全命中零调用。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -65,18 +66,45 @@ class BookAnalysisRunnerTest {
         )
     }
 
-    /** 讲解假 chat：返回 v2 标签文本。计数用原子——单元 2 路并发会真同时调用（NotePlannerTest 同坑） */
+    /** 讲解/总结/总览假 chat：按 ChatRequest.source 分流返回对应标签文本。计数用原子——单元 2 路并发会真同时调用（NotePlannerTest 同坑） */
     private class FakeText : ChatTextFn {
-        private val calls = java.util.concurrent.atomic.AtomicInteger(0)
-        val noteCalls: Int get() = calls.get()
+        private val notes = java.util.concurrent.atomic.AtomicInteger(0)
+        private val summaries = java.util.concurrent.atomic.AtomicInteger(0)
+        private val overviews = java.util.concurrent.atomic.AtomicInteger(0)
+        val noteCalls: Int get() = notes.get()
+        val summaryCalls: Int get() = summaries.get()
+        val overviewCalls: Int get() = overviews.get()
 
-        override suspend fun invoke(req: ChatRequest, onDelta: (String) -> Unit): String {
-            calls.incrementAndGet()
-            return buildString {
-                append("<标题>讲解</标题>\n")
-                append("<讲解>大白话讲解〔p0〕</讲解>\n")
-                append("<要点>\n- 要点一\n</要点>\n")
+        override suspend fun invoke(req: ChatRequest, onDelta: (String) -> Unit): String = when (req.source) {
+            "段落讲解" -> {
+                notes.incrementAndGet()
+                buildString {
+                    append("<标题>讲解</标题>\n")
+                    append("<讲解>大白话讲解〔p0〕</讲解>\n")
+                    append("<要点>\n- 要点一\n</要点>\n")
+                }
             }
+            "章末总结" -> {
+                summaries.incrementAndGet()
+                buildString {
+                    append("<总结>\n本章讲了两个要点。\n</总结>\n")
+                    append("<导图>\n本章\n\t要点一\n\t要点二</导图>\n")
+                    append("<记忆思路>\n先记要点一，再记要点二。\n</记忆思路>\n")
+                    append("<串联>\n两个要点从概念推出规则。\n</串联>\n")
+                    append("<自测>\n").append(
+                        QuizCodec.encode(listOf(QuizQuestion("RECALL", "本章讲什么？", "两个要点", "按导图记"))),
+                    ).append("\n</自测>")
+                }
+            }
+            "全书总览" -> {
+                overviews.incrementAndGet()
+                buildString {
+                    append("<总览>\n全书围绕物权展开。\n</总览>\n")
+                    append("<导图>\n测试书\n\t第一章 总论\n\t第二章 物权</导图>\n")
+                    append("<主线>\n概念到规则的推进线。\n</主线>")
+                }
+            }
+            else -> throw IllegalStateException("未预期的 source：${req.source}")
         }
     }
 
@@ -136,11 +164,25 @@ class BookAnalysisRunnerTest {
         assertEquals(2, json.blockCalls)
         assertEquals(0, json.mergeCalls)
         assertEquals(4, text.noteCalls)
+        // 总结并入（2026-11-28）：两章各 1 次总结调用 + 收尾全书总览 1 次
+        assertEquals(2, text.summaryCalls)
+        assertEquals(1, text.overviewCalls)
+        assertTrue(done.message.contains("全书总览已生成"))
         // 粗读落库：第一章 gist + 段落标注
         val chapters = db.chapterDao().byBook(bookId)
         assertEquals("章梗概", chapters.first { it.title == "第一章 总论" }.gist)
         val marks = db.paragraphDao().byChapter(chapters.first { it.title == "第二章 物权" }.id)
         assertTrue(marks.all { it.aiAction == "EXPLAIN" })
+        // 总结落库：两章都有当前版本总结资产
+        for (t in listOf("第一章 总论", "第二章 物权")) {
+            val a = db.chapterAssetDao().byChapter(chapters.first { it.title == t }.id)
+            assertNotNull(a)
+            assertTrue(SummaryPlanner.isCurrentSummary(a!!.promptVersion) && a.summaryMd.isNotBlank())
+        }
+        // 收尾总览落库（当前版本 payload）
+        val payload = OverviewCodec.decode(db.bookDao().get(bookId)?.overviewJson)
+        assertNotNull(payload)
+        assertEquals(OverviewCodec.VERSION, payload!!.promptVersion)
         // 非正文章无讲解
         assertEquals(0, db.paraNoteDao().byChapterOnce(chapters.first { it.title == "目录" }.id).size)
     }
@@ -214,6 +256,33 @@ class BookAnalysisRunnerTest {
         withTimeout(30_000) { r.state.first { it is BookAnalysisState.Succeeded } }
         assertEquals(jsonBefore + 1, json.blockCalls)
         assertEquals(textBefore + 2, text.noteCalls)
+        // 第一章粗读/讲解已缓存但无总结 → 补 1 次；第二章全链各 1 次 = 2；总览收尾 1 次
+        assertEquals(2, text.summaryCalls)
+        assertEquals(1, text.overviewCalls)
         assertNotNull(chapters.first { it.title == "第二章 物权" })
+    }
+
+    // ---------- 5. 全部完成后再点一次：粗读空转/讲解缓存/总结资产/总览版本四层全命中，零新调用 ----------
+
+    @Test
+    fun runBook_repeatAfterComplete_zeroCalls(): Unit = runBlocking {
+        val db = db()
+        val json = FakeJson()
+        val text = FakeText()
+        val r = runner(db, json, text, settingsWithKey(db))
+        val bookId = seedBook(db)
+        r.start(bookId)
+        withTimeout(30_000) { r.state.first { it is BookAnalysisState.Succeeded } }
+        val jsonBefore = json.blockCalls
+        val textBefore = text.noteCalls + text.summaryCalls + text.overviewCalls
+        // 重跑一键分析：先等状态离开上一跑的 Succeeded（第二跑的排队/运行态），再等新 Succeeded
+        r.start(bookId)
+        withTimeout(30_000) { r.state.first { it !is BookAnalysisState.Succeeded } }
+        val done = withTimeout(30_000) {
+            r.state.first { it is BookAnalysisState.Succeeded }
+        } as BookAnalysisState.Succeeded
+        assertEquals(jsonBefore, json.blockCalls)
+        assertEquals(textBefore, text.noteCalls + text.summaryCalls + text.overviewCalls)
+        assertTrue(done.message.contains("全书总览已是最新"))
     }
 }

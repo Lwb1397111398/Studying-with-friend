@@ -266,7 +266,7 @@ fun ChapterListScreen(
                 text = {
                     Text(
                         buildString {
-                            append("搭子会逐章完成「粗读 → 讲解」，共 ${analysisPlan.targetCount} 章")
+                            append("搭子会逐章完成「粗读 → 讲解 → 总结」，最后生成全书总览，共 ${analysisPlan.targetCount} 章")
                             if (analysisPlan.skippedCount > 0) {
                                 append("，跳过开篇/目录/后置件：$skipPreview$skipSuffix")
                             }
@@ -357,7 +357,10 @@ private fun BookAnalysisCard(
                                 color = MaterialTheme.colorScheme.primary,
                             )
                             Text(
-                                if (state.subTotal > 0) {
+                                if (state.phase == "总览") {
+                                    // 收尾总览阶段：doneChapters 已= 总章数，「第 N+1 章」口径不适用
+                                    "正在生成全书总览（要点、导图、主线一次带走）"
+                                } else if (state.subTotal > 0) {
                                     "第 ${state.doneChapters + 1}/${state.totalChapters} 章「${state.chapterTitle}」 · ${state.phase} ${state.subDone}/${state.subTotal}"
                                 } else {
                                     "第 ${state.doneChapters + 1}/${state.totalChapters} 章「${state.chapterTitle}」 · ${state.phase}"
@@ -489,7 +492,7 @@ private fun BookAnalysisCard(
                             color = MaterialTheme.colorScheme.primary,
                         )
                         Text(
-                            "跳过开篇、目录、参考文献，从第一章开始逐章粗读并讲解",
+                            "跳过开篇、目录、参考文献，从第一章开始逐章粗读、讲解并总结，最后生成全书总览",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

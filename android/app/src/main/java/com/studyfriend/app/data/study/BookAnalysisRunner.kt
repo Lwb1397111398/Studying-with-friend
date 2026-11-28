@@ -37,9 +37,10 @@ sealed interface BookAnalysisState {
 
 /**
  * 一键分析全书（阅读体验轮 2026-11-21）：按 [BookAnalysisScope] 挑出正文章，逐章
- * 「粗读 → 讲解」串行推进，每章完成即落库——中断/停止后重新一键分析，已分析章走
- * 空转保护与讲解缓存零调用跳过，天然断点续跑。经 AiGate 与粗读/讲解/总结/总览互斥。
- * 复用 RoughReadPlanner/NotePlanner（不经过两个 Runner 的单章状态机，避免状态打架）。
+ * 「粗读 → 讲解 → 总结」串行推进，收尾生成全书总览——每步完成即落库。中断/停止后
+ * 重新一键分析，已分析章走空转保护与讲解/总结缓存零调用跳过，天然断点续跑（老板
+ * 诉求「自动一次弄完全书」2026-11-28：总结与总览并入）。经 AiGate 与粗读/讲解/
+ * 总结/总览互斥。复用各 Planner（不经过各 Runner 的单章状态机，避免状态打架）。
  */
 class BookAnalysisRunner(
     private val db: StudyDatabase,
@@ -93,6 +94,7 @@ class BookAnalysisRunner(
         }
         val roughPlanner = RoughReadPlanner(db, context, settings, chatJsonFn)
         val notePlanner = NotePlanner(db, context, settings, chatTextFn)
+        val summaryPlanner = SummaryPlanner(db, context, settings, chatTextFn)
         var doneChapters = 0
         for (ti in plan.targets) {
             currentCoroutineContext().ensureActive()
@@ -149,11 +151,58 @@ class BookAnalysisRunner(
                     "分析到「${chapter.title}」讲解时出错：${e.message ?: "未知错误"}。已完成部分已保存",
                 )
             }
+            // 总结（老板诉求「一次弄完」2026-11-28）：已有当前版本总结的章零调用跳过
+            // （续跑/重跑不重烧）；内容性问题（无标注/无正文）跳章继续，网络等意外中断整书
+            progress("总结", 0, 0)
+            val asset = db.chapterAssetDao().byChapter(chapter.id)
+            val hasCurrentSummary = asset != null &&
+                SummaryPlanner.isCurrentSummary(asset.promptVersion) &&
+                asset.summaryMd.isNotBlank()
+            if (!hasCurrentSummary) {
+                try {
+                    summaryPlanner.run(chapter.id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: MissingKeyException) {
+                    throw e // launchTask 统一映射 Failed(keyIssue=true)，UI 引导去设置
+                } catch (e: PlannerException) {
+                    // 该章总结跳过（粗读零标注的空转章等），不整书中断
+                } catch (e: Exception) {
+                    return BookAnalysisState.Interrupted(
+                        bookId,
+                        "分析到「${chapter.title}」总结时出错：${e.message ?: "未知错误"}。" +
+                            "已完成部分已保存，稍后重新一键分析会自动续跑",
+                    )
+                }
+            }
             doneChapters++
+        }
+        // 收尾：全书总览（最后一步，best-effort）——已是当前版本零调用跳过；失败不推翻
+        // 整书成果，人话写进结果行（总览页也可随时单独重新生成）
+        setState(
+            BookAnalysisState.Running(bookId, plan.targetCount, plan.targetCount, "全书总览", "总览", 0, 0),
+        )
+        val overviewNote = if (db.bookDao().get(bookId)?.overviewJson
+                ?.let { OverviewCodec.decode(it)?.promptVersion == OverviewCodec.VERSION } == true
+        ) {
+            "全书总览已是最新"
+        } else {
+            try {
+                OverviewPlanner(db, context, settings, chatTextFn).run(bookId)
+                "全书总览已生成"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: MissingKeyException) {
+                throw e // launchTask 统一映射 Failed(keyIssue=true)，UI 引导去设置
+            } catch (e: PlannerException) {
+                "全书总览未生成（${e.message ?: "内容不足"}），其余成果不受影响"
+            } catch (e: Exception) {
+                "全书总览未生成（${e.message ?: "未知错误"}），可在全书总览页单独重试"
+            }
         }
         return BookAnalysisState.Succeeded(
             bookId,
-            "全书分析完成：$doneChapters 章（跳过 ${plan.skippedCount} 章开篇/目录/后置件）",
+            "全书分析完成：$doneChapters 章（跳过 ${plan.skippedCount} 章开篇/目录/后置件）；$overviewNote",
         )
     }
 }
