@@ -86,6 +86,31 @@ class UpdateCheckerTest {
         assertEquals("更新内容：\n- 修 bug", stripped)
     }
 
+    @Test
+    fun `parseUpdateMeta 解析第二行 sha256 注释且缺省为 null`() {
+        val sha = "ab".repeat(32)
+        val meta = UpdateChecker.parseUpdateMeta(
+            "<!-- studyfriend-update versionCode=30 versionName=0.1.30 -->\n" +
+                "<!-- studyfriend-update-sha256=$sha -->\n说明",
+        )
+        assertEquals(30, meta?.versionCode)
+        assertEquals("0.1.30", meta?.versionName)
+        assertEquals(sha, meta?.sha256)
+        // 旧格式（无 sha 注释行）兼容：主元数据照常解析，sha 为 null
+        val plain = UpdateChecker.parseUpdateMeta("<!-- studyfriend-update versionCode=30 versionName=0.1.30 -->")
+        assertEquals(30, plain?.versionCode)
+        assertNull(plain?.sha256)
+    }
+
+    @Test
+    fun `stripMetaComment 同时去掉 sha256 注释行`() {
+        val stripped = UpdateChecker.stripMetaComment(
+            "<!-- studyfriend-update versionCode=15 versionName=0.1.15 -->\n" +
+                "<!-- studyfriend-update-sha256=${"cd".repeat(32)} -->\n更新内容",
+        )
+        assertEquals("更新内容", stripped)
+    }
+
     // ---- fetchLatest ----
 
     @Test
@@ -298,6 +323,111 @@ class UpdateCheckerTest {
         assertNull(part.takeIf { it.exists() })
     }
 
+    // ---- downloadApk 内容校验（SHA-256 / 长度）：坏包清缓存自愈，不再装出「软件包似乎无效」----
+
+    /** 与 FakeGitHub 载荷同构的「好内容」及其指纹 */
+    private fun goodPayload(): ByteArray = ByteArray(FakeGitHub.DOWNLOAD_BYTES) { (it % 251).toByte() }
+
+    private fun shaOf(bytes: ByteArray): String {
+        val f = File(tmp.root, "sha-target.bin")
+        f.writeBytes(bytes)
+        return UpdateChecker.sha256File(f).also { f.delete() }
+    }
+
+    @Test
+    fun `downloadApk 下载内容与 sha256 不符时报校验失败并清缓存`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        try {
+            // 长度恰好对但内容坏（如镜像塞回错误字节）：下载完成后哈希比对拦住
+            UpdateChecker.downloadApk(
+                "http://127.0.0.1:${fake.port}/download/app.apk",
+                token = null,
+                dest = dest,
+                expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+                sha256 = "e".repeat(64),
+            ) { }
+            throw AssertionError("应当抛出 UpdateException")
+        } catch (e: UpdateException) {
+            assertTrue(e.message!!.contains("校验失败"))
+        }
+        assertTrue("坏包不应留在正式名下", !dest.exists())
+        assertNull(File(dest.parentFile, dest.name + ".part").takeIf { it.exists() })
+    }
+
+    @Test
+    fun `downloadApk 缓存坏包长度对内容错时清掉重下`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        dest.writeBytes(ByteArray(FakeGitHub.DOWNLOAD_BYTES)) // 全 0：长度恰好对、内容坏（历史上会被永远复用）
+        val progress = mutableListOf<Int>()
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            sha256 = shaOf(goodPayload()),
+        ) { progress.add(it) }
+        assertEquals(goodPayload().toList(), dest.readBytes().toList())
+        assertEquals(100, progress.last())
+        assertEquals("坏缓存应触发重下而不是复用", 1, fake.downloadRequests.get())
+    }
+
+    @Test
+    fun `downloadApk 缓存完整且 sha 相符时直接复用不联网`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        dest.writeBytes(goodPayload())
+        val progress = mutableListOf<Int>()
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            sha256 = shaOf(goodPayload()),
+        ) { progress.add(it) }
+        assertEquals(100, progress.last())
+        assertEquals(0, fake.downloadRequests.get())
+    }
+
+    @Test
+    fun `downloadApk 整包断点长度对内容错时清掉重下`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        val part = File(tmp.root, "updates/update-20.apk.part")
+        part.writeBytes(ByteArray(FakeGitHub.DOWNLOAD_BYTES)) // 字节齐但内容坏：不能直接转正
+        UpdateChecker.downloadApk(
+            "http://127.0.0.1:${fake.port}/download/app.apk",
+            token = null,
+            dest = dest,
+            expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+            sha256 = shaOf(goodPayload()),
+        ) { }
+        assertEquals(goodPayload().toList(), dest.readBytes().toList())
+        assertEquals(1, fake.downloadRequests.get())
+        assertNull(part.takeIf { it.exists() })
+    }
+
+    @Test
+    fun `downloadApk 下载长度与远端元数据不符时报校验失败不落地`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        try {
+            // 服务器诚实地报了自己的长度并收完（如镜像塞回错误页），但与 Release 元数据 size 对不上
+            UpdateChecker.downloadApk(
+                "http://127.0.0.1:${fake.port}/download/app.apk",
+                token = null,
+                dest = dest,
+                expectedSize = FakeGitHub.DOWNLOAD_BYTES + 1L,
+            ) { }
+            throw AssertionError("应当抛出 UpdateException")
+        } catch (e: UpdateException) {
+            assertTrue(e.message!!.contains("校验失败"))
+        }
+        assertTrue(!dest.exists())
+        assertNull(File(dest.parentFile, dest.name + ".part").takeIf { it.exists() })
+    }
+
     // ---- downloadApk 并行分块（大包提速路径：≥8MB 且有镜像时启用；单测用 chunkCount 强制开启）----
 
     @Test
@@ -459,6 +589,31 @@ class UpdateCheckerTest {
         assertEquals(100, progress.last())
         assertEquals(6, fake.downloadRequests.get())
         for (i in 0 until 6) {
+            assertNull(File(dest.parentFile, dest.name + ".part.c$i").takeIf { it.exists() })
+        }
+    }
+
+    @Test
+    fun `downloadApk 分块下载 sha 不符时清掉整包与段断点`() {
+        tmp.newFolder("updates")
+        val dest = File(tmp.root, "updates/update-20.apk")
+        try {
+            // 拼接总长恰好对但内容坏（Range 错位字节/坏镜像段）：哈希比对拦在改名前
+            UpdateChecker.downloadApk(
+                "http://127.0.0.1:${fake.port}/download/app.apk",
+                token = null,
+                dest = dest,
+                expectedSize = FakeGitHub.DOWNLOAD_BYTES.toLong(),
+                chunkCount = 2,
+                sha256 = "e".repeat(64),
+            ) { }
+            throw AssertionError("应当抛出 UpdateException")
+        } catch (e: UpdateException) {
+            assertTrue(e.message!!.contains("校验失败"))
+        }
+        assertTrue(!dest.exists())
+        assertNull(File(dest.parentFile, dest.name + ".part").takeIf { it.exists() })
+        for (i in 0 until 2) {
             assertNull(File(dest.parentFile, dest.name + ".part.c$i").takeIf { it.exists() })
         }
     }

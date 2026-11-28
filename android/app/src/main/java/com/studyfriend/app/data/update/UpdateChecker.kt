@@ -20,6 +20,8 @@ data class ReleaseInfo(
     val notes: String,
     val apkUrl: String,
     val apkSize: Long,
+    /** 安装包 SHA-256（云端构建写进发布说明第二行注释；旧发布没有则 null，退回长度校验） */
+    val sha256: String? = null,
 )
 
 sealed class UpdateCheckResult {
@@ -103,6 +105,7 @@ object UpdateChecker {
             notes = stripMetaComment(body),
             apkUrl = asset.url,
             apkSize = asset.size,
+            sha256 = meta.sha256,
         )
         return if (meta.versionCode > currentVersionCode) {
             UpdateCheckResult.Available(info)
@@ -113,14 +116,18 @@ object UpdateChecker {
 
     /**
      * 下载 APK 到 [dest]，onProgress 回调整数百分比（IO 线程回调）。
-     * 同版本号的完整文件已存在（长度与远端一致）时直接复用，不重复下载。
+     * 同版本号的完整文件已存在（内容校验通过）时直接复用，不重复下载。
      * 大包（≥8MB 且源池 ≥2 个）走**并行分块**：整包切 2~4 段，每段一线程并发拉，
      * 段与段之间按「直连 + 镜像」源池轮转——46MB 包实测单连 ~260KB/s，并行后整体 ~3 倍速；
      * 每段先写独立 `.part.c<N>` 断点、Range 续拉、某段换源不影响其他段，全部齐了拼接改名。
-     * 小包/无镜像走单流整包（E2E 假服务器同此路径）：先写 `.part`、校验长度后才改名。
+     * 小包/无镜像走单流整包（E2E 假服务器同此路径）：先写 `.part`、校验后才改名。
+     * **内容校验收口**：下载完成/复用缓存/断点收尾三处都过 [verifyApk]（SHA-256 优先，
+     * 退回长度比对）——只验字节数拦不住「长度恰好对但内容坏」的包（镜像塞错误页/Range
+     * 错位字节都可能发生），装到手机上就是系统安装器报「软件包似乎无效」且坏缓存被反复复用；
+     * 校验不过清掉全部缓存抛人话，用户再点一次「立即更新」即全新重下自愈。
      * 永远不会留下半截冒充完整包（2026-10-25 实测：镜像单发长连接必被掐断，断点续传才能下完）。
      * 仅 github.com 的地址拼镜像（E2E/单测的本地假服务器地址不拼）；
-     * 测试用 [mirrors]/[chunkCount] 参数注入本地假镜像与强制分块数。
+     * 测试用 [mirrors]/[chunkCount]/[sha256] 参数注入本地假镜像、强制分块数与校验值。
      */
     fun downloadApk(
         url: String,
@@ -129,18 +136,26 @@ object UpdateChecker {
         expectedSize: Long,
         mirrors: List<String> = if (url.startsWith("https://github.com/")) DOWNLOAD_MIRRORS else emptyList(),
         chunkCount: Int = 0,
+        sha256: String? = null,
         onProgress: (Int) -> Unit,
     ) {
         dest.parentFile?.mkdirs()
+        // 缓存自愈：历史坏包（长度恰好对但内容坏，装不上报「软件包似乎无效」）清掉重下
+        if (dest.exists() && !verifyApk(dest, expectedSize, sha256)) {
+            purgeBroken(dest)
+        }
         if (expectedSize > 0 && dest.exists() && dest.length() == expectedSize) {
             onProgress(100)
             return
         }
         val tmp = File(dest.parentFile, dest.name + ".part")
-        // 上次下载字节已齐但没来得及改名（中断在最后一步）：直接收尾，不发请求
+        // 上次下载字节已齐但没来得及改名（中断在最后一步）：内容校验过了直接收尾，不发请求
         if (expectedSize > 0 && tmp.exists() && tmp.length() == expectedSize) {
-            finalizeDownload(tmp, onProgress)
-            return
+            if (verifyApk(tmp, expectedSize, sha256)) {
+                finalizeDownload(tmp, onProgress)
+                return
+            }
+            purgeBroken(dest)
         }
         // 源池顺序：镜像优先、直连殿后——国内手机网络直连资产 CDN 大概率被墙（2026-10-25 实测整段阻断），
         // 直连打头阵只会让每段白等一轮连接超时；直连又能拉通时它兜底补位（2026-11-22 实测 ~230KB/s 可用）
@@ -151,6 +166,7 @@ object UpdateChecker {
             downloadParallel(
                 sources, token, tmp, expectedSize,
                 chunks = chunkCount.takeIf { it > 0 } ?: autoChunkCount(expectedSize),
+                sha256 = sha256,
                 onProgress = onProgress,
             )
             return
@@ -159,6 +175,8 @@ object UpdateChecker {
         for (source in sources) {
             try {
                 downloadFrom(source, token, tmp, onProgress)
+                // 校验（sha/长度）过了才转正；不过清缓存抛错换下一个源重下（坏镜像的字节换源能治）
+                verifyAndFinalize(tmp, dest, expectedSize, sha256, onProgress)
                 return
             } catch (e: java.util.concurrent.CancellationException) {
                 throw e
@@ -188,6 +206,7 @@ object UpdateChecker {
         tmp: File,
         expectedSize: Long,
         chunks: Int,
+        sha256: String?,
         onProgress: (Int) -> Unit,
     ) {
         val chunkSize = (expectedSize + chunks - 1) / chunks
@@ -271,7 +290,7 @@ object UpdateChecker {
                     "（${errors.firstOrNull() ?: "未知错误"}）。再点一次「立即更新」会从各段断点继续，多试几次可下完",
             )
         }
-        // 各段齐了 → 按序拼接进整包 .part → 校验总长 → 删段断点 → 统一改名收尾
+        // 各段齐了 → 按序拼接进整包 .part → 校验总长 → 删段断点 → 内容校验 → 统一改名收尾
         java.io.FileOutputStream(tmp).use { out ->
             parts.forEach { p -> p.inputStream().use { it.copyTo(out, 64 * 1024) } }
         }
@@ -279,7 +298,7 @@ object UpdateChecker {
             throw UpdateException("拼接安装包失败（${tmp.length()}/${expectedSize} 字节），请重试")
         }
         parts.forEach { it.delete() }
-        finalizeDownload(tmp, onProgress)
+        verifyAndFinalize(tmp, File(tmp.parentFile, tmp.name.removeSuffix(".part")), expectedSize, sha256, onProgress)
     }
 
     /**
@@ -342,7 +361,7 @@ object UpdateChecker {
     private fun autoChunkCount(size: Long): Int =
         (((size + CHUNK_TARGET_BYTES - 1) / CHUNK_TARGET_BYTES).toInt().coerceIn(2, CHUNK_MAX))
 
-    /** 单源下载到 [tmp]：已有字节带 Range 续拉，服务器不支持 Range 回 200 则从头重下；成功校验长度后改名 */
+    /** 单源下载到 [tmp]：已有字节带 Range 续拉，服务器不支持 Range 回 200 则从头重下；只校验服务器侧长度（内容校验与改名由调用方统一收口） */
     private fun downloadFrom(url: String, token: String?, tmp: File, onProgress: (Int) -> Unit) {
         val conn = open(url, token)
         try {
@@ -394,10 +413,61 @@ object UpdateChecker {
             if (fullLength <= 0 && tmp.length() <= 0L) {
                 throw UpdateException("下载不完整（未收到数据），请重试")
             }
-            finalizeDownload(tmp, onProgress)
         } finally {
             conn.disconnect()
         }
+    }
+
+    /**
+     * 内容校验（SHA-256 优先，退长度比对）过了才把 `.part` 转正；不过则清掉全部缓存抛人话——
+     * 用户再点一次「立即更新」即全新重下自愈，坏字节永远不会被装进手机。
+     */
+    private fun verifyAndFinalize(
+        tmp: File,
+        dest: File,
+        expectedSize: Long,
+        sha256: String?,
+        onProgress: (Int) -> Unit,
+    ) {
+        if (!verifyApk(tmp, expectedSize, sha256)) {
+            purgeBroken(dest)
+            throw UpdateException(
+                "安装包校验失败：下载的内容和云端发布对不上（坏缓存已清掉）。" +
+                    "请再点一次「立即更新」重新下载；若反复出现，请换个网络环境再试",
+            )
+        }
+        finalizeDownload(tmp, onProgress)
+    }
+
+    /**
+     * 完整性校验：优先 SHA-256（云端构建写进发布说明，能抓住「长度恰好对但内容坏」的包）；
+     * 没有哈希的旧发布退回长度比对（expectedSize 未知时放行）。
+     */
+    private fun verifyApk(file: File, expectedSize: Long, sha256: String?): Boolean {
+        if (!file.exists()) return false
+        if (!sha256.isNullOrBlank()) return sha256File(file) == sha256
+        return expectedSize <= 0 || file.length() == expectedSize
+    }
+
+    /** 流式 SHA-256（49MB 安装包不能整读进内存；OcrModelDownloader 委托此实现） */
+    internal fun sha256File(file: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** 清掉坏包与全部断点（正式包、整包 `.part`、各段 `.part.cN`），下次从零重下 */
+    private fun purgeBroken(dest: File) {
+        dest.delete()
+        File(dest.parentFile, dest.name + ".part").delete()
+        dest.parentFile?.listFiles { f -> f.name.startsWith(dest.name + ".part.c") }?.forEach { it.delete() }
     }
 
     /** 校验过的完整 `.part` 改名为正式包 */
@@ -412,10 +482,15 @@ object UpdateChecker {
 
     // ---- 以下为纯解析函数，供单元测试直测 ----
 
-    data class UpdateMeta(val versionCode: Int, val versionName: String)
+    data class UpdateMeta(val versionCode: Int, val versionName: String, val sha256: String? = null)
     data class RemoteAsset(val url: String, val size: Long)
 
-    /** 从发布说明第一行注释里读 versionCode/versionName，读不到返回 null */
+    /**
+     * 从发布说明注释里读 versionCode/versionName（+可选 sha256），读不到返回 null。
+     * SHA-256 放在**第二个注释行**（`<!-- studyfriend-update-sha256=… -->`），不能塞进第一行：
+     * 存量手机上旧版 App 的解析正则要求 versionName 后紧跟 `-->`，同行加字段会让它们全部
+     * 报「远端版本信息无法识别」——等于把所有旧用户锁死在旧版本（2026-11-28 兼容性结论）。
+     */
     fun parseUpdateMeta(body: String): UpdateMeta? {
         val regex = Regex(
             """<!--\s*studyfriend-update\s+versionCode=(\d+)\s+versionName=([^\s>]+)\s*-->""",
@@ -424,7 +499,9 @@ object UpdateChecker {
         val m = regex.find(body) ?: return null
         val code = m.groupValues[1].toIntOrNull() ?: return null
         if (m.groupValues[2].isBlank()) return null
-        return UpdateMeta(code, m.groupValues[2])
+        val sha256 = Regex("""<!--\s*studyfriend-update-sha256=([0-9a-fA-F]{64})\s*-->""", RegexOption.IGNORE_CASE)
+            .find(body)?.groupValues?.get(1)?.lowercase()
+        return UpdateMeta(code, m.groupValues[2], sha256)
     }
 
     /** 去掉元数据注释行和首尾空行，剩下的就是给人看的更新说明 */

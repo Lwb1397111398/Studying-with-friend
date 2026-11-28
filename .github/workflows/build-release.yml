@@ -10,6 +10,13 @@ on:
 permissions:
   contents: write
 
+# 发布串行化：两次推送的 CI 并发跑会同时 --clobber 同一个资产，上传互相踩会把
+# Release 资产写坏——手机端下载后装上就是系统安装器报「软件包似乎无效」。
+# cancel-in-progress 必须 false（排队而不是取消）：取消正在上传中的任务同样留下坏资产。
+concurrency:
+  group: build-release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -52,11 +59,16 @@ jobs:
           APK=android/app/build/outputs/apk/release/app-release.apk
           test -f "$APK"
           cp "$APK" StudyingWithFriend-latest.apk
+          # 安装包指纹：App 下载完成后按此校验内容（只验字节数拦不住「长度对但内容坏」的包，
+          # 手机端装出来就是「软件包似乎无效」）；写入第二行注释，见 UpdateChecker.parseUpdateMeta
+          SUM=$(sha256sum StudyingWithFriend-latest.apk | cut -d' ' -f1)
 
           # 第一行 HTML 注释是机器可读元数据（App 解析 versionCode 判断有无新版本），
-          # GitHub 页面渲染时不可见
+          # GitHub 页面渲染时不可见；SHA-256 必须放第二个注释行——旧版 App 的解析正则
+          # 要求 versionName 后紧跟 -->，同行加字段会让存量手机全部「远端版本信息无法识别」
           {
             echo "<!-- studyfriend-update versionCode=$CODE versionName=$NAME -->"
+            echo "<!-- studyfriend-update-sha256=$SUM -->"
             echo "自动构建 · 提交 ${GITHUB_SHA::7}"
             echo
             echo "更新内容："
@@ -70,4 +82,13 @@ jobs:
             gh release create latest StudyingWithFriend-latest.apk \
               --title "学伴 App $NAME" --notes-file notes.md
           fi
-          echo "已发布：versionCode=$CODE versionName=$NAME"
+
+          # 发布自验：把刚发布的资产回读下来比对指纹，上传写坏宁可 CI 红也别发坏包出去
+          rm -rf verify_dl
+          gh release download latest --pattern 'StudyingWithFriend-latest.apk' --dir verify_dl
+          DOWN=$(sha256sum verify_dl/StudyingWithFriend-latest.apk | cut -d' ' -f1)
+          if [ "$DOWN" != "$SUM" ]; then
+            echo "::error::发布资产自验失败：云端下载的包与本地构建不一致（上传疑似损坏，禁止发版）"
+            exit 1
+          fi
+          echo "已发布：versionCode=$CODE versionName=$NAME sha256=$SUM（云端资产回读比对一致）"

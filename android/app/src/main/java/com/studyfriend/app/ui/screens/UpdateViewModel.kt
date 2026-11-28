@@ -148,7 +148,10 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
                 val ctx = getApplication<Application>()
                 val dest = File(ctx.cacheDir, "updates/update-${release.versionCode}.apk")
                 withContext(Dispatchers.IO) {
-                    UpdateChecker.downloadApk(release.apkUrl, null, dest, release.apkSize) { pct ->
+                    UpdateChecker.downloadApk(
+                        release.apkUrl, null, dest, release.apkSize,
+                        sha256 = release.sha256,
+                    ) { pct ->
                         progress = pct
                     }
                 }

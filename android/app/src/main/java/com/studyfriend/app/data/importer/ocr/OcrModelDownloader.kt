@@ -3,7 +3,6 @@ package com.studyfriend.app.data.importer.ocr
 import com.studyfriend.app.data.update.UpdateChecker
 import com.studyfriend.app.data.update.UpdateException
 import java.io.File
-import java.security.MessageDigest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -156,17 +155,6 @@ object OcrModelDownloader {
         }
     }
 
-    /** 流式 SHA-256（模型 rec 16MB，不整读内存） */
-    fun sha256File(file: File): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buf = ByteArray(64 * 1024)
-            while (true) {
-                val n = input.read(buf)
-                if (n < 0) break
-                md.update(buf, 0, n)
-            }
-        }
-        return md.digest().joinToString("") { "%02x".format(it) }
-    }
+    /** 流式 SHA-256（模型 rec 16MB，不整读内存；实现收口在 UpdateChecker，与更新链路同一份） */
+    fun sha256File(file: File): String = UpdateChecker.sha256File(file)
 }
