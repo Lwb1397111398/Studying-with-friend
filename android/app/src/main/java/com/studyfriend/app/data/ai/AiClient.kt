@@ -21,13 +21,18 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.addJsonObject
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
-import java.net.URL
 import java.net.ConnectException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 
 /** AI 调用失败，message 为可直接展示的中文；httpCode 非 2xx 时携带（M4 粗读用于区分可否重试） */
@@ -53,12 +58,24 @@ data class ChatRequest(
 
 /**
  * OpenAI 兼容 /chat/completions 流式客户端（计划 M3 §3）。
- * HttpURLConnection 零依赖；onDelta 在 IO 线程回调，Compose mutableStateOf 写入线程安全。
+ * OkHttp 单例共享连接池；onDelta 在 IO 线程回调，Compose mutableStateOf 写入线程安全。
  * 回调与返回值均已滤掉推理模型内联的 `<think>` 思考段（ThinkSuppressor，2026-11-21）。
  */
 object AiClient {
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * 共享 HTTP 客户端（2026-11-28 首字提速）：旧实现 HttpURLConnection 每次调用后
+     * disconnect()，连接从不复用——「一键分析」逐章连环调用时每章都重付 DNS+TCP+TLS
+     * 握手（首字平白多零点几秒到一秒）。OkHttp 单例默认连接池 5 空闲连接/5 分钟
+     * keep-alive，同端点连续调用复用已握手的连接，首字不再多付握手成本。
+     * readTimeout 各请求不同（chat 默认 90s / 视觉 180s / 模型列表 30s）→ 用
+     * [OkHttpClient.newBuilder] per-call 覆盖：newBuilder 共享同一连接池，不会分池。
+     */
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(AiBudgets.CONNECT_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+        .build()
 
     /**
      * 全局 RPM 限流（第九波实景轮）：所有 chat 请求（含 chatJson 各档与视觉转写，全部
@@ -86,23 +103,27 @@ object AiClient {
      */
     suspend fun listModels(baseUrl: String, apiKey: String): List<String> =
         withContext(Dispatchers.IO) {
-            val conn = try {
-                URL(normalizeModelsUrl(baseUrl)).openConnection() as HttpURLConnection
-            } catch (e: IOException) {
-                throw AiException("API 地址格式不正确，请检查")
-            }
+            val url = normalizeModelsUrl(baseUrl).toHttpUrlOrNull()
+                ?: throw AiException("API 地址格式不正确，请检查")
+            val call = http.newBuilder()
+                .readTimeout(AiBudgets.READ_TIMEOUT_MODEL_LIST_MS.toLong(), TimeUnit.MILLISECONDS)
+                .build()
+                .newCall(
+                    Request.Builder().url(url)
+                        .header("Authorization", "Bearer $apiKey")
+                        .header("Accept", "application/json")
+                        .get()
+                        .build(),
+                )
             try {
-                conn.requestMethod = "GET"
-                conn.connectTimeout = AiBudgets.CONNECT_TIMEOUT_MS
-                conn.readTimeout = AiBudgets.READ_TIMEOUT_MODEL_LIST_MS
-                conn.setRequestProperty("Authorization", "Bearer $apiKey")
-                conn.setRequestProperty("Accept", "application/json")
-                val code = conn.responseCode
-                if (code !in 200..299) {
-                    throw AiException(friendlyHttp(code, readErrorHead(conn)), httpCode = code)
+                call.execute().use { resp ->
+                    val code = resp.code
+                    if (code !in 200..299) {
+                        throw AiException(friendlyHttp(code, errorHead(resp)), httpCode = code)
+                    }
+                    val text = resp.body?.string() ?: ""
+                    parseModelIds(text).distinct().sorted()
                 }
-                val text = conn.inputStream.bufferedReader().use { it.readText() }
-                parseModelIds(text).distinct().sorted()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: AiException) {
@@ -111,8 +132,6 @@ object AiClient {
                 throw AiException(friendlyIo(e))
             } catch (e: Exception) {
                 throw AiException("拉取模型列表失败：${e.message ?: "未知错误"}")
-            } finally {
-                conn.disconnect()
             }
         }
 
@@ -151,74 +170,75 @@ object AiClient {
         }
         AiLogBus.streaming(logId)
         return withContext(Dispatchers.IO) {
-            val conn = try {
-                URL(normalizeChatUrl(req.baseUrl)).openConnection() as HttpURLConnection
-            } catch (e: IOException) {
-                // MalformedURLException 等：用户存了非法地址时的专属文案
+            val url = normalizeChatUrl(req.baseUrl).toHttpUrlOrNull()
+            if (url == null) {
+                // 非法地址（旧版 MalformedURLException 路径）：用户存了坏配置时的专属文案
                 AiLogBus.finish(logId, error = "API 地址格式不正确，请检查设置")
                 throw AiException("API 地址格式不正确，请检查设置")
             }
             val job = coroutineContext[Job]
-            // readLine 阻塞在 IO 线程，协程 cancel 打不断它。挂一个哨兵子协程：
-            // 取消传播到它时 finally 里 disconnect，让阻塞 read 立即抛 IOException。
+            // 阻塞中的 SSE 读要靠 call.cancel() 打断（okhttp cancel 线程安全、立即生效，
+            // 会中断阻塞 read 让它抛 IOException）。挂一个哨兵子协程：取消传播到它时
+            // finally 里 cancel。
             // （invokeOnCompletion 默认 onCancelling=false 等完全结束才触发，为时已晚；
             //   onCancelling=true 版本是 internal API，故用哨兵这一公开惯用法）
+            val call = http.newBuilder()
+                .readTimeout(req.readTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
+                .build()
+                .newCall(
+                    Request.Builder().url(url)
+                        .header("Authorization", "Bearer ${req.apiKey}")
+                        .header("Accept", "text/event-stream")
+                        .post(bodyOf(req).toRequestBody("application/json".toMediaType()))
+                        .build(),
+                )
             val watcher = launch {
                 try {
                     awaitCancellation()
                 } finally {
-                    conn.disconnect()
+                    call.cancel()
                 }
             }
             try {
-                conn.requestMethod = "POST"
-                conn.connectTimeout = AiBudgets.CONNECT_TIMEOUT_MS
-                conn.readTimeout = req.readTimeoutMs
-                conn.doOutput = true
-                conn.setRequestProperty("Authorization", "Bearer ${req.apiKey}")
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.setRequestProperty("Accept", "text/event-stream")
-                conn.outputStream.use { it.write(bodyOf(req).toByteArray(Charsets.UTF_8)) }
+                call.execute().use { r ->
+                    // 取消可能发生在连接/发请求阶段：响应头一到就检查，别等读超时
+                    coroutineContext.ensureActive()
+                    if (r.code !in 200..299) {
+                        val msg = friendlyHttp(r.code, errorHead(r))
+                        AiLogBus.finish(logId, error = msg)
+                        throw AiException(msg, httpCode = r.code)
+                    }
 
-                val code = conn.responseCode
-                // 取消可能发生在 connect/写体阶段（那时哨兵尚未断开已连接 socket）：
-                // responseCode 返回后立即检查，别等 90s 读超时
-                coroutineContext.ensureActive()
-                if (code !in 200..299) {
-                    val msg = friendlyHttp(code, readErrorHead(conn))
-                    AiLogBus.finish(logId, error = msg)
-                    throw AiException(msg, httpCode = code)
-                }
-
-                // think 标签抑制（实景体验轮 2026-11-21）：推理模型（MiniMax-M2.5 实录）把
-                // 思考过程内联在正文增量里，这里收口后所有消费者拿到的都是干净正文
-                val think = ThinkSuppressor()
-                val full = StringBuilder()
-                conn.inputStream.bufferedReader().useLines { lines ->
-                    for (line in lines) {
-                        coroutineContext.ensureActive()
-                        if (!line.startsWith("data:")) continue
-                        val data = line.removePrefix("data:").trim()
-                        if (data == "[DONE]") break
-                        val delta = extractDelta(data)
-                        if (delta.isNotEmpty()) {
-                            val visible = think.feed(delta)
-                            if (visible.isNotEmpty()) {
-                                full.append(visible)
-                                onDelta(visible)
-                                AiLogBus.delta(logId, visible)
+                    // think 标签抑制（实景体验轮 2026-11-21）：推理模型（MiniMax-M2.5 实录）把
+                    // 思考过程内联在正文增量里，这里收口后所有消费者拿到的都是干净正文
+                    val think = ThinkSuppressor()
+                    val full = StringBuilder()
+                    r.body?.charStream()?.buffered()?.useLines { lines ->
+                        for (line in lines) {
+                            coroutineContext.ensureActive()
+                            if (!line.startsWith("data:")) continue
+                            val data = line.removePrefix("data:").trim()
+                            if (data == "[DONE]") break
+                            val delta = extractDelta(data)
+                            if (delta.isNotEmpty()) {
+                                val visible = think.feed(delta)
+                                if (visible.isNotEmpty()) {
+                                    full.append(visible)
+                                    onDelta(visible)
+                                    AiLogBus.delta(logId, visible)
+                                }
                             }
                         }
                     }
+                    val tail = think.finish()
+                    if (tail.isNotEmpty()) {
+                        full.append(tail)
+                        onDelta(tail)
+                        AiLogBus.delta(logId, tail)
+                    }
+                    AiLogBus.finish(logId)
+                    full.toString()
                 }
-                val tail = think.finish()
-                if (tail.isNotEmpty()) {
-                    full.append(tail)
-                    onDelta(tail)
-                    AiLogBus.delta(logId, tail)
-                }
-                AiLogBus.finish(logId)
-                full.toString()
             } catch (e: CancellationException) {
                 AiLogBus.cancel(logId)
                 throw e
@@ -226,7 +246,7 @@ object AiClient {
                 AiLogBus.finish(logId, error = e.message)
                 throw e
             } catch (e: IOException) {
-                // disconnect 触发的"取消型" IOException 还原为取消，不冒充网络错误
+                // call.cancel() 触发的"取消型" IOException 还原为取消，不冒充网络错误
                 if (job?.isCancelled == true) {
                     AiLogBus.cancel(logId)
                     throw CancellationException("cancelled")
@@ -244,7 +264,6 @@ object AiClient {
                 throw AiException(msg)
             } finally {
                 watcher.cancel()
-                conn.disconnect()
             }
         }
     }
@@ -421,22 +440,10 @@ object AiClient {
         return if (detail.isBlank()) hint else "$hint（详情：$detail）"
     }
 
-    /** 只读错误响应前 300 字节（低内存友好），errorStream 缺失返回空串 */
-    private fun readErrorHead(conn: HttpURLConnection): String {
-        val stream = conn.errorStream ?: return ""
-        return try {
-            val buf = ByteArray(300)
-            var n = 0
-            while (n < buf.size) {
-                val r = stream.read(buf, n, buf.size - n)
-                if (r < 0) break
-                n += r
-            }
-            String(buf, 0, n, Charsets.UTF_8)
-        } catch (e: IOException) {
-            ""
-        } finally {
-            runCatching { stream.close() }
-        }
+    /** 只读错误响应前 300 字节（低内存友好），body 缺失返回空串 */
+    private fun errorHead(resp: Response): String = try {
+        resp.peekBody(300L).string()
+    } catch (e: IOException) {
+        ""
     }
 }
