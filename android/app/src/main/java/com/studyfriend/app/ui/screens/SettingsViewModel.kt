@@ -307,9 +307,14 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 朗读引擎：即点即存（手机自带 / 离线模型），下次朗读生效 */
+    /** 朗读引擎：即点即存（Edge 在线 / 手机自带 / 离线模型），下次朗读生效 */
     fun chooseTtsEngine(mode: String) {
-        if (mode != SettingsRepository.TTS_ENGINE_SYSTEM && mode != SettingsRepository.TTS_ENGINE_LOCAL) return
+        // 2026-11-28 修：白名单漏了 edge——点「Edge 在线」chip 被卫语句弹掉（装机实录
+        // 「Edge 无法点击」根因），三选补全
+        if (mode != SettingsRepository.TTS_ENGINE_SYSTEM &&
+            mode != SettingsRepository.TTS_ENGINE_LOCAL &&
+            mode != SettingsRepository.TTS_ENGINE_EDGE
+        ) return
         ttsEngine = mode
         viewModelScope.launch {
             try {

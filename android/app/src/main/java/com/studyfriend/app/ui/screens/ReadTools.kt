@@ -141,10 +141,12 @@ internal fun ChapterToolsRow(
                 .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // 粗读 chip：未开始→粗读；断点→继续 x/y；已标完→重读（force 确认）；进行中→灰显进度
+            // 粗读 chip：未开始→粗读；断点→继续 x/y；已标完→重读（force 确认）；进行中→灰显进度；
+            // 规划阶段（total 还是 0，AI 正在通读本章拆讲解单元）显示「规划中」不显示 0/0（装机实录「看不到进度」）
+            val roughRunning = runState as? RoughRunState.Running
             val roughLabel = when {
                 pureToc || paragraphCount == 0 -> "目录章"
-                runningThis -> "粗读 ${(runState as RoughRunState.Running).done}/${runState.total}"
+                runningThis -> if ((roughRunning?.total ?: 0) == 0) "粗读规划中" else "粗读 ${roughRunning!!.done}/${roughRunning.total}"
                 queuedThis -> "粗读排队中"
                 allMarked -> "重读"
                 partiallyMarked -> "继续 $markedCount/$paragraphCount"
@@ -157,10 +159,11 @@ internal fun ChapterToolsRow(
                 colors = chipColors,
                 border = chipBorder,
             )
-            // 讲解 chip：无可讲解单元（纯目录章等）不显示
+            // 讲解 chip：无可讲解单元（纯目录章等）不显示；规划态同粗读（装机实录「看不到进度」）
             if (noteUnitCount > 0) {
+                val noteRunning = noteState as? NoteRunState.Running
                 val noteLabel = when {
-                    noteRunningThis -> "讲解 ${(noteState as NoteRunState.Running).done}/${noteState.total}"
+                    noteRunningThis -> if ((noteRunning?.total ?: 0) == 0) "讲解规划中" else "讲解 ${noteRunning!!.done}/${noteRunning.total}"
                     noteQueuedThis -> "讲解排队中"
                     noteValidCount == noteUnitCount -> "讲解 ✓"
                     noteValidCount > 0 -> "讲解 $noteValidCount/$noteUnitCount"
@@ -212,11 +215,17 @@ internal fun ChapterToolsRow(
         when {
             runningThis -> {
                 val r = runState as RoughRunState.Running
-                TaskProgressRow(
-                    label = "搭子正在粗读 ${r.done}/${r.total}",
-                    progress = if (r.total > 0) r.done.toFloat() / r.total else 0f,
-                    onStop = onStop,
-                )
+                if (r.total == 0) {
+                    // 规划阶段（AI 正在通读本章拆讲解单元，还没有块数）：不定进度条+明说阶段
+                    // （装机实录：原来显示「粗读 0/0」死条不动，老板看不到进度）
+                    TaskProgressRow(label = "搭子正在通读本章，规划讲解单元…", progress = -1f, onStop = onStop)
+                } else {
+                    TaskProgressRow(
+                        label = "搭子正在粗读 ${r.done}/${r.total}",
+                        progress = r.done.toFloat() / r.total,
+                        onStop = onStop,
+                    )
+                }
             }
 
             // 排队等待中（体验增量轮）：前一个任务释放全局锁后自动开跑，可取消
@@ -230,11 +239,16 @@ internal fun ChapterToolsRow(
 
             noteRunningThis -> {
                 val n = noteState as NoteRunState.Running
-                TaskProgressRow(
-                    label = "搭子正在讲解 ${n.done}/${n.total}",
-                    progress = if (n.total > 0) n.done.toFloat() / n.total else 0f,
-                    onStop = onNoteStop,
-                )
+                if (n.total == 0) {
+                    // 规划阶段：讲解单元还没拆出来，同粗读显示不定进度+阶段文案
+                    TaskProgressRow(label = "搭子正在准备讲解，先规划讲解单元…", progress = -1f, onStop = onNoteStop)
+                } else {
+                    TaskProgressRow(
+                        label = "搭子正在讲解 ${n.done}/${n.total}",
+                        progress = n.done.toFloat() / n.total,
+                        onStop = onNoteStop,
+                    )
+                }
             }
 
             interrupted -> {
@@ -382,7 +396,7 @@ private fun ToolStatusRow(content: @Composable () -> Unit) {
     ) { content() }
 }
 
-/** 进行中状态条：文案 + 细进度条 + 停止 */
+/** 进行中状态条：文案 + 细进度条 + 停止。progress<0 = 规划阶段不定进度条（来回扫） */
 @Composable
 private fun TaskProgressRow(label: String, progress: Float, onStop: () -> Unit) {
     Row(
@@ -393,10 +407,14 @@ private fun TaskProgressRow(label: String, progress: Float, onStop: () -> Unit) 
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(label, style = MaterialTheme.typography.bodyMedium)
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.weight(1f),
-        )
+        if (progress < 0f) {
+            LinearProgressIndicator(modifier = Modifier.weight(1f))
+        } else {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.weight(1f),
+            )
+        }
         TextButton(onClick = onStop) { Text("停止") }
     }
 }

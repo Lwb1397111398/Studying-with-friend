@@ -1,5 +1,7 @@
 package com.studyfriend.app.data.tts
 
+import com.studyfriend.app.data.DiagLog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -98,6 +100,7 @@ class TtsPlayer(
             err = engine.prepare()
         }
         if (err != null) {
+            DiagLog.w("Tts", "prepare 失败 mode=$mode：$err（诊断埋点：定位真机闪退/报错用）")
             _state.value = TtsState.Error(err)
             job = null
             return
@@ -142,6 +145,7 @@ class TtsPlayer(
             },
             onError = { msg ->
                 // 用户 stop 已回 Idle：晚到的停止类错误不再覆盖成 Error
+                DiagLog.w("Tts", "引擎报错 mode=$mode：$msg")
                 _state.update {
                     if (it is TtsState.Speaking || it is TtsState.Preparing) TtsState.Error(msg) else it
                 }
@@ -157,7 +161,33 @@ class TtsPlayer(
         }
         pausedText = null
         lastToggleText = text
-        job = scope.launch { startSpeaking(text, fromSentence = 0, totalFull = 0) }
+        DiagLog.i("Tts", "toggle 开始朗读 mode=$mode")
+        launchSpeak(text, fromSentence = 0, totalFull = 0)
+    }
+
+    /**
+     * 播放入口的防崩包装（2026-11-28 真机「点朗读闪退」兜底网）：startSpeaking 与引擎
+     * 回调里任何未捕获异常都不再带崩 App（rememberCoroutineScope 的协程异常会直接走
+     * 默认崩溃处理器），统一转人话 Error 态 + 写诊断日志（设置页可导出抓栈定位根因）。
+     */
+    private fun launchSpeak(text: String, fromSentence: Int, totalFull: Int) {
+        job = scope.launch {
+            try {
+                startSpeaking(text, fromSentence, totalFull)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                DiagLog.e("Tts", "朗读未捕获异常 mode=$mode", t)
+                _state.update {
+                    if (it is TtsState.Speaking || it is TtsState.Preparing) {
+                        TtsState.Error("朗读出错：${t.message ?: t.javaClass.simpleName}，可换朗读引擎重试")
+                    } else {
+                        it
+                    }
+                }
+                job = null
+            }
+        }
     }
 
     /**
@@ -171,7 +201,9 @@ class TtsPlayer(
         pausedText = lastToggleText
         job0.cancel()
         job = null
-        (activeEngine ?: systemEngine).stop()
+        // 个别 ROM 引擎 stop 抛异常（binder 死了）——兜住别闪退（2026-11-28 加固）
+        runCatching { (activeEngine ?: systemEngine).stop() }
+            .onFailure { DiagLog.e("Tts", "pause 时引擎 stop 异常", it) }
         val total = (s as? TtsState.Speaking)?.total ?: splitSentences(lastToggleText.orEmpty()).size
         val next = if (s is TtsState.Speaking) s.sentenceIdx + 1 else 0
         _state.value = TtsState.Paused(sentenceIdx = next, total = total)
@@ -182,13 +214,16 @@ class TtsPlayer(
         if (job != null) return
         val text = pausedText ?: return
         val s = _state.value as? TtsState.Paused ?: return
-        job = scope.launch { startSpeaking(text, fromSentence = s.sentenceIdx, totalFull = s.total) }
+        DiagLog.i("Tts", "resume 句级续播 mode=$mode from=$s")
+        launchSpeak(text, fromSentence = s.sentenceIdx, totalFull = s.total)
     }
 
     fun stop() {
         job?.cancel()
         job = null
-        (activeEngine ?: systemEngine).stop()
+        // 个别 ROM 引擎 stop/shutdown 抛异常——兜住别闪退（2026-11-28 加固，主线程点击路径）
+        runCatching { (activeEngine ?: systemEngine).stop() }
+            .onFailure { DiagLog.e("Tts", "stop 时引擎 stop 异常", it) }
         _state.value = TtsState.Idle
         _notice.value = null
         pausedText = null
@@ -196,8 +231,10 @@ class TtsPlayer(
 
     fun shutdown() {
         stop()
-        systemEngine.shutdown()
-        localEngine?.shutdown()
+        runCatching { systemEngine.shutdown() }.onFailure { DiagLog.e("Tts", "systemEngine shutdown 异常", it) }
+        runCatching { localEngine?.shutdown() }.onFailure { DiagLog.e("Tts", "localEngine shutdown 异常", it) }
+        // 2026-11-28 补：Edge 引擎此前漏在 shutdown 清单里（无常驻资源影响小，补齐防泄漏）
+        runCatching { edgeEngine?.shutdown() }.onFailure { DiagLog.e("Tts", "edgeEngine shutdown 异常", it) }
     }
 }
 

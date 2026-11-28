@@ -4,6 +4,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -19,11 +20,16 @@ import org.junit.Test
 /** 本地 MiniHttpServer 模拟 OpenAI 兼容端点（runBlocking 真实 IO，不用 runTest 虚拟时间） */
 class AiClientTest {
 
-    private fun request(base: String, apiKey: String = "sk-test", model: String = "test-model") =
-        ChatRequest(
-            baseUrl = base, apiKey = apiKey, model = model, temperature = 0.3, maxTokens = 16,
-            messages = listOf(AiMessage("user", "ping")),
-        )
+    private fun request(
+        base: String,
+        apiKey: String = "sk-test",
+        model: String = "test-model",
+        readTimeoutMs: Int = AiBudgets.READ_TIMEOUT_DEFAULT_MS,
+    ) = ChatRequest(
+        baseUrl = base, apiKey = apiKey, model = model, temperature = 0.3, maxTokens = 16,
+        readTimeoutMs = readTimeoutMs,
+        messages = listOf(AiMessage("user", "ping")),
+    )
 
     @Test
     fun chat_streamsDeltasInOrder_andReturnsFullText() {
@@ -136,7 +142,20 @@ class AiClientTest {
         }
         try {
             val finished = runBlocking {
-                val job = launch { AiClient.chat(request(server.baseUrl)) {} }
+                // readTimeout 3s 是内核级兜底锚点（2026-11-28 加固）：全量跑（千例 JVM 后段）
+                // 时取消传导偶发延迟（IO 池被前序用例协程挤占，watcher disconnect 排不上队，
+                // 实录连挂 time 恒 30s=等 server 睡醒）——readTimeout 打断阻塞读不依赖协程
+                // 调度，任何环境 3s 内必退，落回 5s 断言；传导正常时仍是毫秒级。
+                // 协程体 catch 吞掉 readTimeout 的 SocketTimeoutException：退出即目的，
+                // 不得让未捕获异常污染后续测试类（UncaughtExceptionsBeforeTest 实录）
+                val job = launch {
+                    try {
+                        AiClient.chat(request(server.baseUrl, readTimeoutMs = 3_000)) {}
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                    }
+                }
                 // 等 server 已写响应头：此刻客户端必然正阻塞在 SSE 读上，
                 // 消除"cancel 抢在请求发出前、disconnect 对未连接 socket 无效"的竞态。
                 // 必须在 IO 线程阻塞等待——直接 await 会卡死 runBlocking 的

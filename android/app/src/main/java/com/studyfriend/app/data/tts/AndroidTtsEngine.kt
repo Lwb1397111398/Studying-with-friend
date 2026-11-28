@@ -109,13 +109,15 @@ class AndroidTtsEngine(private val context: Context) : TtsEngine {
         }
     }
 
+    // stop/shutdown 主线程直调（点朗读/退页路径），个别 ROM binder 死了会抛 DeadObjectException
+    // ——2026-11-28 加固 runCatching 兜住别闪退（真机「点朗读闪退」兜底网）
     override fun stop() {
-        tts?.stop()
+        runCatching { tts?.stop() }
     }
 
     override fun shutdown() {
-        tts?.stop()
-        tts?.shutdown()
+        runCatching { tts?.stop() }
+        runCatching { tts?.shutdown() }
         tts = null
     }
 

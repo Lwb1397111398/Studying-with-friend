@@ -37,6 +37,10 @@ class TtsPlayerTest {
     private class FakeEngine : TtsEngine {
         /** null=可用；非 null=不可用原因（新签名 String?） */
         var prepareResult: String? = null
+        /** 非 null=prepare 直接抛异常（2026-11-28 防崩加固测试用） */
+        var prepareThrows: Throwable? = null
+        /** 非 null=stop 直接抛异常（少数 ROM binder 死形态） */
+        var stopThrows: Throwable? = null
         var prepareCalled = false
         var stopCalled = false
         var shutdownCalled = false
@@ -47,6 +51,7 @@ class TtsPlayerTest {
 
         override suspend fun prepare(): String? {
             prepareCalled = true
+            prepareThrows?.let { throw it }
             return prepareResult
         }
 
@@ -59,6 +64,7 @@ class TtsPlayerTest {
 
         override fun stop() {
             stopCalled = true
+            stopThrows?.let { throw it }
         }
 
         override fun shutdown() {
@@ -345,5 +351,32 @@ class TtsPlayerTest {
         awaitState(player) { it is TtsState.Speaking }
 
         assertTrue(system.prepareCalled)
+    }
+
+    // ---------- 12. 防崩兜底（2026-11-28 真机「点朗读闪退」加固）：引擎异常转 Error 态不带崩 App ----------
+
+    @Test
+    fun enginePrepareThrows_turnsIntoErrorNotCrash(): Unit = runBlocking {
+        val engine = FakeEngine()
+        engine.prepareThrows = RuntimeException("ROM binder 崩了")
+        val player = TtsPlayer(engine, scope)
+
+        player.toggle("内容。")
+        val s = awaitState(player) { it is TtsState.Error } as TtsState.Error
+
+        assertTrue("防崩文案应人话且带原因，实际：${s.message}", s.message.contains("朗读出错"))
+    }
+
+    @Test
+    fun engineStopThrows_stopStillReturnsIdle(): Unit = runBlocking {
+        val engine = FakeEngine()
+        val player = TtsPlayer(engine, scope)
+        player.toggle("内容。")
+        awaitState(player) { it is TtsState.Speaking }
+        engine.stopThrows = RuntimeException("DeadObjectException 形态")
+
+        player.stop()
+
+        assertEquals("引擎 stop 抛异常时仍回 Idle 不闪退", TtsState.Idle, player.state.value)
     }
 }

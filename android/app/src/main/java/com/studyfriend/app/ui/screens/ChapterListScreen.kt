@@ -624,11 +624,20 @@ private fun ChapterRow(
 
         when {
             runningThis && runState is RoughRunState.Running -> {
-                Text(
-                    "${runState.done}/${runState.total}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                // 规划阶段（total 还是 0）显示「规划中」，不显示 0/0 死数（装机实录「看不到进度」）
+                if (runState.total == 0) {
+                    Text(
+                        "规划中",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    Text(
+                        "${runState.done}/${runState.total}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 MiniPill("停止", onStop, neutral = true)
             }
             interrupted || resumeByData -> MiniPill("继续", onStart, enabled = !runningOther)
