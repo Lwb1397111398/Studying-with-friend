@@ -327,3 +327,22 @@ internal fun sentenceToParaIndex(paraSentenceCounts: List<Int>, sentenceIdx: Int
     }
     return paraSentenceCounts.size - 1
 }
+
+/** 听书切片三件（2026-11-28 起点朗读轮）：拼接文本 + 每段句数 + 段 id 表，三者下标口径一致 */
+data class TtsSlice(val text: String, val paraCounts: List<Int>, val paraIds: List<Long>)
+
+/**
+ * 从第 [startIdx] 段起切片听书素材（起点朗读轮）：文本/段 id 表各切去 startIdx 之前
+ * 的部分，拼接文本（\n 连接，与 toggleTts 全文口径同款）并按 splitSentences 现算每段句数。
+ * 朗读控制（toggle / 暂停续播 / 句→段映射 / 悬浮条句进度）对切片后的三件全部自动适配，
+ * TtsPlayer 无需感知「起点」概念——句号从 0 重计，映射按切片表走。
+ * [startIdx] 越界收敛到 0..size（=size 时切出空素材，上层报「没有可朗读的内容」）。
+ */
+internal fun ttsSliceFrom(texts: List<String>, paraIds: List<Long>, startIdx: Int): TtsSlice {
+    val from = startIdx.coerceIn(0, texts.size)
+    return TtsSlice(
+        text = texts.drop(from).joinToString("\n") { it },
+        paraCounts = texts.drop(from).map { splitSentences(it).size },
+        paraIds = paraIds.drop(from),
+    )
+}

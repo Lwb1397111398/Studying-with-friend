@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -61,7 +62,9 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -99,7 +102,7 @@ import com.studyfriend.app.data.tts.TtsEngineMode
 import com.studyfriend.app.data.tts.TtsPlayer
 import com.studyfriend.app.data.tts.TtsState
 import com.studyfriend.app.data.tts.sentenceToParaIndex
-import com.studyfriend.app.data.tts.splitSentences
+import com.studyfriend.app.data.tts.ttsSliceFrom
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 
@@ -474,6 +477,17 @@ fun ReadScreen(
             val ttsParagraphs = remember(bodyParagraphs) { bodyParagraphs.filter { it.role == DbValues.ROLE_BODY } }
             var ttsParaCounts by remember { mutableStateOf(listOf<Int>()) }
             var ttsParaIds by remember { mutableStateOf(listOf<Long>()) }
+            // 起点朗读轮：从第 startIdx 个 BODY 段开始读（切片三件口径一致，TtsPlayer 无感起点）。
+            // 正在播/暂停中都直接换起点重播（stop 清暂停现场）；空章不动
+            fun startTtsFrom(startIdx: Int) {
+                if (ttsParagraphs.isEmpty()) return
+                ttsPlayer.stop()
+                ttsParaId = null
+                val slice = ttsSliceFrom(ttsParagraphs.map { it.text }, ttsParagraphs.map { it.id }, startIdx)
+                ttsParaCounts = slice.paraCounts
+                ttsParaIds = slice.paraIds
+                ttsPlayer.toggle(slice.text)
+            }
             fun toggleTts() {
                 when (ttsState) {
                     is TtsState.Speaking, is TtsState.Preparing -> {
@@ -481,13 +495,16 @@ fun ReadScreen(
                         ttsParaId = null
                     }
                     is TtsState.Paused -> ttsPlayer.resume()
-                    else -> {
-                        if (ttsParagraphs.isEmpty()) return
-                        ttsParaCounts = ttsParagraphs.map { splitSentences(it.text).size }
-                        ttsParaIds = ttsParagraphs.map { it.id }
-                        ttsPlayer.toggle(ttsParagraphs.joinToString("\n") { it.text })
-                    }
+                    else -> startTtsFrom(0)
                 }
+            }
+            // 起点朗读轮：悬浮条「上一段/下一段」——以当前朗读段为锚在全局段表 ±1 换起点重播；
+            // 没有当前段（Preparing 首帧/异常）点击不动作。最后一段的「下一段」停在本段重读
+            fun jumpTts(delta: Int) {
+                val cur = ttsParaId ?: return
+                val global = ttsParagraphs.indexOfFirst { it.id == cur }
+                if (global < 0) return
+                startTtsFrom((global + delta).coerceIn(0, ttsParagraphs.size - 1))
             }
             // 暂停/恢复（第九波实景轮，anx-reader 思路）：悬浮条与点当前朗读段共用入口
             fun pauseOrResumeTts() {
@@ -959,9 +976,16 @@ fun ReadScreen(
                         shadowElevation = 6.dp,
                     ) {
                         Row(
-                            Modifier.padding(start = 8.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
+                            Modifier.padding(start = 4.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            // 起点朗读轮：上一段/下一段（倒回去重听/跳过当前段）。
+                            // Preparing 首帧没有当前段，点击内部不动作；纯图标省宽度。
+                            // SkipPrevious/SkipNext 不在 material-icons-core 集（extended 要 +9MB）：
+                            // 自绘「竖线+三角」同款形态（与暂停/停止自绘同先例）
+                            IconButton(onClick = { jumpTts(-1) }, modifier = Modifier.size(36.dp)) {
+                                TtsPrevParaGlyph(tint = MaterialTheme.colorScheme.primary)
+                            }
                             IconButton(onClick = { pauseOrResumeTts() }, modifier = Modifier.size(36.dp)) {
                                 if (ttsUi is TtsState.Paused) {
                                     Icon(
@@ -972,14 +996,18 @@ fun ReadScreen(
                                     )
                                 } else {
                                     // Pause 不在 material-icons-core 集（extended 要 +9MB）：
-                                    // 暂停用自绘双竖条，停止用自绘方块
+                                    // 暂停用自绘双竖条，停止用自绘方块。
+                                    // 文案短词防换行（起点朗读轮加两跳段按钮后悬浮条变挤，实测换行）
                                     TtsPauseGlyph(tint = MaterialTheme.colorScheme.primary)
-                                    Text("暂停朗读", style = MaterialTheme.typography.labelSmall)
+                                    Text("暂停", style = MaterialTheme.typography.labelSmall)
                                 }
+                            }
+                            IconButton(onClick = { jumpTts(1) }, modifier = Modifier.size(36.dp)) {
+                                TtsNextParaGlyph(tint = MaterialTheme.colorScheme.primary)
                             }
                             IconButton(onClick = { ttsPlayer.stop(); ttsParaId = null }, modifier = Modifier.size(36.dp)) {
                                 TtsStopGlyph(tint = MaterialTheme.colorScheme.primary)
-                                Text("停止朗读", style = MaterialTheme.typography.labelSmall)
+                                Text("停止", style = MaterialTheme.typography.labelSmall)
                             }
                             Text(
                                 when (val s = ttsUi) {
@@ -1060,6 +1088,58 @@ fun ReadScreen(
                     }
                 }
             }
+            // 划词浮条（起点朗读轮从 Box 外挪进 Column：onSpeakFrom 要读 ttsParagraphs/startTtsFrom，
+            // 二者是 Column 内局部声明；Popup 是 window 级弹层，挂载位置不影响渲染）
+            // 选中段仍存在且区间合法才显示（段落 Flow 刷新后失效自动消失）；
+            // 拖把手期间隐藏（拖完随新锚点重现）
+            selection?.let { sel ->
+                val selPara = paragraphs.firstOrNull { it.id == sel.paraId }
+                if (selPara != null && selPara.text.isNotEmpty() &&
+                    sel.range.last < selPara.text.length && !selectionDragging
+                ) {
+                    SelectionFloatBar(
+                        anchor = sel.anchor,
+                        boxOrigin = rootOrigin,
+                        onMeaning = {
+                            val target = buildQaTarget(
+                                chapter = chapter,
+                                paragraphs = paragraphs,
+                                para = selPara,
+                                selectionText = selPara.text.substring(sel.range.first, sel.range.last + 1),
+                                question = QuickQa.ASK_MEANING,
+                            )
+                            qaTarget = target
+                            selection = null
+                        },
+                        onExpandSentence = {
+                            val expanded = SelectionBounds.expandToSentence(selPara.text, sel.range.first, sel.range.last)
+                            selection = sel.copy(range = expanded)
+                        },
+                        onExpandPara = {
+                            selection = sel.copy(range = 0 until selPara.text.length)
+                        },
+                        onMemo = {
+                            // 记一笔：选中态快照进草稿（Dialog 里取原文），浮条先关
+                            memoDraft = sel
+                            selection = null
+                        },
+                        onSpeakFrom = {
+                            // 起点朗读轮：从选中文字所在 BODY 段开始听书；选中目录/脚注等
+                            // 非正文段时朗读列表里没有它，不动作（浮条留着不误关）
+                            val idx = ttsParagraphs.indexOfFirst { it.id == sel.paraId }
+                            if (idx >= 0) {
+                                selection = null
+                                startTtsFrom(idx)
+                            }
+                        },
+                        onCopy = {
+                            clipboard.setText(AnnotatedString(selPara.text.substring(sel.range.first, sel.range.last + 1)))
+                            selection = null
+                        },
+                        onDismiss = { selection = null },
+                    )
+                }
+            }
             AnimatedVisibility(visible = chromeVisible) {
                 LinearProgressIndicator(
                     progress = { readFrac },
@@ -1073,48 +1153,6 @@ fun ReadScreen(
             }
         }
     }
-
-        // 划词浮条：选中段仍存在且区间合法才显示（段落 Flow 刷新后失效自动消失）；
-        // 拖把手期间隐藏（拖完随新锚点重现）
-        selection?.let { sel ->
-            val selPara = paragraphs.firstOrNull { it.id == sel.paraId }
-            if (selPara != null && selPara.text.isNotEmpty() &&
-                sel.range.last < selPara.text.length && !selectionDragging
-            ) {
-                SelectionFloatBar(
-                    anchor = sel.anchor,
-                    boxOrigin = rootOrigin,
-                    onMeaning = {
-                        val target = buildQaTarget(
-                            chapter = chapter,
-                            paragraphs = paragraphs,
-                            para = selPara,
-                            selectionText = selPara.text.substring(sel.range.first, sel.range.last + 1),
-                            question = QuickQa.ASK_MEANING,
-                        )
-                        qaTarget = target
-                        selection = null
-                    },
-                    onExpandSentence = {
-                        val expanded = SelectionBounds.expandToSentence(selPara.text, sel.range.first, sel.range.last)
-                        selection = sel.copy(range = expanded)
-                    },
-                    onExpandPara = {
-                        selection = sel.copy(range = 0 until selPara.text.length)
-                    },
-                    onMemo = {
-                        // 记一笔：选中态快照进草稿（Dialog 里取原文），浮条先关
-                        memoDraft = sel
-                        selection = null
-                    },
-                    onCopy = {
-                        clipboard.setText(AnnotatedString(selPara.text.substring(sel.range.first, sel.range.last + 1)))
-                        selection = null
-                    },
-                    onDismiss = { selection = null },
-                )
-            }
-        }
     }
     }
 
@@ -1277,4 +1315,42 @@ internal fun TtsStopGlyph(tint: Color) {
             .size(12.dp)
             .background(tint, RoundedCornerShape(2.dp)),
     )
+}
+
+/** 上一段图形（起点朗读轮）：竖线+尖朝左三角（skip_previous 形态，material-icons-core 没有该图标） */
+@Composable
+internal fun TtsPrevParaGlyph(tint: Color) {
+    Canvas(Modifier.size(16.dp)) {
+        drawLine(
+            tint,
+            Offset(size.width * 0.24f, size.height * 0.15f),
+            Offset(size.width * 0.24f, size.height * 0.85f),
+            strokeWidth = size.width * 0.14f,
+        )
+        drawPath(prevParaTriangle(size, pointingLeft = true), tint)
+    }
+}
+
+/** 下一段图形（起点朗读轮）：尖朝右三角+竖线（skip_next 形态，上一段的镜像） */
+@Composable
+internal fun TtsNextParaGlyph(tint: Color) {
+    Canvas(Modifier.size(16.dp)) {
+        drawPath(prevParaTriangle(size, pointingLeft = false), tint)
+        drawLine(
+            tint,
+            Offset(size.width * 0.76f, size.height * 0.15f),
+            Offset(size.width * 0.76f, size.height * 0.85f),
+            strokeWidth = size.width * 0.14f,
+        )
+    }
+}
+
+/** 跳段三角路径（本地共用）：pointingLeft=true 尖朝左（上一段），false 尖朝右（下一段） */
+private fun prevParaTriangle(size: Size, pointingLeft: Boolean): Path = Path().apply {
+    val tipX = if (pointingLeft) size.width * 0.30f else size.width * 0.70f
+    val backX = if (pointingLeft) size.width * 0.82f else size.width * 0.18f
+    moveTo(backX, size.height * 0.15f)
+    lineTo(tipX, size.height * 0.5f)
+    lineTo(backX, size.height * 0.85f)
+    close()
 }

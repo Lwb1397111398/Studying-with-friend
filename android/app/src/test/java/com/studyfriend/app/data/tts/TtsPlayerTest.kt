@@ -379,4 +379,43 @@ class TtsPlayerTest {
 
         assertEquals("引擎 stop 抛异常时仍回 Idle 不闪退", TtsState.Idle, player.state.value)
     }
+
+    // ---------- 13. 起点朗读切片（2026-11-28 起点朗读轮）：ttsSliceFrom 三件口径一致 ----------
+
+    @Test
+    fun ttsSliceFrom_midStart_slicesAllThreeConsistently() {
+        val texts = listOf("第一段甲。第一段乙。", "第二段完整句。", "第三段甲！第三段乙？第三段丙。")
+        val ids = listOf(11L, 22L, 33L)
+
+        val s = ttsSliceFrom(texts, ids, startIdx = 1)
+
+        assertEquals("拼接文本从起点段起、\\n 连接", "第二段完整句。\n第三段甲！第三段乙？第三段丙。", s.text)
+        assertEquals("每段句数只算切片后的段", listOf(1, 3), s.paraCounts)
+        assertEquals("段 id 表同步切片", listOf(22L, 33L), s.paraIds)
+        // 切片后句→段映射仍能对上：第 0 句落起点段，第 3 句（切片口径）落第二段
+        assertEquals(0, sentenceToParaIndex(s.paraCounts, 0))
+        assertEquals(1, sentenceToParaIndex(s.paraCounts, 3))
+    }
+
+    @Test
+    fun ttsSliceFrom_startAndOutOfRange() {
+        val texts = listOf("甲。", "乙。乙。")
+        val ids = listOf(1L, 2L)
+
+        // 起点 0 = 全文口径，与 toggleTts 现状一致
+        assertEquals("甲。\n乙。乙。", ttsSliceFrom(texts, ids, 0).text)
+        assertEquals(listOf(1, 2), ttsSliceFrom(texts, ids, 0).paraCounts)
+        // 负数收敛到 0；越界收敛到 size（空素材，上层报「没有可朗读的内容」）
+        assertEquals("甲。\n乙。乙。", ttsSliceFrom(texts, ids, -5).text)
+        assertTrue(ttsSliceFrom(texts, ids, 99).paraIds.isEmpty())
+        assertEquals("", ttsSliceFrom(texts, ids, 99).text)
+    }
+
+    @Test
+    fun ttsSliceFrom_emptyInputYieldsEmptySlice() {
+        val s = ttsSliceFrom(emptyList(), emptyList(), 0)
+        assertEquals("", s.text)
+        assertTrue(s.paraCounts.isEmpty())
+        assertTrue(s.paraIds.isEmpty())
+    }
 }

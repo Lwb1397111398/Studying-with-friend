@@ -661,7 +661,8 @@ private fun ThemeSwatch(
 
 /**
  * 划词浮条（P7 + 划词扩选轮 + 学习闭环轮）：定位在选中文字上方，问含义问的就是当前高亮的整块；
- * 「扩句/扩段」一键改选区（拖拽把手之外的快捷路径），「记一笔」把选中原文带进批注草稿，复制取当前高亮。
+ * 「扩句/扩段」一键改选区（拖拽把手之外的快捷路径），「记一笔」把选中原文带进批注草稿，复制取当前高亮；
+ * 「朗读」从选中文字所在段落开始听书（起点朗读轮，2026-11-28）。
  */
 @Composable
 internal fun SelectionFloatBar(
@@ -671,6 +672,7 @@ internal fun SelectionFloatBar(
     onExpandSentence: () -> Unit,
     onExpandPara: () -> Unit,
     onMemo: () -> Unit,
+    onSpeakFrom: () -> Unit,
     onCopy: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -729,6 +731,12 @@ internal fun SelectionFloatBar(
                     contentPadding = PaddingValues(horizontal = 8.dp),
                 ) {
                     Text("记一笔", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                }
+                TextButton(
+                    onClick = onSpeakFrom,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("朗读", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
                 TextButton(
                     onClick = onCopy,
