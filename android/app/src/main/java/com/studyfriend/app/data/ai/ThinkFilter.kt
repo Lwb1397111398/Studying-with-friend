@@ -7,8 +7,13 @@ package com.studyfriend.app.data.ai
  * delta、吐可见增量，一处过滤全部消费者受益（随手问/换个讲法/讲解/总结/粗读/判卷），
  * 落库内容也不会再混入思考段。标签被分片切断（如 `<thi` + `nk>`）不漏、不提前上屏；
  * 未闭合的 think（正文被思考吃光/请求中断）不吃正文。
+ *
+ * 思考过程回调（2026-11-28 老板诉求「思考亮出来、思考完折叠」）：[onThink] 非 null 时
+ * 思考段增量实时回调（顺序与模型产出一致，含分片扣住的尾巴），供盯屏弹层（随手问/
+ * 换个讲法）实时显示思考过程；null=照旧静默滤除（讲解/总结/粗读等后台任务零变化）。
+ * 思考只走回调，不进返回值/落库/AI 运行日志（日志保持正文口径）。
  */
-internal class ThinkSuppressor {
+internal class ThinkSuppressor(private val onThink: ((String) -> Unit)? = null) {
     private var inThink = false
     private val pending = StringBuilder()
 
@@ -20,10 +25,13 @@ internal class ThinkSuppressor {
             if (inThink) {
                 val close = pending.indexOf(TAG_CLOSE)
                 if (close < 0) {
-                    // 思考中：全部丢弃，仅留可能是闭合标签前缀的尾巴防分片漏判
-                    holdBack(TAG_CLOSE)
+                    // 思考中：尾部可能是闭合标签前缀的先扣住防分片漏判，其余是确定的思考文本
+                    val hold = tailPrefixLen(TAG_CLOSE)
+                    emitThink(pending.substring(0, pending.length - hold))
+                    pending.delete(0, pending.length - hold)
                     return out.toString()
                 }
+                if (close > 0) emitThink(pending.substring(0, close))
                 pending.delete(0, close + TAG_CLOSE.length)
                 inThink = false
             } else {
@@ -43,17 +51,19 @@ internal class ThinkSuppressor {
         }
     }
 
-    /** 流结束：放行扣着的非标签尾巴；仍在 think 里（未闭合）则不再吐任何内容 */
+    /** 流结束：放行扣着的非标签尾巴；仍在 think 里（未闭合）则思考尾巴亮给 onThink、不并入正文 */
     fun finish(): String {
         val rest = pending.toString()
         pending.clear()
-        return if (inThink) "" else rest
+        return if (inThink) {
+            emitThink(rest)
+            ""
+        } else rest
     }
 
-    /** 只留 buf 末尾「是 tag 真前缀」的那段，其余删除（思考段不再膨胀内存） */
-    private fun holdBack(tag: String) {
-        val hold = tailPrefixLen(tag)
-        pending.delete(0, pending.length - hold)
+    /** 思考增量回调（空串不触发；onThink=null 时整段思考静默丢弃，与旧版一致） */
+    private fun emitThink(text: String) {
+        if (text.isNotEmpty()) onThink?.invoke(text)
     }
 
     /** pending 末尾恰好是 tag 的真前缀（不含全等，全等走 indexOf 分支）时的长度 */

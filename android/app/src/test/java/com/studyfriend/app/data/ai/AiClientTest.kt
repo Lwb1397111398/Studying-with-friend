@@ -75,6 +75,32 @@ class AiClientTest {
     }
 
     @Test
+    fun chat_onThink_receivesThinking_bodyAndLogStayClean() {
+        // 老板诉求「思考亮出来」（2026-11-28）：思考增量另路进 onThink（随手问/换个讲法
+        // 盯屏显示用）；正文 onDelta、返回值、AI 运行日志一律不含思考（落库口径不变）
+        val server = MiniHttpServer { _, _, _, resp ->
+            resp.sse(listOf("<th", "ink>英文草稿", "更多思考", "</thi", "nk>", "判断婴儿", "是否已出生"))
+        }
+        try {
+            val thinks = mutableListOf<String>()
+            val deltas = mutableListOf<String>()
+            AiLogBus.clear()
+            val full = runBlocking {
+                AiClient.chat(request(server.baseUrl).copy(onThink = { thinks.add(it) })) { deltas.add(it) }
+            }
+            assertEquals("判断婴儿是否已出生", full)
+            assertEquals(listOf("判断婴儿", "是否已出生"), deltas)
+            assertEquals("英文草稿更多思考", thinks.joinToString(""))
+            // AI 运行日志保持正文口径：text/chars 都不含思考
+            val log = AiLogBus.snapshots.value[0]
+            assertEquals(full, log.text)
+            assertEquals(full.length, log.chars)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun chat_requestHasAuthHeaderStreamAndModel() {
         val auth = ConcurrentLinkedQueue<String>()
         val bodies = ConcurrentLinkedQueue<String>()

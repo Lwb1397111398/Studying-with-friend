@@ -78,6 +78,13 @@ internal fun QuickQaSheet(
     var history by remember { mutableStateOf(listOf<QuickQa.Turn>()) }
     // null = 空闲；"" = 请求中还没收到 delta；非空 = 流式正文
     var streaming by remember { mutableStateOf<String?>(null) }
+    // 思考过程（2026-11-28 老板诉求「思考亮出来、思考完折叠」）：null=本轮无思考；
+    // 非空=思考累积文本。thinkingDone=正文首字已到（折叠）；thinkOpen=折叠行点开
+    var thinking by remember { mutableStateOf<String?>(null) }
+    var thinkingDone by remember { mutableStateOf(false) }
+    var thinkOpen by remember { mutableStateOf(false) }
+    var thinkStartMs by remember { mutableStateOf(0L) }
+    var thinkMs by remember { mutableStateOf(0L) }
     var error by remember { mutableStateOf<String?>(null) }
     var lastQuestion by remember { mutableStateOf(defaultQuestion) }
     var noKey by remember { mutableStateOf(false) }
@@ -101,6 +108,10 @@ internal fun QuickQaSheet(
             error = null
             noKey = false
             streaming = ""
+            thinking = null
+            thinkingDone = false
+            thinkOpen = false
+            thinkMs = 0L
             try {
                 // KeyStore 解密（binder IPC）+ 首次读 assets 提示词是同步重活，别在主线程做
                 val prepared = withContext(Dispatchers.IO) {
@@ -118,6 +129,9 @@ internal fun QuickQaSheet(
                 // 逐 delta 全文重拼字符串是 O(n²) 拷贝且每个 delta 触发整卡重组+滚动，长回答越到后面越卡
                 val answer = StringBuilder()
                 var lastFlush = 0L
+                // 思考段同款节流：推理模型思考先流出（正文首字到达时折叠定格时长）
+                val thinkBuf = StringBuilder()
+                var lastThinkFlush = 0L
                 val result = AiClient.chat(
                     ChatRequest(
                         baseUrl = llm.baseUrl,
@@ -128,8 +142,23 @@ internal fun QuickQaSheet(
                         maxTokens = 4000,
                         source = "随手问",
                         messages = QuickQa.messages(systemPrompt, ctx, history, question),
+                        onThink = { t ->
+                            if (thinkBuf.isEmpty()) thinkStartMs = System.currentTimeMillis()
+                            thinkBuf.append(t)
+                            val now = System.currentTimeMillis()
+                            if (now - lastThinkFlush >= QA_STREAM_FLUSH_MS) {
+                                lastThinkFlush = now
+                                thinking = thinkBuf.toString()
+                            }
+                        },
                     ),
                 ) { delta ->
+                    if (!thinkingDone && thinking != null) {
+                        // 正文首字到达：思考折叠定格（补刷节流窗口里的思考尾巴）
+                        thinkingDone = true
+                        thinkMs = System.currentTimeMillis() - thinkStartMs
+                        thinking = thinkBuf.toString()
+                    }
                     answer.append(delta)
                     val now = System.currentTimeMillis()
                     if (now - lastFlush >= QA_STREAM_FLUSH_MS) {
@@ -168,9 +197,9 @@ internal fun QuickQaSheet(
 
     // 打开即自动发默认问题（老板诉求：选中直接问，不用再打字）
     LaunchedEffect(Unit) { ask(defaultQuestion) }
-    // 新回答/流式增长时滚到底（index 越界由列表自行 clamp；用当前条目数更稳）
-    LaunchedEffect(history.size, streaming?.length, error, noKey) {
-        if (history.isNotEmpty() || streaming != null || error != null || noKey) {
+    // 新回答/流式增长/思考增长时滚到底（index 越界由列表自行 clamp；用当前条目数更稳）
+    LaunchedEffect(history.size, streaming?.length, thinking?.length, error, noKey) {
+        if (history.isNotEmpty() || streaming != null || thinking != null || error != null || noKey) {
             val last = listState.layoutInfo.totalItemsCount - 1
             if (last >= 0) listState.scrollToItem(last)
         }
@@ -239,6 +268,47 @@ internal fun QuickQaSheet(
                         }
                     }
                 }
+                // 思考过程区（2026-11-28）：推理模型思考实时上屏，正文首字到达后折叠
+                // 成一行可点开；非推理模型 thinking 为 null 整块不出现，零影响
+                if (thinking != null) {
+                    item {
+                        if (!thinkingDone) {
+                            Column {
+                                Text(
+                                    "搭子正在想…",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                if (!thinking.isNullOrBlank()) {
+                                    Text(
+                                        thinking!!,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                }
+                            }
+                        } else {
+                            Column {
+                                TextButton(onClick = { thinkOpen = !thinkOpen }) {
+                                    Text(
+                                        if (thinkOpen) "收起思考过程"
+                                        else "已思考 ${com.studyfriend.app.data.ai.AiLogBus.fmtSec(thinkMs / 1000.0)} · 点开看思考过程",
+                                        style = MaterialTheme.typography.labelMedium,
+                                    )
+                                }
+                                if (thinkOpen) {
+                                    Text(
+                                        thinking!!,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(bottom = 4.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
                 if (streaming != null) {
                     item {
                         Surface(
@@ -247,7 +317,7 @@ internal fun QuickQaSheet(
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text(
-                                streaming!!.ifBlank { "搭子正在想…" },
+                                streaming!!.ifBlank { "搭子正在写…" },
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.padding(10.dp),
                             )
