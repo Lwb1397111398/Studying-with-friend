@@ -22,6 +22,7 @@ sealed interface RoughRunState {
         val chapterId: Long,
         val done: Int,
         val total: Int,
+        val skipped: Int = 0, // 续跑跳过的已完成块数（>0 时 UI 显示「续跑」，与重读可区分）
     ) : RoughRunState
 
     /** 全部块完成（含归并降级/保留旧值这两种"成功但有提示"形态；degraded=要点是降级值，可重试归并） */
@@ -83,8 +84,8 @@ class RoughReadRunner(
     fun start(chapterId: Long, force: Boolean = false) = launchTask(chapterId, "粗读启动失败") {
         setState(RoughRunState.Running(chapterId, 0, 0))
         val outcome = RoughReadPlanner(db, context, settings, chatJsonFn)
-            .run(chapterId, force = force) { done, total ->
-                setState(RoughRunState.Running(chapterId, done, total))
+            .run(chapterId, force = force) { done, total, skipped ->
+                setState(RoughRunState.Running(chapterId, done, total, skipped))
             }
         finishState(chapterId, outcome)
     }

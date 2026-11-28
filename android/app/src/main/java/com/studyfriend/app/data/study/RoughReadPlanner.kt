@@ -104,7 +104,7 @@ class RoughReadPlanner(
         chapterId: Long,
         force: Boolean = false,
         mergeOnly: Boolean = false,
-        onProgress: suspend (done: Int, total: Int) -> Unit = { _, _ -> },
+        onProgress: suspend (done: Int, total: Int, skipped: Int) -> Unit = { _, _, _ -> },
     ): RoughReadOutcome = withContext(Dispatchers.IO) {
         val chapter = db.chapterDao().byIdOnce(chapterId)
             ?: throw PlannerException("章节不存在")
@@ -143,6 +143,7 @@ class RoughReadPlanner(
         val blockGists = arrayOfNulls<String>(blocks.size)
         val blockTerms = Array(blocks.size) { emptyList<KeyTermsCodec.TermPlain>() }
         var done = 0
+        var skipped = 0 // 续跑跳过的已完成块数（断点续跑证据，UI 显示「续跑」用）
         var interruptedAt: Int? = null
         var interruptedReason: String? = null
 
@@ -159,7 +160,8 @@ class RoughReadPlanner(
                     val allMarked = block.paragraphs.all { it.aiAction != AiAction.NONE.name }
                     if (!force && allMarked) {
                         done++
-                        onProgress(done, blocks.size)
+                        skipped++
+                        onProgress(done, blocks.size, skipped)
                         continue
                     }
                     try {
@@ -170,7 +172,7 @@ class RoughReadPlanner(
                         blockTerms[bi] = outcome.plan.keyTerms.take(10)
                             .map { KeyTermsCodec.TermPlain(it.term.take(30), it.plain.take(60)) }
                         done++
-                        onProgress(done, blocks.size)
+                        onProgress(done, blocks.size, skipped)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -193,7 +195,7 @@ class RoughReadPlanner(
             }
         } else {
             done = blocks.size
-            onProgress(done, blocks.size)
+            onProgress(done, blocks.size, skipped)
         }
 
         var degraded = false

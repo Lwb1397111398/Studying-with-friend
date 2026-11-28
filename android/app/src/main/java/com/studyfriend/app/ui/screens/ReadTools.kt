@@ -146,7 +146,12 @@ internal fun ChapterToolsRow(
             val roughRunning = runState as? RoughRunState.Running
             val roughLabel = when {
                 pureToc || paragraphCount == 0 -> "目录章"
-                runningThis -> if ((roughRunning?.total ?: 0) == 0) "粗读规划中" else "粗读 ${roughRunning!!.done}/${roughRunning.total}"
+                // 续跑（断点跳块 skipped>0）明说「续跑」，与重读可区分（2026-11-28 老板误会「低效重读」）
+                runningThis -> when {
+                    (roughRunning?.total ?: 0) == 0 -> "粗读规划中"
+                    (roughRunning?.skipped ?: 0) > 0 -> "续跑 ${roughRunning!!.done}/${roughRunning.total}"
+                    else -> "粗读 ${roughRunning!!.done}/${roughRunning.total}"
+                }
                 queuedThis -> "粗读排队中"
                 allMarked -> "重读"
                 partiallyMarked -> "继续 $markedCount/$paragraphCount"
@@ -220,8 +225,10 @@ internal fun ChapterToolsRow(
                     // （装机实录：原来显示「粗读 0/0」死条不动，老板看不到进度）
                     TaskProgressRow(label = "搭子正在通读本章，规划讲解单元…", progress = -1f, onStop = onStop)
                 } else {
+                    // 断点续跑（skipped>0=已跳过的完成块数）明说，别让老板误判成从头重读
                     TaskProgressRow(
-                        label = "搭子正在粗读 ${r.done}/${r.total}",
+                        label = if (r.skipped > 0) "从断点续跑 ${r.done}/${r.total}（已完成 ${r.skipped} 块直接跳过）"
+                        else "搭子正在粗读 ${r.done}/${r.total}",
                         progress = r.done.toFloat() / r.total,
                         onStop = onStop,
                     )

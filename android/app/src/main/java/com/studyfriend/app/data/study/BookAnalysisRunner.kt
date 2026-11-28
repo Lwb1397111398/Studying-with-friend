@@ -107,7 +107,7 @@ class BookAnalysisRunner(
             // 粗读：无正文内容的漏网假章抛 PlannerException → 跳过继续，不整书中断
             try {
                 progress("粗读", 0, 0)
-                val outcome = roughPlanner.run(chapter.id) { d, t -> progress("粗读", d, t) }
+                val outcome = roughPlanner.run(chapter.id) { d, t, _ -> progress("粗读", d, t) }
                 if (outcome.interruptedAtBlock != null) {
                     return BookAnalysisState.Interrupted(
                         bookId,

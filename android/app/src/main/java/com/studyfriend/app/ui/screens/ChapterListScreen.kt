@@ -624,10 +624,17 @@ private fun ChapterRow(
 
         when {
             runningThis && runState is RoughRunState.Running -> {
-                // 规划阶段（total 还是 0）显示「规划中」，不显示 0/0 死数（装机实录「看不到进度」）
+                // 规划阶段（total 还是 0）显示「规划中」，不显示 0/0 死数（装机实录「看不到进度」）；
+                // 断点续跑（skipped>0）显示「续跑」，与从头重读可区分（2026-11-28 老板误会「低效重读」）
                 if (runState.total == 0) {
                     Text(
                         "规划中",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else if (runState.skipped > 0) {
+                    Text(
+                        "续跑 ${runState.done}/${runState.total}",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                     )

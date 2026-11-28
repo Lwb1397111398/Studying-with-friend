@@ -305,10 +305,13 @@ class RoughReadPlannerTest {
         val fake2CallsStart = fake.blockCalls
         fake.onBlock = { _, _ -> fullPlan(listOf(1), gist = "块2") }
         fake.onMerge = { _, _ -> MergedOverview("重读归并G") }
-        val outcome = plannerWithKey(db, fake).run(chapterId)
+        val progressLog = mutableListOf<Triple<Int, Int, Int>>() // (done, total, skipped)
+        val outcome = plannerWithKey(db, fake).run(chapterId) { d, t, s -> progressLog.add(Triple(d, t, s)) }
 
         assertNull(outcome.interruptedAtBlock)
         assertEquals("块 1 应跳过，仅块 2 重跑", fake2CallsStart + 1, fake.blockCalls)
+        assertEquals("续跑上报 skipped=1（2026-11-28 续跑可见化）", 1, progressLog.last().third)
+        assertEquals("最终进度 2/2", 2 to 2, progressLog.last().first to progressLog.last().second)
         val paras = db.paragraphDao().byChapter(chapterId)
         assertEquals("EXPLAIN", paras[0].aiAction)
         assertEquals("EXPLAIN", paras[1].aiAction)
