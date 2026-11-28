@@ -149,6 +149,7 @@ class SettingsRepository(
             apiKey = key,
             model = target.model.ifBlank { DEFAULT_MODEL },
             temperature = target.temperature.coerceIn(0.0, 1.0),
+            reasoningEffort = target.reasoningEffort,
         )
     }
 

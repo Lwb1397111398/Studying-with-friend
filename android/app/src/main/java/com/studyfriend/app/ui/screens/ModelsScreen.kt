@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.IconButton
@@ -466,6 +467,27 @@ private fun EditorDialog(vm: ModelsViewModel) {
                         value = ed.tempText,
                         onValueChange = { v -> vm.updateEditor { it.copy(tempText = v) } },
                         label = "温度（0.0–1.0，非法值用 0.3）",
+                    )
+                    // 思考强度（2026-11-28）：四档单选存进档案，随全部文本链路请求走
+                    // （粗读/讲解/总结/总览/随手问/换个讲法/判卷）；视觉转写不传。
+                    Text(
+                        "思考强度",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("" to "默认", "low" to "低", "medium" to "中", "high" to "高").forEach { (v, label) ->
+                            FilterChip(
+                                selected = ed.effort == v,
+                                onClick = { vm.updateEditor { it.copy(effort = v) } },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text(
+                        "推理模型「想多深」的调节；选默认就不发该参数（模型不支持时用它）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(

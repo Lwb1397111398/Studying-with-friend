@@ -175,6 +175,7 @@ class SummaryPlanner(
         baseUrl = llm.baseUrl, apiKey = llm.apiKey, model = llm.model,
         source = "章末总结",
         temperature = 0.4,
+        reasoningEffort = llm.reasoningEffort.takeIf { it.isNotBlank() },
         // 推理型模型的思考 token 计入 max_tokens：五件套输出长，预算须给足
         maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,
         messages = listOf(AiMessage("system", systemPrompt), AiMessage("user", userJson)),

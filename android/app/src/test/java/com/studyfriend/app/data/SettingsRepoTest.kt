@@ -110,6 +110,34 @@ class SettingsRepoTest {
     }
 
     @Test
+    fun reasoningEffort_roundTrip_resolvePassesThrough_andLegacyJsonDefaultsBlank() = runBlocking {
+        val database = db()
+        val repo = SettingsRepository(database, FakeSecretStore())
+        try {
+            repo.seedMainProfile("https://api.example.com/v1", "m1", 0.3, "k")
+            // 设置思考强度 → 档案回读 + resolveLlm 透传
+            val p = repo.loadLlm().profiles[0].copy(reasoningEffort = "high")
+            repo.saveProfile(p, null)
+            assertEquals("high", repo.loadLlm().profiles[0].reasoningEffort)
+            assertEquals("high", repo.resolveLlm(LlmRole.MAIN)!!.reasoningEffort)
+            // 调回默认 → 透传空串（请求体不发 reasoning_effort 的口径）
+            repo.saveProfile(p.copy(reasoningEffort = ""), null)
+            assertEquals("", repo.resolveLlm(LlmRole.MAIN)!!.reasoningEffort)
+
+            // 旧档案 JSON（该字段出现前的形状）回读兼容：缺字段自动回默认空串
+            val legacyJson =
+                """[{"id":"old1","name":"旧档案","baseUrl":"https://old.example.com/v1","model":"m0","temperature":0.3}]"""
+            database.settingDao().upsert(SettingEntity(SettingsRepository.KEY_LLM_PROFILES, legacyJson))
+            val legacy = repo.loadLlm().profiles
+            assertEquals(1, legacy.size)
+            assertEquals("old1", legacy[0].id)
+            assertEquals("", legacy[0].reasoningEffort)
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
     fun resolveLlm_roleFallbacks_andVision2OptIn() = runBlocking {
         val database = db()
         val repo = SettingsRepository(database, FakeSecretStore())

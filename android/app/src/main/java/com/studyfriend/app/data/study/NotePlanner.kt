@@ -236,6 +236,7 @@ class NotePlanner(
                     // 推理型模型的思考 token 计入 max_tokens：讲解卡主体长，预算须给足
                     maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,
                     source = "段落讲解",
+                    reasoningEffort = llm.reasoningEffort.takeIf { it.isNotBlank() },
                     messages = listOf(
                         AiMessage("system", systemPrompt),
                         AiMessage("user", userJson),

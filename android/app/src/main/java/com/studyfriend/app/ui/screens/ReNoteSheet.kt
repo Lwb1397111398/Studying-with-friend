@@ -107,6 +107,7 @@ internal fun ReNoteSheet(
                         temperature = 0.6,
                         maxTokens = 4000,
                         source = "换个讲法",
+                        reasoningEffort = llm.reasoningEffort.takeIf { it.isNotBlank() },
                         messages = ReNote.messages(systemPrompt, paragraphText, note),
                         onThink = { t ->
                             if (thinkBuf.isEmpty()) thinkStartMs = System.currentTimeMillis()

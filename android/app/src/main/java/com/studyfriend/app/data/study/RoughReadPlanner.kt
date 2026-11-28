@@ -293,6 +293,7 @@ class RoughReadPlanner(
             model = noteLlm.model,
             source = "粗读",
             temperature = 0.2,
+            reasoningEffort = noteLlm.reasoningEffort.takeIf { it.isNotBlank() },
             // 推理型模型的思考 token 计入 max_tokens：预算不足会被思考吃光、正文截断
             maxTokens = (block.paragraphs.size * AiBudgets.ROUGH_READ_PER_PARA_TOKENS + AiBudgets.ROUGH_READ_BASE_TOKENS)
                 .coerceIn(AiBudgets.OUTPUT_TOKENS_ROUGH_MIN, AiBudgets.OUTPUT_TOKENS_ROUGH_MAX),
@@ -361,6 +362,7 @@ class RoughReadPlanner(
                         baseUrl = mainLlm.baseUrl, apiKey = mainLlm.apiKey, model = mainLlm.model,
                         source = "粗读归并",
                         temperature = 0.2,
+                        reasoningEffort = mainLlm.reasoningEffort.takeIf { it.isNotBlank() },
                         // 原值 800 会被推理模型的思考 token 吃光导致正文截断
                         maxTokens = AiBudgets.OUTPUT_TOKENS_ROUGH_MIN,
                         messages = listOf(

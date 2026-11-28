@@ -15,6 +15,12 @@ data class LlmProfile(
     val baseUrl: String,
     val model: String,
     val temperature: Double = 0.3,
+    /**
+     * 思考强度（2026-11-28 老板诉求）："" = 跟随服务商默认（不传参数，旧档案兼容）；
+     * low / medium / high = 请求体带 reasoning_effort（OpenAI 兼容口径）。
+     * 仅文本链路消费；视觉转写不传（转写是纯提取任务，思考拖慢且部分视觉模型拒收）。
+     */
+    val reasoningEffort: String = "",
 )
 
 /**
@@ -42,6 +48,8 @@ data class ResolvedLlm(
     val apiKey: String,
     val model: String,
     val temperature: Double,
+    /** 思考强度："" = 不传（服务商默认）；low/medium/high 透传 reasoning_effort */
+    val reasoningEffort: String = "",
 )
 
 /** 档案页快照：档案列表 + 分配 + 哪些档案已存 Key（明文不出库，keyIds 供 UI 显示状态） */

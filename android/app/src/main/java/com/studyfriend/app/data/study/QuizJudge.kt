@@ -67,6 +67,7 @@ object QuizJudge {
                     // P0-② 降档梯子：JSON mode 首选，网关拒收/解析不过自动降纯 prompt 档
                     jsonMode = true,
                     source = "AI 判卷",
+                    reasoningEffort = llm.reasoningEffort.takeIf { it.isNotBlank() },
                     messages = listOf(
                         AiMessage("system", systemPrompt),
                         AiMessage("user", userJson(question, myAnswer, reference, explain)),

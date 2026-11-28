@@ -57,6 +57,10 @@ data class ChatRequest(
     /** 思考过程回调（2026-11-28 老板诉求「思考亮出来、思考完折叠」）：推理模型 &lt;think&gt; 段
      *  增量，仅盯屏弹层显示用；null=照旧静默滤除。不进返回值/落库/AI 运行日志（日志保持正文口径） */
     val onThink: ((String) -> Unit)? = null,
+    /** 思考强度（2026-11-28）：null/空白 = 不传（服务商默认）；low/medium/high 请求体带
+     *  reasoning_effort（OpenAI 兼容口径，中转站透传最广）。不支持的端点一般忽略未知参数；
+     *  报错时把档案的思考强度调回「默认」即可。 */
+    val reasoningEffort: String? = null,
 )
 
 /**
@@ -374,6 +378,10 @@ object AiClient {
         put("stream", true)
         put("temperature", req.temperature)
         req.maxTokens?.let { put("max_tokens", it) }
+        req.reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            // 思考强度（OpenAI 兼容口径）：空白值不发，保持与服务商默认完全一致的旧行为
+            put("reasoning_effort", it)
+        }
         if (req.jsonMode) {
             // P0-② 降档梯子第 1 档：JSON mode（OpenAI 兼容 response_format）
             put("response_format", buildJsonObject { put("type", "json_object") })

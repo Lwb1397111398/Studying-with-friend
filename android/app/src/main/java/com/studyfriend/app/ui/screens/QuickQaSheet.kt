@@ -141,6 +141,7 @@ internal fun QuickQaSheet(
                         temperature = 0.5,
                         maxTokens = 4000,
                         source = "随手问",
+                        reasoningEffort = llm.reasoningEffort.takeIf { it.isNotBlank() },
                         messages = QuickQa.messages(systemPrompt, ctx, history, question),
                         onThink = { t ->
                             if (thinkBuf.isEmpty()) thinkStartMs = System.currentTimeMillis()

@@ -142,6 +142,7 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
                 baseUrl = p.baseUrl,
                 model = p.model,
                 tempText = p.temperature.toString(),
+                effort = p.reasoningEffort,
                 keyInput = "",
                 hasKey = keyIds.contains(p.id),
                 isNew = false,
@@ -186,6 +187,7 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
                     baseUrl = base,
                     model = model,
                     temperature = temp,
+                    reasoningEffort = ed.effort,
                 )
                 repo.saveProfile(profile, ed.keyInput.takeIf { it.isNotBlank() })
                 editor = null
@@ -272,6 +274,7 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
                         // 推理型模型会先输出思考 token：预算太小只能收到空正文
                         maxTokens = 2048,
                         source = "连通测试",
+                        reasoningEffort = ed.effort.takeIf { it.isNotBlank() },
                         messages = listOf(AiMessage("user", "ping")),
                     ),
                 ) { delta -> editorLiveDelta += delta }
@@ -454,6 +457,8 @@ data class ProfileEditor(
     val baseUrl: String,
     val model: String,
     val tempText: String,
+    /** 思考强度："": 默认（不传）；low / medium / high（弹层四枚 chip 单选） */
+    val effort: String = "",
     val keyInput: String,
     val hasKey: Boolean,
     val isNew: Boolean,

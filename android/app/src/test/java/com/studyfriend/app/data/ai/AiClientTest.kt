@@ -122,6 +122,32 @@ class AiClientTest {
     }
 
     @Test
+    fun chat_reasoningEffort_highGoesInBody_defaultOmitted() {
+        // 思考强度（2026-11-28）：设置 low/medium/high 请求体带 reasoning_effort（OpenAI
+        // 兼容口径）；默认（null/空白）不发——保持与服务商默认完全一致的旧行为
+        val bodies = ConcurrentLinkedQueue<String>()
+        val server = MiniHttpServer { _, _, body, resp ->
+            bodies.add(body)
+            resp.sse(listOf("ok"))
+        }
+        try {
+            runBlocking {
+                AiClient.chat(request(server.baseUrl).copy(reasoningEffort = "high")) {}
+                AiClient.chat(request(server.baseUrl).copy(reasoningEffort = "  ")) {}
+                AiClient.chat(request(server.baseUrl)) {}
+            }
+            val high = bodies.poll()
+            assertTrue("reasoningEffort=high 应进请求体", high.contains("\"reasoning_effort\":\"high\""))
+            // 空白值不发（trim 后为空视为默认）
+            assertTrue(bodies.poll()?.contains("reasoning_effort") != true)
+            // 默认 null 不发
+            assertTrue(bodies.poll()?.contains("reasoning_effort") != true)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun chat_401_friendlyMessage() {
         val server = MiniHttpServer { _, _, _, resp -> resp.status(401, "Unauthorized") }
         try {
