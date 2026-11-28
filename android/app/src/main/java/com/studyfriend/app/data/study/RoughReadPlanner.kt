@@ -289,6 +289,7 @@ class RoughReadPlanner(
             apiKey = noteLlm.apiKey,
             // 逐块批注同属讲解类高频任务，跟讲解角色档案走；章级合并（mergeOverview）仍用主力
             model = noteLlm.model,
+            source = "粗读",
             temperature = 0.2,
             // 推理型模型的思考 token 计入 max_tokens：预算不足会被思考吃光、正文截断
             maxTokens = (block.paragraphs.size * AiBudgets.ROUGH_READ_PER_PARA_TOKENS + AiBudgets.ROUGH_READ_BASE_TOKENS)
@@ -356,6 +357,7 @@ class RoughReadPlanner(
                 val merged = chatJsonFn(
                     ChatRequest(
                         baseUrl = mainLlm.baseUrl, apiKey = mainLlm.apiKey, model = mainLlm.model,
+                        source = "粗读归并",
                         temperature = 0.2,
                         // 原值 800 会被推理模型的思考 token 吃光导致正文截断
                         maxTokens = AiBudgets.OUTPUT_TOKENS_ROUGH_MIN,

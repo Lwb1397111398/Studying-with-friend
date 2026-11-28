@@ -271,6 +271,7 @@ class ModelsViewModel(app: Application) : AndroidViewModel(app) {
                         temperature = AiClient.parseTemperature(ed.tempText),
                         // 推理型模型会先输出思考 token：预算太小只能收到空正文
                         maxTokens = 2048,
+                        source = "连通测试",
                         messages = listOf(AiMessage("user", "ping")),
                     ),
                 ) { delta -> editorLiveDelta += delta }

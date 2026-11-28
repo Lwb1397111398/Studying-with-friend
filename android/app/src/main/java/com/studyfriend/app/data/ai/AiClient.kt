@@ -47,6 +47,8 @@ data class ChatRequest(
     val readTimeoutMs: Int = AiBudgets.READ_TIMEOUT_DEFAULT_MS,
     /** P0-② 降档梯子：true 时请求体带 response_format={"type":"json_object"}；仅 chatJson 链路消费，网关拒收自动降纯 prompt 档 */
     val jsonMode: Boolean = false,
+    /** 来源标签（AI 运行日志显示用，不进请求体）：粗读/段落讲解/随手问…；空则日志回落显示模型名 */
+    val source: String = "",
 )
 
 /**
@@ -138,12 +140,22 @@ object AiClient {
         raw.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it in 0.0..1.0 } ?: fallback
 
     suspend fun chat(req: ChatRequest, onDelta: (String) -> Unit = {}): String {
-        rpmLimiter.acquire()
+        // AI 运行日志（2026-11-28）：begin 在限流前——RPM 排队时长老板也看得见；acquire
+        // 中被取消要回收日志（cancel），不能留一条永远 QUEUED 的僵尸记录
+        val logId = AiLogBus.begin(req.source, req.model)
+        try {
+            rpmLimiter.acquire()
+        } catch (e: CancellationException) {
+            AiLogBus.cancel(logId)
+            throw e
+        }
+        AiLogBus.streaming(logId)
         return withContext(Dispatchers.IO) {
             val conn = try {
                 URL(normalizeChatUrl(req.baseUrl)).openConnection() as HttpURLConnection
             } catch (e: IOException) {
                 // MalformedURLException 等：用户存了非法地址时的专属文案
+                AiLogBus.finish(logId, error = "API 地址格式不正确，请检查设置")
                 throw AiException("API 地址格式不正确，请检查设置")
             }
             val job = coroutineContext[Job]
@@ -173,7 +185,9 @@ object AiClient {
                 // responseCode 返回后立即检查，别等 90s 读超时
                 coroutineContext.ensureActive()
                 if (code !in 200..299) {
-                    throw AiException(friendlyHttp(code, readErrorHead(conn)), httpCode = code)
+                    val msg = friendlyHttp(code, readErrorHead(conn))
+                    AiLogBus.finish(logId, error = msg)
+                    throw AiException(msg, httpCode = code)
                 }
 
                 // think 标签抑制（实景体验轮 2026-11-21）：推理模型（MiniMax-M2.5 实录）把
@@ -192,6 +206,7 @@ object AiClient {
                             if (visible.isNotEmpty()) {
                                 full.append(visible)
                                 onDelta(visible)
+                                AiLogBus.delta(logId, visible)
                             }
                         }
                     }
@@ -200,19 +215,33 @@ object AiClient {
                 if (tail.isNotEmpty()) {
                     full.append(tail)
                     onDelta(tail)
+                    AiLogBus.delta(logId, tail)
                 }
+                AiLogBus.finish(logId)
                 full.toString()
             } catch (e: CancellationException) {
+                AiLogBus.cancel(logId)
                 throw e
             } catch (e: AiException) {
+                AiLogBus.finish(logId, error = e.message)
                 throw e
             } catch (e: IOException) {
                 // disconnect 触发的"取消型" IOException 还原为取消，不冒充网络错误
-                if (job?.isCancelled == true) throw CancellationException("cancelled")
-                throw AiException(friendlyIo(e))
+                if (job?.isCancelled == true) {
+                    AiLogBus.cancel(logId)
+                    throw CancellationException("cancelled")
+                }
+                val msg = friendlyIo(e)
+                AiLogBus.finish(logId, error = msg)
+                throw AiException(msg)
             } catch (e: Exception) {
-                if (job?.isCancelled == true) throw CancellationException("cancelled")
-                throw AiException("请求失败：${e.message ?: "未知错误"}")
+                if (job?.isCancelled == true) {
+                    AiLogBus.cancel(logId)
+                    throw CancellationException("cancelled")
+                }
+                val msg = "请求失败：${e.message ?: "未知错误"}"
+                AiLogBus.finish(logId, error = msg)
+                throw AiException(msg)
             } finally {
                 watcher.cancel()
                 conn.disconnect()

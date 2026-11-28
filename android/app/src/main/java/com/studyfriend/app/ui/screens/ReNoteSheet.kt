@@ -93,6 +93,7 @@ internal fun ReNoteSheet(
                         model = llm.model,
                         temperature = 0.6,
                         maxTokens = 4000,
+                        source = "换个讲法",
                         messages = ReNote.messages(systemPrompt, paragraphText, note),
                     ),
                 ) { delta ->

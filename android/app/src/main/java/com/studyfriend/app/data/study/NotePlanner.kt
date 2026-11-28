@@ -235,6 +235,7 @@ class NotePlanner(
                     temperature = 0.5,
                     // 推理型模型的思考 token 计入 max_tokens：讲解卡主体长，预算须给足
                     maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,
+                    source = "段落讲解",
                     messages = listOf(
                         AiMessage("system", systemPrompt),
                         AiMessage("user", userJson),

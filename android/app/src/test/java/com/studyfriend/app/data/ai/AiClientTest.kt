@@ -113,6 +113,45 @@ class AiClientTest {
         }
     }
 
+    // ---- AI 运行日志埋点（2026-11-28）：chat 全链路应落 AiLogBus 记录 ----
+
+    @Test
+    fun chat_logsDoneSession_withCharsAndSource() {
+        val server = MiniHttpServer { _, _, _, resp -> resp.sse(listOf("你", "好")) }
+        try {
+            AiLogBus.clear()
+            val full = runBlocking { AiClient.chat(request(server.baseUrl).copy(source = "测试链路")) {} }
+            val s = AiLogBus.snapshots.value[0]
+            assertEquals(AiLogState.DONE, s.state)
+            assertEquals("测试链路", s.source)
+            assertEquals(full.length, s.chars)
+            assertEquals(full, s.text)
+            assertNotNull(s.firstDeltaMs)
+            assertNotNull(s.endMs)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun chat_httpFailure_logsErrorSession() {
+        val server = MiniHttpServer { _, _, _, resp -> resp.status(500, "boom") }
+        try {
+            AiLogBus.clear()
+            runBlocking {
+                try {
+                    AiClient.chat(request(server.baseUrl)) {}
+                } catch (_: AiException) {
+                }
+            }
+            val s = AiLogBus.snapshots.value[0]
+            assertEquals(AiLogState.ERROR, s.state)
+            assertTrue(s.error?.isNotBlank() == true)
+        } finally {
+            server.stop()
+        }
+    }
+
     @Test
     fun chat_404_friendlyMessage() {
         val server = MiniHttpServer { _, _, _, resp -> resp.status(404, "Not Found") }

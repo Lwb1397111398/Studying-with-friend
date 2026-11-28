@@ -97,6 +97,7 @@ class VisionTranscriber(
             baseUrl = baseUrl,
             apiKey = apiKey,
             model = model,
+            source = "视觉·转写",
             temperature = 0.1,
             maxTokens = AiBudgets.OUTPUT_TOKENS_VISION_PAGE,
             messages = listOf(
@@ -121,6 +122,7 @@ class VisionTranscriber(
                     baseUrl = baseUrl,
                     apiKey = apiKey,
                     model = model,
+                    source = "视觉·竖排判定",
                     temperature = 0.1,
                     maxTokens = AiBudgets.OUTPUT_TOKENS_VISION_JUDGE,
                     messages = listOf(

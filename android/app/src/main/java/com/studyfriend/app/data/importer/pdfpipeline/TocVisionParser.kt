@@ -202,6 +202,7 @@ class TocVisionParser(
         baseUrl = baseUrl,
         apiKey = apiKey,
         model = model,
+        source = "视觉·目录",
         temperature = 0.1,
         maxTokens = AiBudgets.OUTPUT_TOKENS_VISION_PAGE,
         messages = listOf(

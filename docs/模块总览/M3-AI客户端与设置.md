@@ -23,6 +23,7 @@
 | 取消 | — | 哨兵子协程 `awaitCancellation()` + finally disconnect；取消型 IOException 还原 CancellationException |
 | 错误分层 | — | 401/403→Key 无效、404→路径不存在、429→太频繁/额度尽；错误 body 限读 300 字节 |
 | JSON 剥壳与修复重试 | — | stripFence + 配平扫描；chatJson 失败重试 1 次（空正文翻倍 maxTokens + 换提示）。**P0-② 降档梯子**（借鉴 bilingual_book_maker，MIT）：`ChatRequest.jsonMode=true` 时请求体带 `response_format={"type":"json_object"}`（OpenAI 兼容 JSON mode）；网关 400/422 拒收或解析/校验不过 → 自动降纯 prompt 档（被拒档位本轮不重打），已有输出作 assistant 上下文带入；`validate` 钩子对解析结果做结构校验、失败带纠正语重试一次。`jsonMode=false` 调用方行为与旧版逐字节一致（签名 validate 在 onDelta 前，尾随 lambda 语义不变）。当前唯一消费方：QuizJudge 判卷 |
+| AI 运行日志（2026-11-28） | 设置页入口二级页（Routes.AILOG，AiLogScreen） | 老板诉求「以前完全不知道 AI 有没有运转、速度如何」——`AiLogBus` 内存态日志中枢，埋点收口在 `AiClient.chat`：begin（RPM 排队中可见）→ streaming（首字延迟/实时字数/字/秒）→ finish（完成/失败）或 cancel；`ChatRequest.source` 来源标签（粗读/段落讲解/随手问/章末总结/全书总览/AI 判卷/换个讲法/连通测试/视觉四类）由 12 处构造点传入；chatJson 降档重试落多条=真实反映打了几次请求。日志页每卡显状态徽章+统计行+流式正文（尾部截 3000 字符，点开全文），活跃时 250ms 跳动刷新；条数上限 50 裁最旧；完成时顺手写一行 DiagLog（`AiCall` 标签，导出诊断日志带每次调用耗时字数）。纯内存不落库 |
 
 ## 关键文件
 
@@ -31,12 +32,15 @@ data/LlmProfiles.kt            （新）LlmProfile/LlmAssign/LlmRole/ResolvedLlm
 data/SettingsRepository.kt     loadLlm/saveProfile/deleteProfile/saveAssign/resolveLlm/seedMainProfile（测试）
                                + migrateLegacyLlmIfNeeded（一次性迁移）+ buildVisionTranscribers（改档案源）
 data/ai/AiClient.kt            SSE 客户端 + listModels/normalizeModelsUrl（查找模型底层）
+data/ai/AiLogBus.kt            （新）AI 运行日志中枢：begin/streaming/delta/finish/cancel + snapshots StateFlow
+data/ai/AiRateLimiter.kt       全局 RPM 限流（2026-11-22 第九波）
 data/ai/SecretCrypto.kt        AES/GCM 协议（纯 JVM object）
 data/ai/SecretStore.kt         接口 + KeyStoreSecretStore + FakeSecretStore（测试）
 ui/screens/ModelsViewModel.kt  （重写）档案列表/编辑弹层状态机（ProfileEditor）/指派/查找/测试连接/OCR
 ui/screens/ModelsScreen.kt     （重写）三张书房卡 + 编辑弹层（12dp 圆角输入）+ 指派选择弹层 + 模型选择弹层
 ui/components/SectionCard.kt   （新）书房分区卡共用组件（设置页/模型页）
 ui/screens/SettingsViewModel.kt refreshSummary 改读 loadLlm（主力模型名/Key 状态/讲解/视觉摘要）
+ui/screens/AiLogScreen.kt      （新）AI 运行日志页：状态徽章+统计行+流式正文，250ms 活跃跳动刷新
 data/study/NotePlanner.kt      resolveLlm(NOTE)（讲解档案；落库记实际模型供缓存判定）
 data/study/RoughReadPlanner.kt 逐块批注 resolveLlm(NOTE)；章级归并 resolveLlm(MAIN)
 data/study/SummaryPlanner.kt   resolveLlm(MAIN)（落库 ChapterAssetEntity.model）
@@ -81,6 +85,7 @@ test/.../AiClientTest.kt       14 用例（listModels 解析/裸数组容错/脏
 
 ## 最后更新
 
+- 2026-11-28 **AI 运行日志（老板诉求「完全不知道 AI 有没有运转、速度如何」）**：新 `data/ai/AiLogBus.kt`（object，内存态）+ `ui/screens/AiLogScreen.kt`（Routes.AILOG，设置页入口卡，进行中项数实时显示）。埋点收口 `AiClient.chat`：begin 在 RPM acquire 前（排队时长可见，acquire 中取消回收防僵尸 QUEUED）→ streaming → delta（首字时刻/全量字数/尾部截 3000 字符文本）→ finish（终态幂等；顺手写 DiagLog `AiCall` 一行：排队/首字/字数/字每秒）或 cancel。`ChatRequest` 加 `source: String=""` 标签字段（不进请求体），12 处构造点已补：粗读/粗读归并/段落讲解/章末总结/全书总览/AI 判卷/随手问/换个讲法/连通测试/视觉·转写/视觉·目录/视觉·前言/视觉·竖排判定。日志页：每调用一卡（来源+状态徽章排队中/输出中/完成/失败/已取消+模型+开始时刻），统计行按状态分口径（排队中看排队时长；输出中看首字延迟+已出字数+实时字/秒；完成看首字+均速+总耗时），流式正文默认收 6 行点击展开；活跃时 LaunchedEffect 250ms tick 驱动跳动，全终态停表。AiLogBusTest 10 例（生命周期/取消/错误/幂等/兜底标签/截尾/上限 50/未知 id/格式化）+ AiClientTest +2（MockWebServer 全链路 DONE 断言/HTTP 500 ERROR 断言）。实测坑：`Icons.Filled.DeleteSweep` 不在 material-icons-core（换 Delete）；StateFlow 断言用 `.value` 不用 `first()`（后者要协程包裹）。
 - 2026-11-28 **修「Edge 在线无法点击」**：`SettingsViewModel.chooseTtsEngine` 卫语句白名单漏了 edge（新增三选时没同步更新，点「Edge 在线」chip 被直接 return 弹掉——装机实录根因），三选补全。`tts_engine` 落库值域本来就是三值，仅 VM 层拦截错。
 - 2026-11-22 **TTS 三模式+Edge 在线朗读设为默认（修「点朗读闪退」）**：设置页「朗读」卡引擎 chips 扩为三选（**Edge 在线（新默认）/手机自带/离线模型**），新增 Edge 音色行（`tts_edge_voice`：晓晓/云希，选 Edge 时显示）+ 联网说明文案；`tts_engine` 键值域扩 edge、**坏值/未设置回退从 system 改为 edge**（老板真机点朗读闪退、两条旧引擎路径真机从未出声验证过，Edge 零依赖绕开；显式选过引擎的用户保持其选择）。引入 `com.squareup.okhttp3:okhttp:4.12.0`（WebSocket，java.net.http 要 API 34+）；mockwebserver 同版本仅测试。引擎/协议细节见语音朗读模块总览。
 - 2026-11-22 **AI 请求全局限流（第九波实景体验轮）**：新 `data/ai/AiRateLimiter.kt`（滑动窗口 RPM 限流，借鉴 anx-reader v1.14.0 "Add global AI RPM rate limiting" MIT 学思路自写）——每分钟默认 15 次（`DEFAULT_LIMIT_PER_MINUTE`），窗口内最早一次成功领号起算 60s，满了 acquire 挂起等最早记录滑出（+50ms 余量防时钟精度再睡一轮）；`nowMs`/`delayFn` 注入可测（假时钟推进；**实测坑：假 delayFn 若不推进时钟也不真挂起，acquire 的 while 循环热循环卡死测试**）。接入点唯一：`AiClient.chat` 入口 `rpmLimiter.acquire()`——chatJson 各档/视觉转写/随手问/判卷全部收口 chat 自动覆盖，`listModels` 不限（不是对话请求）。防「一键分析全书」批量链路一分钟打爆免费额度（撞 429 后退避重试反而更费）；正常单章链路（块串行每块数秒）不受影响。测试 AiRateLimiterTest 4 例（未满即领/满了等滑出含等待时长断言/滑窗释放/非法 limit 拒绝）。

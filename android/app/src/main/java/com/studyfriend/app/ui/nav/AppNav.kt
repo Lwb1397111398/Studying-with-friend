@@ -24,6 +24,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.studyfriend.app.data.db.DbValues
+import com.studyfriend.app.ui.screens.AiLogScreen
 import com.studyfriend.app.ui.screens.BookOverviewScreen
 import com.studyfriend.app.ui.screens.ChapterAssetsScreen
 import com.studyfriend.app.ui.screens.ChapterListScreen
@@ -49,6 +50,8 @@ object Routes {
     const val MODELS = "models"
     const val IMPORT = "import"
     const val TOC = "toc"
+    // AI 运行日志（设置页入口的二级页）：实时看每次 AI 调用的流式输出与速度
+    const val AILOG = "ailog"
     const val BOOK = "book/{bookId}"
     // highlight 为可选参数（P5 章节树）：节行点击带节标题，ReadScreen 滚动定位到该段
     // paraId 为可选参数（功能补齐轮全书搜索）：点搜索结果直接滚到命中段，优先级高于 highlight
@@ -164,11 +167,15 @@ fun AppNav() {
                     vm = settingsVm,
                     updateVm = updateVm,
                     onOpenModels = { navController.navigate(Routes.MODELS) },
+                    onOpenAiLog = { navController.navigate(Routes.AILOG) },
                 )
             }
             composable(Routes.MODELS) {
                 val modelsVm: ModelsViewModel = viewModel()
                 ModelsScreen(vm = modelsVm, onBack = { navController.popBackStack() })
+            }
+            composable(Routes.AILOG) {
+                AiLogScreen(onBack = { navController.popBackStack() })
             }
             composable(Routes.IMPORT) {
                 ImportScreen(vm = importVm, onNext = { navController.navigate(Routes.TOC) })

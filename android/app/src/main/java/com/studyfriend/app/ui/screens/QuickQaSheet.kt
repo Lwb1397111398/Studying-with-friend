@@ -126,6 +126,7 @@ internal fun QuickQaSheet(
                         model = llm.model,
                         temperature = 0.5,
                         maxTokens = 4000,
+                        source = "随手问",
                         messages = QuickQa.messages(systemPrompt, ctx, history, question),
                     ),
                 ) { delta ->

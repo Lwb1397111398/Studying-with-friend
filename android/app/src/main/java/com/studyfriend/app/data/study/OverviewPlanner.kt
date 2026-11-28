@@ -108,6 +108,7 @@ class OverviewPlanner(
         userJson: String,
     ) = ChatRequest(
         baseUrl = llm.baseUrl, apiKey = llm.apiKey, model = llm.model,
+        source = "全书总览",
         temperature = 0.5,
         // 推理型模型的思考 token 计入 max_tokens：三件套输出长，预算须给足
         maxTokens = AiBudgets.OUTPUT_TOKENS_PLANNER,

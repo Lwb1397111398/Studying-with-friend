@@ -51,6 +51,7 @@ fun SettingsScreen(
     vm: SettingsViewModel,
     updateVm: UpdateViewModel,
     onOpenModels: () -> Unit,
+    onOpenAiLog: () -> Unit,
 ) {
     // 从模型页改完返回时刷新入口摘要
     LaunchedEffect(Unit) { vm.refreshSummary() }
@@ -99,6 +100,39 @@ fun SettingsScreen(
                         )
                     }
                     Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "进入模型页")
+                }
+            }
+
+            // —— AI 运行日志入口（2026-11-28）：实时看 AI 有没有在干活、流式输出与速度 ——
+            SectionCard {
+                val aiLogs by com.studyfriend.app.data.ai.AiLogBus.snapshots.collectAsState()
+                val running = aiLogs.count {
+                    it.state == com.studyfriend.app.data.ai.AiLogState.QUEUED ||
+                        it.state == com.studyfriend.app.data.ai.AiLogState.STREAMING
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenAiLog)
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (running > 0) "AI 运行日志（进行中 $running 项）" else "AI 运行日志",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (running > 0) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            if (running > 0) "正在干活，点开实时看流式输出与速度"
+                            else "点开看每次 AI 调用的流式输出、首字速度与耗时",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "进入 AI 运行日志")
                 }
             }
 
